@@ -1,0 +1,31 @@
+[project]
+name = "joltiq-api"
+version = "0.1.0"
+requires-python = ">=3.12"
+
+[tool.setuptools.packages.find]
+include = ["joltiq*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+  "mocked: test uses a labelled local fixture instead of a live external service",
+  "live: requires real external credentials",
+  "browser: drives a real Chromium via Playwright",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "S", "UP"]
+ignore = ["S101", "B008", "S311", "E501"]
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "B"]
+"migrations/*" = ["E", "F", "I"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+check_untyped_defs = false

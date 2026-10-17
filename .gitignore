@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+node_modules/
+.next/
+.storage/
+.env
+bin/
+obj/
+*.user
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+coverage/
+test-results/
+playwright-report/
+*.log
