@@ -12,7 +12,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from ..db import Base
 from .base import IdMixin, TenantMixin, TimestampMixin
 
-EMBED_DIM = 384
+from .._dims import EMBED_DIM  # noqa: E402,F401
 
 
 class SlaPolicy(IdMixin, TimestampMixin, TenantMixin, Base):

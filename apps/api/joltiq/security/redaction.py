@@ -21,6 +21,12 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("mac", re.compile(r"\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b")),
 ]
 
+# Self-identification / signature cues followed by a capitalised name ("My name is Jane Doe", "Thanks, Bob").
+_NAME_CUES = re.compile(
+    r"(?i:\b(?:my name is|this is|i am|i'm|name:|regards,|thanks,|thank you,|cheers,|from)\s+)"
+    r"([A-Z][a-z'\-]+(?:\s+[A-Z][a-z'\-]+){0,2})"
+)
+
 # Field names whose values are always masked regardless of content.
 SECRET_KEYS = re.compile(r"(?i)(password|passwd|secret|token|cookie|authorization|api[_-]?key|mfa|otp|private[_-]?key|session)")
 
@@ -54,6 +60,12 @@ def redact_text(text: str, *, extra_terms: list[str] | None = None, keep: set[st
         if new != out:
             findings.append(name)
         out = new
+    def _name(m: re.Match[str]) -> str:
+        findings.append("person_name")
+        return m.group(0)[: m.start(1) - m.start(0)] + "[REDACTED:person_name]"
+
+    if "person_name" not in keep:
+        out = _NAME_CUES.sub(_name, out)
     for term in extra_terms or []:
         if term and len(term) >= 3 and term.lower() in out.lower():
             out = re.sub(re.escape(term), "[REDACTED:name]", out, flags=re.I)
