@@ -45,8 +45,9 @@ def create_app() -> FastAPI:
         start = time.perf_counter()
         try:
             response = await call_next(request)
-        finally:
+        except Exception:
             request_id_var.reset(token)
+            raise
         dur = (time.perf_counter() - start) * 1000
         response.headers["x-request-id"] = rid
         response.headers["x-content-type-options"] = "nosniff"
@@ -61,6 +62,7 @@ def create_app() -> FastAPI:
 
         metrics.observe_request(request.method, request.scope.get("route").path if request.scope.get("route") else "unmatched",
                                 response.status_code, dur)
+        request_id_var.reset(token)
         return response
 
     @app.exception_handler(AppError)

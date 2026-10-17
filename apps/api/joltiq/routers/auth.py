@@ -59,7 +59,9 @@ def me_payload(db: Session, user: User, sess: AuthSession) -> dict:
 
 @router.post("/register", status_code=201)
 def register(body: RegisterIn, request: Request, response: Response, db: Session = Depends(get_raw_session)):
-    hit(db, f"register:{_ip(request)}", 10, 3600)
+    from ..config import get_settings as _gs
+
+    hit(db, f"register:{_ip(request)}", _gs().rate_limit_register_per_hour, 3600)
     user, org = svc.register(db, email=body.email, password=body.password, name=body.name, org_name=body.organization_name)
     _, sess = svc.create_session(db, user, response, org_id=org.id, ip=_ip(request), ua=request.headers.get("user-agent"), mfa_passed=True)
     return me_payload(db, user, sess)

@@ -14,6 +14,7 @@ os.environ.setdefault("JOLTIQ_DATABASE_URL", "postgresql+psycopg://joltiq_app:jo
 os.environ.setdefault("JOLTIQ_MIGRATION_DATABASE_URL", "postgresql+psycopg://postgres:postgres@localhost:5432/joltiq_test")
 os.environ.setdefault("JOLTIQ_LOCAL_STORAGE_DIR", "/tmp/joltiq-test-storage")
 os.environ.setdefault("JOLTIQ_SMTP_PORT", "2525")
+os.environ.setdefault("JOLTIQ_RATE_LIMIT_REGISTER_PER_HOUR", "100000")
 os.environ.setdefault("JOLTIQ_REDIS_URL", "redis://localhost:6379/15")
 
 import pytest  # noqa: E402
