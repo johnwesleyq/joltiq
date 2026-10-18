@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import timezone
+from datetime import UTC
 from typing import Any
 
 from sqlalchemy import select, text
@@ -17,7 +17,7 @@ GENESIS = "0" * 64
 
 
 def _iso(dt) -> str:
-    return dt.astimezone(timezone.utc).isoformat(timespec="microseconds")
+    return dt.astimezone(UTC).isoformat(timespec="microseconds")
 
 
 def _row_digest(prev_hash: str, row: dict[str, Any]) -> str:

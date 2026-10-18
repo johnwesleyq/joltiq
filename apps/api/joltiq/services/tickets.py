@@ -130,7 +130,7 @@ def transition(db: Session, t: Ticket, to: str, *, actor_kind: str, actor_id: An
     if to == S.RESOLVED and t.resolution_verified:
         from .billing import meter
 
-        meter(db, t.org_id, "verified_resolutions", 1, f"verified-resolution:{t.id}:{t.resolved_at.isoformat()}")
+        meter(db, t.org_id, "verified_resolutions", 1, f"verified-resolution:{t.id}:{t.resolved_at.isoformat() if t.resolved_at else ''}")
         if settings.get("auto_close_on_verified"):
             transition(db, t, S.CLOSED, actor_kind="system", reason="auto-closed after verified resolution (tenant policy)")
     return t

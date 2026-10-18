@@ -1,10 +1,12 @@
 "use client";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { ErrorNote, Field, PageHead } from "@/components/ui";
 import { api } from "@/lib/api";
 import { useAct, useMe } from "@/lib/hooks";
 export default function Account() {
   const me = useMe();
+  const router = useRouter();
   const [cur, setCur] = useState(""); const [next, setNext] = useState(""); const [code, setCode] = useState("");
   const resend = useAct(() => api("/auth/resend-verification", { method: "POST" }));
   const change = useAct(() => api("/auth/password/change", { json: { current_password: cur, new_password: next } }));
@@ -28,6 +30,6 @@ export default function Account() {
         <Field label="Code"><input className="input max-w-[180px]" inputMode="numeric" value={code} onChange={(e) => setCode(e.target.value)} /></Field>
         <button className="btn btn-primary" onClick={() => enable.mutate(undefined)}>Turn on</button></> :
        <button className="btn btn-ghost" onClick={() => setup.mutate(undefined)}>Set up an authenticator app</button>}</section>
-    <section><h2 className="text-lg font-bold">Sessions</h2><button className="btn btn-ghost mt-2" onClick={() => logoutAll.mutate(undefined, { onSuccess: () => location.assign("/login") })}>Sign out everywhere</button></section>
+    <section><h2 className="text-lg font-bold">Sessions</h2><button className="btn btn-ghost mt-2" onClick={() => logoutAll.mutate(undefined, { onSuccess: () => router.replace("/login") })}>Sign out everywhere</button></section>
   </div>;
 }

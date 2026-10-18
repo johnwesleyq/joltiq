@@ -181,7 +181,7 @@ def search(db: Session, org_id: uuid.UUID, query: str, *, role: str | None, limi
             .join(KnowledgeDocument, KnowledgeDocument.id == KnowledgeChunk.document_id)
             .where(KnowledgeDocument.status == "indexed"))
     if vis_role not in ("platform_owner",):
-        base = base.where(KnowledgeDocument.visibility.any(vis_role))
+        base = base.where(KnowledgeDocument.visibility.any(vis_role))  # type: ignore[arg-type]  # SQLAlchemy ARRAY.any(value) → value = ANY(col)
     if document_ids:
         base = base.where(KnowledgeDocument.id.in_(document_ids))
     # Keyword: OR semantics over query lexemes so partial matches still rank.
@@ -197,7 +197,7 @@ def search(db: Session, org_id: uuid.UUID, query: str, *, role: str | None, limi
     rows: dict[uuid.UUID, tuple] = {}
     detail: dict[uuid.UUID, dict] = {}
     K = 60
-    for rank, (ch, doc, s) in enumerate(kw):
+    for rank, (ch, doc, _s) in enumerate(kw):
         scores[ch.id] = scores.get(ch.id, 0) + 1 / (K + rank + 1)
         rows[ch.id] = (ch, doc)
         detail.setdefault(ch.id, {})["keyword_rank"] = rank + 1

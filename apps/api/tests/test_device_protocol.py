@@ -7,10 +7,9 @@ import json
 import secrets
 import time
 
+from conftest import ApiClient
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-
-from conftest import ApiClient
 
 
 class FakeDevice:

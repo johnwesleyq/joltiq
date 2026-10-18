@@ -65,11 +65,15 @@ def execute_step(db: Session, run: AgentRun, plan: AgentPlan, step: PlanStep) ->
         db.flush()
     try:
         if step.action == "ticket.comment":
-            t = db.get(Ticket, run.ticket_id)
+            t = db.get(Ticket, run.ticket_id) if run.ticket_id else None
+            if t is None:
+                return _done(db, run, ex, s, "failed", "run has no ticket")
             c = ticket_svc.comment(db, t, dec.params["body"], author_kind="ai")
             ex.result = {"comment_id": str(c.id)}
             return _done(db, run, ex, s, "succeeded")
         if spec_channel == "browser":
+            if s is None or not s.worker_session_ref:  # policy already denies this; defensive
+                return _done(db, run, ex, s, "failed", "no running browser session")
             res = browser_client.act(s.worker_session_ref, step.action, dec.params, actor="ai")
             ex.result = {k: v for k, v in res.items() if k != "page"} | {"page": {"url": (res.get("page") or {}).get("url")}}
             if res.get("auth_required"):
@@ -83,6 +87,8 @@ def execute_step(db: Session, run: AgentRun, plan: AgentPlan, step: PlanStep) ->
             sessions.event(db, s, "action", actor_kind="ai", data={"action": step.action, "params": dec.params, "ok": res.get("ok")})
             return _done(db, run, ex, s, "succeeded" if res.get("ok") else "failed", res.get("error", ""))
         if spec_channel == "desktop":
+            if s is None or device is None:  # policy already denies this; defensive
+                return _done(db, run, ex, s, "failed", "no desktop session/device")
             cmd = queue_command(db, device, action=step.action, params=dec.params, session=s, execution_id=ex.id)
             ex.result = {"command_id": str(cmd.id)}
             sessions.event(db, s, "action_dispatched", actor_kind="ai", data={"action": step.action, "params": dec.params})

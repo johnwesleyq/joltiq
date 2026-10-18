@@ -32,7 +32,7 @@ def _ctx(messages: list[dict]) -> dict[str, Any]:
 
 def _first_sentence(t: str, n: int = 220) -> str:
     t = re.sub(r"\s+", " ", t).strip()
-    m = re.match(r"(.{20,%d}?[.!?])\s" % n, t + " ")
+    m = re.match(r"(.{20," + str(n) + r"}?[.!?])\s", t + " ")
     return (m.group(1) if m else t[:n]).strip()
 
 

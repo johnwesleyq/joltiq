@@ -15,7 +15,6 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import httpx
 import pytest
-
 from conftest import invite_and_join, register
 
 pytestmark = pytest.mark.mocked
@@ -185,8 +184,9 @@ def test_outbound_webhook_signed_and_retried(owner):
         hook = owner.post("/api/v1/admin/webhooks", json={"url": f"http://127.0.0.1:{srv.server_port}/hook", "categories": ["ticket"]}).json()
         owner.post("/api/v1/tickets", json={"subject": "Webhook test ticket"})
         drain()  # first attempt fails (500) → retried later
-        from joltiq.db import session_scope
         from sqlalchemy import text
+
+        from joltiq.db import session_scope
 
         with session_scope(None) as db:
             db.execute(text("update jobs set run_after = now() where kind = 'webhook.deliver' and status = 'queued'"))
@@ -359,9 +359,10 @@ def test_analytics_and_audit_endpoints(app, owner):
 
 def test_platform_admin_requires_platform_owner_and_suspension(app, owner, new_client):
     assert owner.get("/api/v1/admin/platform/tenants").status_code == 403
+    from sqlalchemy import select
+
     from joltiq.db import session_scope
     from joltiq.models import User
-    from sqlalchemy import select
 
     p = register(new_client(), "Platform Co")
     with session_scope(None) as db:

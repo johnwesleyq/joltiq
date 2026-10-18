@@ -1,5 +1,5 @@
 "use client";
-import { use, useEffect, useState } from "react";
+import { use, useState } from "react";
 import { Badge, ErrorNote, Loading, PageHead } from "@/components/ui";
 import { api, fmtDate } from "@/lib/api";
 import { useAct, useApi } from "@/lib/hooks";
@@ -9,13 +9,16 @@ const SECTIONS = ["symptoms", "environment", "prerequisites", "diagnostics", "re
 export default function Article({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const r = useApi<A>(["article", id], `/knowledge/articles/${id}`);
-  const [title, setTitle] = useState(""); const [body, setBody] = useState<Record<string, unknown>>({}); const [comment, setComment] = useState(""); const [exec, setExec] = useState(false);
-  useEffect(() => { if (r.data) { setTitle(r.data.title); setBody(r.data.body); } }, [r.data]);
-  const save = useAct(() => api(`/knowledge/articles/${id}`, { method: "PATCH", json: { title, body } }), [["article", id]]);
-  const review = useAct((decision: string) => api(`/knowledge/articles/${id}/review`, { json: { decision, comment, executable: exec } }), [["article", id], ["karts"]]);
   if (r.isLoading) return <Loading />;
   if (!r.data) return <ErrorNote error={r.error} />;
-  const a = r.data;
+  // Re-key on server state so the editor resets when the article changes (e.g. after a review action).
+  return <Editor key={`${r.data.id}:${r.data.status}`} id={id} a={r.data} />;
+}
+
+function Editor({ id, a }: { id: string; a: A }) {
+  const [title, setTitle] = useState(a.title); const [body, setBody] = useState<Record<string, unknown>>(a.body); const [comment, setComment] = useState(""); const [exec, setExec] = useState(false);
+  const save = useAct(() => api(`/knowledge/articles/${id}`, { method: "PATCH", json: { title, body } }), [["article", id]]);
+  const review = useAct((decision: string) => api(`/knowledge/articles/${id}/review`, { json: { decision, comment, executable: exec } }), [["article", id], ["karts"]]);
   const editable = !["published", "archived"].includes(a.status);
   const external = Boolean(a.body.derived_from_external_research);
   return <div className="max-w-[860px]"><PageHead title="Review article" back={{ href: "/admin/knowledge", label: "Knowledge" }}><Badge value="PENDING" label={a.status} /></PageHead>

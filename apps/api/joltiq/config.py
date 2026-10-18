@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
 
     # 32+ byte secrets. Defaults are for local dev only and refused in production.
-    secret_key: str = "dev-only-change-me-dev-only-change-me-0000"
+    secret_key: str = "dev-only-change-me-dev-only-change-me-0000"  # noqa: S105 - dev default, refused in production
     encryption_key: str = ""  # Fernet key for integration credentials; derived from secret_key in dev
     approval_signing_key: str = "dev-only-approval-key-change-me-0000000000"
 
@@ -36,7 +36,7 @@ class Settings(BaseSettings):
 
     # Workers
     browser_worker_url: str = "http://localhost:8100"
-    browser_worker_token: str = "dev-browser-worker-token-change-me"
+    browser_worker_token: str = "dev-browser-worker-token-change-me"  # noqa: S105 - dev default
 
     # Email
     smtp_host: str = "localhost"

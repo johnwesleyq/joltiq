@@ -32,7 +32,7 @@ def available_providers(db: Session, org_id: uuid.UUID, task: str) -> list[tuple
     tenant data are eligible. The local fixture is eligible only outside production and only if no live provider is."""
     budget = db.execute(select(AIBudget)).scalar_one_or_none()
     order = ((budget.routing or {}).get(task) if budget else None) or DEFAULT_ORDER
-    out = []
+    out: list[tuple[str, str, ModelProviderConfig | None, str | None]] = []
     cfgs = {c.provider: c for c in db.execute(select(ModelProviderConfig)).scalars()}
     for prov in order:
         if prov == "local_fixture":

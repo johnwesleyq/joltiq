@@ -14,8 +14,17 @@ from ..core.errors import AppError, Conflict, Unauthorized
 from ..db import set_tenant
 from ..deps import CSRF_COOKIE, SESSION_COOKIE
 from ..models import (
-    AIBudget, AuthSession, Membership, OneTimeToken, Organization, PolicyRule, SlaPolicy, Subscription,
-    TicketCounter, User, utcnow,
+    AIBudget,
+    AuthSession,
+    Membership,
+    OneTimeToken,
+    Organization,
+    PolicyRule,
+    SlaPolicy,
+    Subscription,
+    TicketCounter,
+    User,
+    utcnow,
 )
 from ..models.enums import Role
 from ..security.crypto import decrypt_secret, encrypt_secret, hash_password, new_token, sha256_hex, verify_password

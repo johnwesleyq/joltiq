@@ -18,8 +18,22 @@ from ..core.errors import AppError, NotFound
 from ..db import get_raw_session
 from ..deps import Ctx, get_ctx, get_platform_ctx, perm
 from ..models import (
-    AIBudget, AuditEvent, Credential, Job, ModelCall, ModelProviderConfig, Notification, NotificationPreference, Organization, PolicyRule,
-    SecurityEvent, Subscription, UsageEvent, User, WebhookEndpoint, utcnow,
+    AIBudget,
+    AuditEvent,
+    Credential,
+    Job,
+    ModelCall,
+    ModelProviderConfig,
+    Notification,
+    NotificationPreference,
+    Organization,
+    PolicyRule,
+    SecurityEvent,
+    Subscription,
+    UsageEvent,
+    User,
+    WebhookEndpoint,
+    utcnow,
 )
 from ..models.enums import RiskLevel
 from ..services import analytics, audit, billing, browser_client, research
@@ -45,6 +59,13 @@ def ser_provider(c: ModelProviderConfig, db: Session) -> dict:
             "platform_key_available": platform_key, "last_test_at": c.last_test_at.isoformat() if c.last_test_at else None,
             "last_test_ok": c.last_test_ok, "last_test_error": c.last_test_error,
             "is_test_fixture": c.provider == "local_fixture", "default_models": DEFAULT_MODELS.get(c.provider, {})}
+
+
+def _org(ctx: Ctx) -> Organization:
+    org = ctx.db.get(Organization, ctx.org_id)
+    if org is None:
+        raise NotFound("Organization not found")
+    return org
 
 
 def _cfg(db: Session, org_id, provider: str) -> ModelProviderConfig:
@@ -252,7 +273,7 @@ def public_branding(host: str = Query(default="", max_length=253), db: Session =
 
 @router.patch("/admin/branding")
 def update_branding(body: BrandingIn, ctx: Ctx = Depends(perm("branding.manage"))):
-    org = ctx.db.get(Organization, ctx.org_id)
+    org = _org(ctx)
     data = body.model_dump(exclude_none=True)
     dom = data.pop("custom_domain", None)
     for k in ("logo_url", "favicon_url"):
@@ -392,14 +413,14 @@ class CheckoutIn(BaseModel):
 
 @router.post("/billing/checkout")
 def checkout(body: CheckoutIn, ctx: Ctx = Depends(perm("billing.manage"))):
-    org = ctx.db.get(Organization, ctx.org_id)
+    org = _org(ctx)
     o = get_settings().web_origin
     return {"url": billing.create_checkout(ctx.db, org, body.plan, body.interval, f"{o}/admin/billing?checkout=success", f"{o}/admin/billing?checkout=cancelled")}
 
 
 @router.post("/billing/portal")
 def portal(ctx: Ctx = Depends(perm("billing.manage"))):
-    org = ctx.db.get(Organization, ctx.org_id)
+    org = _org(ctx)
     return {"url": billing.create_portal(ctx.db, org, f"{get_settings().web_origin}/admin/billing")}
 
 
@@ -491,7 +512,7 @@ def tenants(ctx: Ctx = Depends(get_platform_ctx), pp=Depends(page_params)):
         cost = ctx.db.execute(select(func.coalesce(func.sum(ModelCall.cost_usd), 0)).where(ModelCall.org_id == o.id,
                               ModelCall.created_at >= utcnow() - timedelta(days=30))).scalar()
         return {"id": str(o.id), "name": o.name, "status": o.status, "plan": sub.plan if sub else o.plan, "sub_status": sub.status if sub else None,
-                "ai_cost_30d": round(float(cost), 4), "created_at": o.created_at.isoformat()}
+                "ai_cost_30d": round(float(cost or 0), 4), "created_at": o.created_at.isoformat()}
     return paginate(ctx.db, stmt, pp, m)
 
 

@@ -19,7 +19,16 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..models import ActionExecution, Device, DeviceCommand, SupportSession, TicketComment, VerificationEvidence, VerificationRun, utcnow
+from ..models import (
+    ActionExecution,
+    Device,
+    DeviceCommand,
+    SupportSession,
+    TicketComment,
+    VerificationEvidence,
+    VerificationRun,
+    utcnow,
+)
 from ..models.enums import VerificationStatus as V
 from ..security.redaction import redact_obj
 from . import browser_client

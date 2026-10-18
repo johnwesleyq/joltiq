@@ -60,7 +60,7 @@ def create_app() -> FastAPI:
                                    "status": response.status_code, "ms": round(dur, 1)})
         from .services import metrics
 
-        metrics.observe_request(request.method, request.scope.get("route").path if request.scope.get("route") else "unmatched",
+        metrics.observe_request(request.method, getattr(request.scope.get("route"), "path", "unmatched"),
                                 response.status_code, dur)
         request_id_var.reset(token)
         return response

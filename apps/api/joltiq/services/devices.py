@@ -156,8 +156,10 @@ def authenticate_device(db: Session, *, device_id: str, ts: str, nonce: str, cou
     if not (8 <= len(nonce) <= 64):
         raise Unauthorized("bad nonce")
     pk = serialization.load_pem_public_key(d.public_key_pem.encode())
+    if not isinstance(pk, ec.EllipticCurvePublicKey):
+        raise Unauthorized("device key type not allowed", code="bad_signature")
     try:
-        pk.verify(base64.b64decode(signature), request_string(method, path, ts, nonce, counter, body), ec.ECDSA(hashes.SHA256()))  # type: ignore[union-attr]
+        pk.verify(base64.b64decode(signature), request_string(method, path, ts, nonce, counter, body), ec.ECDSA(hashes.SHA256()))
     except (InvalidSignature, ValueError) as e:
         audit.security_event(db, "device_bad_signature", org_id=d.org_id, severity="critical", data={"device": str(d.id)})
         raise Unauthorized("invalid signature", code="bad_signature") from e

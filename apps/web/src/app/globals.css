@@ -45,3 +45,5 @@ h1, h2, h3 { font-family: var(--font-display); letter-spacing: -0.015em; line-he
 .table tr:last-child td { border-bottom: 0; }
 .pulse { animation: pulse 1.6s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: .45; } }
+.trace-step { animation: trace-in .35s ease-out both; }
+@keyframes trace-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }

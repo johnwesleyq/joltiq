@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
@@ -14,7 +13,6 @@ import time
 
 import httpx
 import pytest
-
 from conftest import invite_and_join
 
 pytestmark = [pytest.mark.mocked]

@@ -1,0 +1,96 @@
+# Local / single-host stack. `docker compose up --build` then open http://localhost:3000
+# Production: see infrastructure/deployment (TLS, managed Postgres, secrets manager, isolated browser node pool).
+name: joltiq
+x-api-env: &api-env
+  JOLTIQ_ENV: ${JOLTIQ_ENV:-development}
+  JOLTIQ_DATABASE_URL: postgresql+psycopg://joltiq_app:${JOLTIQ_APP_DB_PASSWORD:-joltiq_app}@postgres:5432/joltiq
+  JOLTIQ_MIGRATION_DATABASE_URL: postgresql+psycopg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/joltiq
+  JOLTIQ_REDIS_URL: redis://redis:6379/0
+  JOLTIQ_SECRET_KEY: ${JOLTIQ_SECRET_KEY:-dev-only-change-me-dev-only-change-me-0000}
+  JOLTIQ_ENCRYPTION_KEY: ${JOLTIQ_ENCRYPTION_KEY:-}
+  JOLTIQ_APPROVAL_SIGNING_KEY: ${JOLTIQ_APPROVAL_SIGNING_KEY:-dev-only-approval-key-change-me-0000000000}
+  JOLTIQ_AGENT_SIGNING_KEY_PEM: ${JOLTIQ_AGENT_SIGNING_KEY_PEM:-}
+  JOLTIQ_BROWSER_WORKER_URL: http://browser-worker:8100
+  JOLTIQ_BROWSER_WORKER_TOKEN: ${JOLTIQ_BROWSER_WORKER_TOKEN:-dev-browser-worker-token-change-me}
+  JOLTIQ_WEB_ORIGIN: ${JOLTIQ_WEB_ORIGIN:-http://localhost:3000}
+  JOLTIQ_SMTP_HOST: ${JOLTIQ_SMTP_HOST:-mailpit}
+  JOLTIQ_SMTP_PORT: ${JOLTIQ_SMTP_PORT:-1025}
+  JOLTIQ_S3_ENDPOINT: http://minio:9000
+  JOLTIQ_S3_BUCKET: joltiq
+  JOLTIQ_S3_ACCESS_KEY: ${MINIO_ROOT_USER:-joltiq}
+  JOLTIQ_S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-joltiq-minio-secret}
+  JOLTIQ_OPENAI_API_KEY: ${JOLTIQ_OPENAI_API_KEY:-}
+  JOLTIQ_ANTHROPIC_API_KEY: ${JOLTIQ_ANTHROPIC_API_KEY:-}
+  JOLTIQ_GEMINI_API_KEY: ${JOLTIQ_GEMINI_API_KEY:-}
+  JOLTIQ_BRAVE_SEARCH_API_KEY: ${JOLTIQ_BRAVE_SEARCH_API_KEY:-}
+  JOLTIQ_TAVILY_API_KEY: ${JOLTIQ_TAVILY_API_KEY:-}
+  JOLTIQ_STRIPE_SECRET_KEY: ${JOLTIQ_STRIPE_SECRET_KEY:-}
+  JOLTIQ_STRIPE_WEBHOOK_SECRET: ${JOLTIQ_STRIPE_WEBHOOK_SECRET:-}
+  JOLTIQ_OTEL_EXPORTER_ENDPOINT: ${JOLTIQ_OTEL_EXPORTER_ENDPOINT:-}
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment: { POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-postgres}", POSTGRES_DB: joltiq }
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U postgres"], interval: 5s, retries: 20 }
+  redis:
+    image: redis:7.4-alpine
+    healthcheck: { test: ["CMD", "redis-cli", "ping"], interval: 5s }
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address :9001
+    environment: { MINIO_ROOT_USER: "${MINIO_ROOT_USER:-joltiq}", MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-joltiq-minio-secret}" }
+    volumes: [miniodata:/data]
+    ports: ["9001:9001"]
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    depends_on: [minio]
+    entrypoint: ["/bin/sh", "-c", "until mc alias set l http://minio:9000 $${MINIO_ROOT_USER:-joltiq} $${MINIO_ROOT_PASSWORD:-joltiq-minio-secret}; do sleep 1; done; mc mb -p l/joltiq; mc encrypt set sse-s3 l/joltiq || true"]
+  mailpit:
+    image: axllent/mailpit:v1.21
+    ports: ["8025:8025"]
+  migrate:
+    build: { context: ., dockerfile: infrastructure/docker/api.Dockerfile }
+    command: ["sh", "-c", "alembic upgrade head && python -m joltiq.cli set-app-password"]
+    environment:
+      <<: *api-env
+      JOLTIQ_APP_DB_PASSWORD: ${JOLTIQ_APP_DB_PASSWORD:-joltiq_app}
+    depends_on: { postgres: { condition: service_healthy } }
+  api:
+    build: { context: ., dockerfile: infrastructure/docker/api.Dockerfile }
+    environment: *api-env
+    ports: ["8000:8000"]
+    depends_on: { migrate: { condition: service_completed_successfully }, redis: { condition: service_healthy } }
+  worker:
+    build: { context: ., dockerfile: infrastructure/docker/api.Dockerfile }
+    environment: *api-env
+    command: ["python", "-m", "joltiq.worker"]
+    depends_on: { migrate: { condition: service_completed_successfully } }
+    stop_grace_period: 60s
+  browser-worker:
+    build: { context: ., dockerfile: infrastructure/docker/browser-worker.Dockerfile }
+    environment:
+      JOLTIQ_BROWSER_WORKER_TOKEN: ${JOLTIQ_BROWSER_WORKER_TOKEN:-dev-browser-worker-token-change-me}
+    shm_size: "1gb"
+    # No published port: reachable only from the API on the internal network.
+  web:
+    build: { context: ., dockerfile: infrastructure/docker/web.Dockerfile, args: { JOLTIQ_API_URL: "http://api:8000" } }
+    ports: ["3000:3000"]
+    depends_on: [api]
+  temporal:
+    # Optional: durable-execution backend. Runs are durable in Postgres today (see DECISIONS.md D-004);
+    # enable with `docker compose --profile temporal up` while the Temporal worker adapter is completed.
+    image: temporalio/auto-setup:1.25.2
+    profiles: ["temporal"]
+    environment: { DB: postgres12, DB_PORT: 5432, POSTGRES_USER: postgres, POSTGRES_PWD: "${POSTGRES_PASSWORD:-postgres}", POSTGRES_SEEDS: postgres }
+    depends_on: { postgres: { condition: service_healthy } }
+  testapp:
+    # Authorized local test target for browser E2E (FieldDesk demo + fake vendor docs). Never deploy to production.
+    build: { context: ., dockerfile: infrastructure/docker/api.Dockerfile }
+    profiles: ["e2e"]
+    working_dir: /testapp
+    volumes: ["./tests/e2e/testapp:/testapp:ro"]
+    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8300"]
+
+volumes: { pgdata: {}, miniodata: {} }

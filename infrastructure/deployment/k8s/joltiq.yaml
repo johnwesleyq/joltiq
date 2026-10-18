@@ -1,0 +1,169 @@
+# Reference Kubernetes deployment. Prerequisites (not created here): managed PostgreSQL 16 + pgvector with PITR backups,
+# managed Redis, S3 bucket with SSE, a secrets manager synced to the `joltiq-secrets` Secret (External Secrets Operator),
+# cert-manager for TLS, and a dedicated node pool `joltiq/browser=true` (tainted) for browser workers.
+apiVersion: v1
+kind: Namespace
+metadata: { name: joltiq, labels: { pod-security.kubernetes.io/enforce: restricted } }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: joltiq-config, namespace: joltiq }
+data:
+  JOLTIQ_ENV: production
+  JOLTIQ_COOKIE_SECURE: "true"
+  JOLTIQ_ENABLE_LOCAL_FIXTURE_PROVIDERS: "false"
+  JOLTIQ_WEB_ORIGIN: https://app.joltiq.io
+  JOLTIQ_BROWSER_WORKER_URL: http://browser-worker:8100
+---
+apiVersion: batch/v1
+kind: Job
+metadata: { name: joltiq-migrate, namespace: joltiq, annotations: { argocd.argoproj.io/hook: PreSync } }
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: migrate
+          image: ghcr.io/joltiq/api:REPLACE_TAG
+          command: ["sh", "-c", "alembic upgrade head && python -m joltiq.cli set-app-password"]
+          envFrom: [{ configMapRef: { name: joltiq-config } }, { secretRef: { name: joltiq-secrets } }]
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: api, namespace: joltiq }
+spec:
+  replicas: 3
+  strategy: { rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } }
+  selector: { matchLabels: { app: api } }
+  template:
+    metadata: { labels: { app: api }, annotations: { prometheus.io/scrape: "true", prometheus.io/port: "8000", prometheus.io/path: /metrics } }
+    spec:
+      securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: api
+          image: ghcr.io/joltiq/api:REPLACE_TAG
+          ports: [{ containerPort: 8000 }]
+          envFrom: [{ configMapRef: { name: joltiq-config } }, { secretRef: { name: joltiq-secrets } }]
+          readinessProbe: { httpGet: { path: /readyz, port: 8000 }, periodSeconds: 5 }
+          livenessProbe: { httpGet: { path: /healthz, port: 8000 }, periodSeconds: 15 }
+          resources: { requests: { cpu: 500m, memory: 512Mi }, limits: { memory: 1Gi } }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+          volumeMounts: [{ name: tmp, mountPath: /tmp }]
+      volumes: [{ name: tmp, emptyDir: {} }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: worker, namespace: joltiq }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: worker } }
+  template:
+    metadata: { labels: { app: worker } }
+    spec:
+      terminationGracePeriodSeconds: 90
+      securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: worker
+          image: ghcr.io/joltiq/api:REPLACE_TAG
+          command: ["python", "-m", "joltiq.worker"]
+          envFrom: [{ configMapRef: { name: joltiq-config } }, { secretRef: { name: joltiq-secrets } }]
+          resources: { requests: { cpu: 250m, memory: 384Mi }, limits: { memory: 768Mi } }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+          volumeMounts: [{ name: tmp, mountPath: /tmp }]
+      volumes: [{ name: tmp, emptyDir: {} }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: browser-worker, namespace: joltiq }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: browser-worker } }
+  template:
+    metadata: { labels: { app: browser-worker } }
+    spec:
+      nodeSelector: { joltiq/browser: "true" }
+      tolerations: [{ key: joltiq/browser, operator: Exists, effect: NoSchedule }]
+      automountServiceAccountToken: false
+      containers:
+        - name: browser
+          image: ghcr.io/joltiq/browser-worker:REPLACE_TAG
+          env: [{ name: JOLTIQ_BROWSER_WORKER_TOKEN, valueFrom: { secretKeyRef: { name: joltiq-secrets, key: JOLTIQ_BROWSER_WORKER_TOKEN } } }]
+          ports: [{ containerPort: 8100 }]
+          readinessProbe: { httpGet: { path: /healthz, port: 8100 } }
+          resources: { requests: { cpu: "1", memory: 1Gi }, limits: { memory: 2Gi } }
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+          volumeMounts: [{ name: shm, mountPath: /dev/shm }]
+      volumes: [{ name: shm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }]
+---
+# Browser workers: ingress only from the API; egress only to the internet (never to cluster/private ranges or metadata).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: browser-worker-isolation, namespace: joltiq }
+spec:
+  podSelector: { matchLabels: { app: browser-worker } }
+  policyTypes: [Ingress, Egress]
+  ingress: [{ from: [{ podSelector: { matchLabels: { app: api } } }], ports: [{ port: 8100 }] }]
+  egress:
+    - to: [{ ipBlock: { cidr: 0.0.0.0/0, except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10] } }]
+      ports: [{ port: 443 }, { port: 80 }]
+    - to: [{ namespaceSelector: {}, podSelector: { matchLabels: { k8s-app: kube-dns } } }]
+      ports: [{ port: 53, protocol: UDP }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: web, namespace: joltiq }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: web } }
+  template:
+    metadata: { labels: { app: web } }
+    spec:
+      securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: web
+          image: ghcr.io/joltiq/web:REPLACE_TAG
+          ports: [{ containerPort: 3000 }]
+          readinessProbe: { httpGet: { path: /, port: 3000 } }
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: api, namespace: joltiq }
+spec: { selector: { app: api }, ports: [{ port: 8000 }] }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: browser-worker, namespace: joltiq }
+spec: { selector: { app: browser-worker }, ports: [{ port: 8100 }] }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: web, namespace: joltiq }
+spec: { selector: { app: web }, ports: [{ port: 3000 }] }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: browser-worker, namespace: joltiq }
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: browser-worker }
+  minReplicas: 2
+  maxReplicas: 20
+  metrics: [{ type: Resource, resource: { name: cpu, target: { type: Utilization, averageUtilization: 60 } } }]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: joltiq
+  namespace: joltiq
+  annotations: { cert-manager.io/cluster-issuer: letsencrypt, nginx.ingress.kubernetes.io/proxy-read-timeout: "3600" }
+spec:
+  ingressClassName: nginx
+  tls: [{ hosts: [app.joltiq.io], secretName: joltiq-tls }]
+  rules:
+    - host: app.joltiq.io
+      http:
+        paths:
+          - { path: /, pathType: Prefix, backend: { service: { name: web, port: { number: 3000 } } } }

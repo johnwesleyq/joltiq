@@ -173,6 +173,8 @@ def human_input(sid: uuid.UUID, body: HumanInput, ctx: Ctx = Depends(get_ctx)):
     kind = _role_kind(ctx, s)
     if not svc.holds_lease(ctx.db, s, kind, ctx.p.user_id):
         svc.acquire_lease(ctx.db, s, kind, ctx.p.user_id, preempt=True, reason="input")
+    if not s.worker_session_ref:
+        raise Conflict("Browser session is not running", code="invalid_state")
     res = browser_client.human_input(s.worker_session_ref, body.model_dump())
     svc.event(ctx.db, s, "human_input", actor_kind=kind, actor_id=ctx.p.user_id,
               data={"kind": body.kind, "protected": body.protected, **({} if body.protected or body.kind != "key" else {"key": body.key})})

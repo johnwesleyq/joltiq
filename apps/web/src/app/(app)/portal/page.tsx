@@ -1,6 +1,6 @@
 "use client";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState, useSyncExternalStore } from "react";
 import { ErrorNote, PageHead } from "@/components/ui";
 import { api } from "@/lib/api";
 
@@ -13,9 +13,8 @@ export default function Portal() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<unknown>(null);
   const [listening, setListening] = useState(false);
-  const [voice, setVoice] = useState(false);
+  const voice = useSyncExternalStore(() => () => {}, () => "webkitSpeechRecognition" in window || "SpeechRecognition" in window, () => false);
   const recRef = useRef<{ stop: () => void } | null>(null);
-  useEffect(() => { setVoice(typeof window !== "undefined" && ("webkitSpeechRecognition" in window || "SpeechRecognition" in window)); }, []);
 
   function toggleVoice() {
     if (listening) { recRef.current?.stop(); return; }

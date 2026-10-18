@@ -27,8 +27,22 @@ from sqlalchemy.orm import Session
 
 from ..core.errors import AppError, EntitlementExceeded, Unavailable
 from ..models import (
-    ActionExecution, AgentMessage, AgentPlan, AgentRun, AgentTransition, Approval, Device, DeviceCommand, KnowledgeArticle,
-    KnowledgeDocument, Organization, PlanStep, SupportSession, Ticket, VerificationRun, utcnow,
+    ActionExecution,
+    AgentMessage,
+    AgentPlan,
+    AgentRun,
+    AgentTransition,
+    Approval,
+    Device,
+    DeviceCommand,
+    KnowledgeArticle,
+    KnowledgeDocument,
+    Organization,
+    PlanStep,
+    SupportSession,
+    Ticket,
+    VerificationRun,
+    utcnow,
 )
 from ..models.enums import TERMINAL_RUN_STATES, ApprovalStatus
 from ..models.enums import RunState as R
@@ -36,7 +50,13 @@ from ..models.enums import TicketStatus as TS
 from ..security.crypto import canonical_json, sha256_hex
 from . import approvals, audit, policy, research, sessions, verification
 from . import tickets as ticket_svc
-from .actions.registry import ACTIONS, ActionValidationError, default_postconditions, registry_for_prompt, validate_params
+from .actions.registry import (
+    ACTIONS,
+    ActionValidationError,
+    default_postconditions,
+    registry_for_prompt,
+    validate_params,
+)
 from .ai import router as ai
 from .ai import schemas as S
 from .ai.fixture import MARK
@@ -135,7 +155,8 @@ def _unlock(db: Session, run_id: uuid.UUID) -> None:
 
 def advance(db: Session, run_id: uuid.UUID) -> AgentRun | None:
     if not _lock(db, run_id):
-        enqueue(db, "agent.advance", {"run_id": str(run_id)}, org_id=db.get(AgentRun, run_id).org_id if db.get(AgentRun, run_id) else None, delay_seconds=3)
+        existing = db.get(AgentRun, run_id)
+        enqueue(db, "agent.advance", {"run_id": str(run_id)}, org_id=existing.org_id if existing else None, delay_seconds=3)
         db.commit()
         return None
     try:
@@ -162,6 +183,8 @@ def advance(db: Session, run_id: uuid.UUID) -> AgentRun | None:
                 log.exception("agent handler failed")
                 db.rollback()
                 run = db.get(AgentRun, run_id)
+                if run is None:
+                    break
                 run.context = {**run.context, "last_error": f"{type(e).__name__}: {str(e)[:300]}"}
                 _escalate(db, run, "Internal error while processing; a technician will take over")
             db.commit()
@@ -720,7 +743,8 @@ def _timeout(db: Session, payload: dict) -> None:
         return
     if payload["paused_for"] == "verification":
         vr = db.get(VerificationRun, uuid.UUID(run.context["verification_id"]))
-        verification.expire_pending(db, vr)
+        if vr is not None:
+            verification.expire_pending(db, vr)
         resume(db, run, "verification timed out", ("verification",))
     elif payload["paused_for"] == "device_result":
         ex = db.execute(select(ActionExecution).where(ActionExecution.step_id == uuid.UUID(payload["step_id"]))).scalars().first()
@@ -742,6 +766,8 @@ def _post_resolution(db: Session, payload: dict) -> None:
     t = _ticket(db, run)
     kb.index_ticket(db, t)
     plan = db.get(AgentPlan, uuid.UUID(run.context["current_plan_id"]))
+    if plan is None:
+        return
     steps = db.execute(select(PlanStep).where(PlanStep.plan_id == plan.id).order_by(PlanStep.ordinal)).scalars().all()
     vr = db.get(VerificationRun, uuid.UUID(run.context["verification_id"]))
     payload_ctx = {"subject": t.subject, "description": t.description, "observations": run.context.get("observations", []),

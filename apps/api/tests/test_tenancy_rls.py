@@ -3,10 +3,9 @@ a filter. These tests talk to Postgres directly as the restricted `joltiq_app` r
 import uuid
 
 import pytest
+from conftest import register
 from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError, ProgrammingError
-
-from conftest import register
 
 
 def _org_ids(new_client):
@@ -64,9 +63,9 @@ def test_app_role_cannot_bypass_rls_or_tamper_audit(app, new_client):
 
 
 def test_audit_hash_chain_detects_tampering(app, new_client):
-    from sqlalchemy import create_engine
-
     import os
+
+    from sqlalchemy import create_engine
 
     from joltiq.db import session_scope
     from joltiq.services import audit

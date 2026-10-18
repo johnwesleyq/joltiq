@@ -17,7 +17,15 @@ from sqlalchemy import select
 from .core.logging import configure_logging
 from .db import session_scope
 from .models import Integration, Organization, utcnow
-from .services import agent, approvals, email, integrations, knowledge, notifications, retention  # noqa: F401 - register handlers
+from .services import (  # noqa: F401 - register handlers
+    agent,
+    approvals,
+    email,
+    integrations,
+    knowledge,
+    notifications,
+    retention,
+)
 from .services.jobs import Worker, enqueue, handler
 
 log = logging.getLogger("joltiq.worker")

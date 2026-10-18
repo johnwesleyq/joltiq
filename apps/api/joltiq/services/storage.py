@@ -7,7 +7,6 @@ import os
 import uuid
 from pathlib import Path
 
-
 from ..config import get_settings
 
 ALLOWED_TYPES = {

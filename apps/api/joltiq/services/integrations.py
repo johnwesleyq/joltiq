@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import email
+import email.message
 import email.policy
 import re
 import uuid
@@ -240,12 +241,12 @@ def _pull_freshdesk(db: Session, integ: Integration, fd: Freshdesk) -> dict:
             ref = f"freshdesk:{ft['id']}"
             t = db.execute(select(Ticket).where(Ticket.external_ref == ref)).scalar_one_or_none()
             if t is None:
-                prio = {1: "low", 2: "normal", 3: "high", 4: "urgent"}.get(ft.get("priority"), "normal")
+                prio = {1: "low", 2: "normal", 3: "high", 4: "urgent"}.get(int(ft.get("priority") or 2), "normal")
                 ticket_svc.create(db, integ.org_id, subject=ft.get("subject") or "(no subject)", description=ft.get("description_text") or "",
                                   priority=prio, source="integration", actor_kind="integration", external_ref=ref)
                 created += 1
             else:
-                want = FRESHDESK_STATUS_TO_JQ.get(ft.get("status"))
+                want = FRESHDESK_STATUS_TO_JQ.get(int(ft.get("status") or 0))
                 if want and t.status != want and want in ticket_svc.TRANSITIONS.get(TS(t.status), set()):
                     try:
                         ticket_svc.transition(db, t, want, actor_kind="integration", reason="updated in Freshdesk", force_close_reason="closed in Freshdesk")
@@ -279,10 +280,11 @@ TICKET_TAG = re.compile(r"\[#(\d{3,10})\]")
 
 
 def ingest_email(db: Session, org_id, raw: bytes) -> dict:
-    msg = email.message_from_bytes(raw, policy=email.policy.default)
+    msg = email.message_from_bytes(raw, _class=email.message.EmailMessage, policy=email.policy.default)  # type: ignore[arg-type]
     subject = str(msg.get("subject") or "(no subject)")[:300]
     sender = email.utils.parseaddr(str(msg.get("from") or ""))[1].lower()
-    body_part = msg.get_body(preferencelist=("plain", "html"))
+    body_part = msg.get_body(  # type: ignore[attr-defined]  # EmailMessage via policy.default
+        preferencelist=("plain", "html"))
     body = body_part.get_content() if body_part else ""
     if body_part is not None and body_part.get_content_type() == "text/html":
         from bs4 import BeautifulSoup

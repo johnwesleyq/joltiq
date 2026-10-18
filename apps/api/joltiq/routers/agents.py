@@ -10,8 +10,17 @@ from sqlalchemy import select
 
 from ..core.errors import AppError, Forbidden, NotFound
 from ..deps import Ctx, get_ctx, perm
-from ..models import AgentRun, Approval, ResearchFinding, ResearchQuery, ResearchSource, Ticket, VerificationEvidence, VerificationRun
-from ..models.enums import ApprovalStatus, TERMINAL_RUN_STATES
+from ..models import (
+    AgentRun,
+    Approval,
+    ResearchFinding,
+    ResearchQuery,
+    ResearchSource,
+    Ticket,
+    VerificationEvidence,
+    VerificationRun,
+)
+from ..models.enums import TERMINAL_RUN_STATES, ApprovalStatus
 from ..services import agent as svc
 from ..services import approvals as approval_svc
 from ..services import research as research_svc

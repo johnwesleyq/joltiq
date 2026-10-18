@@ -85,6 +85,7 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
       <div>
         <div className="mb-2 flex items-center gap-2 text-sm"><span className="truncate text-slate">{d.browser?.url}</span></div>
         <div className={holder === "ai" ? "rounded-md ring-4 ring-jolt" : "rounded-md ring-1 ring-line"}>
+          {/* eslint-disable-next-line @next/next/no-img-element -- live blob: frame, not an optimisable asset */}
           {frame ? <img ref={imgRef} src={frame} alt="Live view of the isolated browser" onClick={d.you_hold_control ? clickFrame : undefined}
                         className={d.you_hold_control ? "w-full cursor-crosshair rounded-md" : "w-full rounded-md"} />
                  : <div className="grid aspect-[16/10] place-items-center text-slate">Connecting to the live view…</div>}

@@ -6,7 +6,7 @@ Card data never touches JoltIQ: checkout and the billing portal are Stripe-hoste
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
@@ -55,7 +55,7 @@ def plan_limits(db: Session, org_id: uuid.UUID) -> dict[str, Any]:
 
 def _month_start() -> datetime:
     n = utcnow()
-    return datetime(n.year, n.month, 1, tzinfo=timezone.utc)
+    return datetime(n.year, n.month, 1, tzinfo=UTC)
 
 
 def usage_total(db: Session, org_id: uuid.UUID, meter: str, since: datetime | None = None) -> float:
@@ -87,7 +87,7 @@ def check_entitlement(db: Session, org_id: uuid.UUID, feature: str, adding: floa
         if usage_total(db, org_id, feature) + adding > lim[feature]:
             raise EntitlementExceeded(f"Monthly {feature.replace('_', ' ')} exhausted", details={"feature": feature})
     elif feature == "storage_bytes":
-        if usage_total(db, org_id, "storage_bytes", datetime(2000, 1, 1, tzinfo=timezone.utc)) + adding > lim["storage_gb"] * 1024**3:
+        if usage_total(db, org_id, "storage_bytes", datetime(2000, 1, 1, tzinfo=UTC)) + adding > lim["storage_gb"] * 1024**3:
             raise EntitlementExceeded("Storage quota exceeded", details={"feature": feature})
 
 
@@ -208,7 +208,7 @@ def process_event(db: Session, event: dict) -> str:
                 if org:
                     org.plan = plan
             if obj.get("current_period_end"):
-                sub.current_period_end = datetime.fromtimestamp(obj["current_period_end"], tz=timezone.utc)
+                sub.current_period_end = datetime.fromtimestamp(obj["current_period_end"], tz=UTC)
             sub.live_mode = bool(event.get("livemode"))
         elif t == "checkout.session.completed":
             if obj.get("customer"):

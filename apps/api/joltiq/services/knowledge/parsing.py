@@ -64,7 +64,8 @@ def _docx(data: bytes) -> list[Section]:
 
     d = docx.Document(io.BytesIO(data))
     out: list[Section] = []
-    heading, buf = None, []
+    heading: str | None = None
+    buf: list[str] = []
     for p in d.paragraphs:
         style = (p.style.name or "").lower() if p.style is not None else ""
         if style.startswith("heading") and p.text.strip():
@@ -87,8 +88,8 @@ def _xlsx(data: bytes) -> list[Section]:
     wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     out = []
     for ws in wb.worksheets:
-        rows = []
-        header = None
+        rows: list[str] = []
+        header: list[str] | None = None
         for row in ws.iter_rows(values_only=True):
             vals = ["" if v is None else str(v) for v in row]
             if not any(vals):
@@ -125,7 +126,8 @@ def html_sections(html: str) -> list[Section]:
     for tag in soup(["script", "style", "noscript", "iframe", "svg", "nav", "footer", "header", "form"]):
         tag.decompose()
     out: list[Section] = []
-    heading, buf = None, []
+    heading: str | None = None
+    buf: list[str] = []
     body = soup.body or soup
     for el in body.find_all(["h1", "h2", "h3", "h4", "p", "li", "pre", "code", "td", "blockquote"]):
         t = el.get_text(" ", strip=True)
@@ -148,7 +150,8 @@ def html_sections(html: str) -> list[Section]:
 
 def _markdown(text: str) -> list[Section]:
     out: list[Section] = []
-    heading, buf = None, []
+    heading: str | None = None
+    buf: list[str] = []
     for line in text.splitlines():
         m = re.match(r"^\s{0,3}#{1,6}\s+(.*)$", line)
         if m:

@@ -42,7 +42,7 @@ class Principal:
     def can(self, perm: str) -> bool:
         if self.is_platform:
             return True
-        return bool(self.role) and has_permission(self.role, perm)
+        return self.role is not None and has_permission(self.role, perm)
 
     def require(self, perm: str) -> None:
         if not self.can(perm):

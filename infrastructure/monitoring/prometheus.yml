@@ -1,0 +1,5 @@
+scrape_configs:
+  - job_name: joltiq-api
+    metrics_path: /metrics
+    static_configs: [{ targets: ["api:8000"] }]
+rule_files: [alerts.yml]

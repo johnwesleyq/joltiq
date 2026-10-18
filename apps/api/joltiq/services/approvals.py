@@ -4,7 +4,7 @@ an APPROVED approval: only `decide()` from an authenticated human principal does
 from __future__ import annotations
 
 import uuid
-from datetime import timedelta, timezone
+from datetime import UTC, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -24,7 +24,7 @@ def step_hash(action: str, target: dict, params: dict, plan_hash: str) -> str:
 
 
 def _grant_message(a: Approval) -> str:
-    return f"{a.id}|{a.step_hash}|{a.decided_by}|{a.decided_at.astimezone(timezone.utc).isoformat(timespec='microseconds') if a.decided_at else ''}|{a.status}"
+    return f"{a.id}|{a.step_hash}|{a.decided_by}|{a.decided_at.astimezone(UTC).isoformat(timespec='microseconds') if a.decided_at else ''}|{a.status}"
 
 
 def request(db: Session, *, org_id, run_id, plan_id, step: PlanStep, plan_hash: str, ticket_id, session_id, reason: str,

@@ -1,0 +1,53 @@
+name: CI
+on: [push, pull_request]
+permissions: { contents: read }
+jobs:
+  api:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env: { POSTGRES_PASSWORD: postgres }
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U postgres" --health-interval 5s --health-retries 20
+      redis: { image: "redis:7.4-alpine", ports: ["6379:6379"] }
+    defaults: { run: { working-directory: apps/api } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: "8.0.x" }
+      - run: pip install -r requirements.lock && pip install -e .
+      - run: python -m playwright install --with-deps chromium
+      - run: psql postgresql://postgres:postgres@localhost:5432/postgres -c "create database joltiq_test"
+      - run: ruff check joltiq tests
+      - run: pip-audit -r requirements.lock || true   # report-only; triage findings in SECURITY.md
+      - run: pytest -q --junitxml=../../test-results/api.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: api-test-results, path: test-results }
+  web:
+    runs-on: ubuntu-24.04
+    defaults: { run: { working-directory: apps/web } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22", cache: npm, cache-dependency-path: apps/web/package-lock.json }
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm audit --omit=dev --audit-level=high
+  windows-agent:
+    runs-on: windows-latest
+    defaults: { run: { working-directory: apps/windows-agent } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: "8.0.x" }
+      - run: dotnet run --project tests/JoltIQ.Agent.Core.SelfTest -c Release
+      - run: dotnet test tests/JoltIQ.Agent.Tests -c Release
+      - shell: pwsh
+        run: ./scripts/build.ps1 -Version 0.0.${{ github.run_number }} -SkipTests
+      - uses: actions/upload-artifact@v4
+        with: { name: joltiq-companion-unsigned, path: apps/windows-agent/artifacts/*.msi }

@@ -1,19 +1,23 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { ErrorNote, Field, Loading, PageHead } from "@/components/ui";
 import { api } from "@/lib/api";
 import { useAct, useApi } from "@/lib/hooks";
 type O = { name: string; settings: Record<string, unknown>; branding: Record<string, string>; custom_domain: string | null };
 export default function Settings() {
   const r = useApi<O>(["org"], "/organizations/current");
-  const [name, setName] = useState(""); const [set, setSet] = useState<Record<string, unknown>>({}); const [brand, setBrand] = useState<Record<string, string>>({}); const [domain, setDomain] = useState("");
-  useEffect(() => { if (r.data) { setName(r.data.name); setSet(r.data.settings); setBrand(r.data.branding); setDomain(r.data.custom_domain ?? ""); } }, [r.data]);
+  if (!r.data) return <Loading />;
+  return <SettingsForm data={r.data} />;
+}
+
+function SettingsForm({ data }: { data: O }) {
+  const [name, setName] = useState(data.name); const [set, setSet] = useState<Record<string, unknown>>(data.settings);
+  const [brand, setBrand] = useState<Record<string, string>>(data.branding); const [domain, setDomain] = useState(data.custom_domain ?? "");
   const saveOrg = useAct(() => api("/organizations/current", { method: "PATCH", json: { name, settings: { external_research_enabled: set.external_research_enabled,
     auto_close_on_verified: set.auto_close_on_verified, require_verification_to_resolve: set.require_verification_to_resolve, approval_ttl_minutes: Number(set.approval_ttl_minutes ?? 60),
     retention_days: set.retention_days } } }), [["org"]]);
   const saveBrand = useAct(() => api<{ custom_domain_dns: string | null }>("/admin/branding", { method: "PATCH", json: { ...Object.fromEntries(Object.entries(brand).filter(([, v]) => v)), ...(domain ? { custom_domain: domain } : {}) } }), [["org"], ["me"]]);
   const retention = useAct(() => api<Record<string, number>>("/admin/retention/run", { method: "POST" }));
-  if (!r.data) return <Loading />;
   const ret = (set.retention_days as Record<string, number>) ?? {};
   const chk = (k: string, label: string) => <label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(set[k])} onChange={(e) => setSet({ ...set, [k]: e.target.checked })} /> {label}</label>;
   return <div className="max-w-[720px] space-y-10"><PageHead title="Settings & branding" />

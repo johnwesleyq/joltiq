@@ -9,10 +9,9 @@ from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, Str
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from .._dims import EMBED_DIM  # noqa: E402,F401
 from ..db import Base
 from .base import IdMixin, TenantMixin, TimestampMixin
-
-from .._dims import EMBED_DIM  # noqa: E402,F401
 
 
 class SlaPolicy(IdMixin, TimestampMixin, TenantMixin, Base):

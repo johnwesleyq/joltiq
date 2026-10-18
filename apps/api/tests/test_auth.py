@@ -41,10 +41,11 @@ def test_csrf_required_for_cookie_auth(app, new_client):
 
 
 def test_password_reset_flow_revokes_sessions(app, new_client):
+    from sqlalchemy import select
+
     from joltiq.db import session_scope
     from joltiq.models import User
     from joltiq.services import auth as svc
-    from sqlalchemy import select
 
     c = register(new_client(), "Reset Co")
     with session_scope(None) as db:
@@ -58,10 +59,11 @@ def test_password_reset_flow_revokes_sessions(app, new_client):
 
 
 def test_email_verification(app, new_client):
+    from sqlalchemy import select
+
     from joltiq.db import session_scope
     from joltiq.models import User
     from joltiq.services import auth as svc
-    from sqlalchemy import select
 
     c = register(new_client(), "Verify Co")
     with session_scope(None) as db:

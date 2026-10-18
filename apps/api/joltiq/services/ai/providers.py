@@ -110,8 +110,8 @@ class OpenAIProvider:
         j = r.json()
         text = j["choices"][0]["message"].get("content") or ""
         data = json.loads(_strip_fences(text)) if schema else None
-        u = j.get("usage", {})
-        return ModelResult(text, data, u.get("prompt_tokens", 0), u.get("completion_tokens", 0), model, self.name, True,
+        usage = j.get("usage", {})
+        return ModelResult(text, data, usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0), model, self.name, True,
                            int((time.perf_counter() - t0) * 1000))
 
 
@@ -151,8 +151,8 @@ class AnthropicProvider:
                 text += block["text"]
             elif block.get("type") == "tool_use":
                 data = block.get("input")
-        u = j.get("usage", {})
-        return ModelResult(text or json.dumps(data or {}), data, u.get("input_tokens", 0), u.get("output_tokens", 0), model, self.name, True,
+        usage = j.get("usage", {})
+        return ModelResult(text or json.dumps(data or {}), data, usage.get("input_tokens", 0), usage.get("output_tokens", 0), model, self.name, True,
                            int((time.perf_counter() - t0) * 1000))
 
 
@@ -175,7 +175,8 @@ class GeminiProvider:
 
     def complete(self, *, model: str, system: str, messages: list[dict], schema: dict | None = None,
                  schema_name: str = "result", max_tokens: int = 2000, images: list[str] | None = None) -> ModelResult:
-        contents = [{"role": "model" if m["role"] == "assistant" else "user", "parts": [{"text": m["content"]}]} for m in messages]
+        contents: list[dict[str, Any]] = [{"role": "model" if m["role"] == "assistant" else "user", "parts": [{"text": m["content"]}]}
+                                          for m in messages]
         if images:
             for u in images:
                 if u.startswith("data:"):
@@ -197,8 +198,8 @@ class GeminiProvider:
         parts = (j.get("candidates") or [{}])[0].get("content", {}).get("parts", [])
         text = "".join(p.get("text", "") for p in parts)
         data = json.loads(_strip_fences(text)) if schema and text else None
-        u = j.get("usageMetadata", {})
-        return ModelResult(text, data, u.get("promptTokenCount", 0), u.get("candidatesTokenCount", 0), model, self.name, True,
+        usage = j.get("usageMetadata", {})
+        return ModelResult(text, data, usage.get("promptTokenCount", 0), usage.get("candidatesTokenCount", 0), model, self.name, True,
                            int((time.perf_counter() - t0) * 1000))
 
 

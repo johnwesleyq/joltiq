@@ -102,7 +102,7 @@ def change_role(user_id: uuid.UUID, body: RoleChange, ctx: Ctx = Depends(perm("u
     if not can_grant_role(ctx.p.role or "", body.role) or (m.role == Role.ORG_OWNER and ctx.p.role != Role.ORG_OWNER):
         raise Forbidden("You cannot grant or change that role")
     if m.role == Role.ORG_OWNER and body.role != Role.ORG_OWNER:
-        owners = ctx.db.execute(select(func.count()).select_from(Membership).where(Membership.org_id == ctx.org_id, Membership.role == Role.ORG_OWNER)).scalar()
+        owners = ctx.db.execute(select(func.count()).select_from(Membership).where(Membership.org_id == ctx.org_id, Membership.role == Role.ORG_OWNER)).scalar() or 0
         if owners <= 1:
             raise Conflict("An organization must keep at least one owner")
     old = m.role

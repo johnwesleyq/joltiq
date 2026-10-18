@@ -8,10 +8,9 @@ import uuid
 
 import httpx
 import pytest
-from sqlalchemy import select, text
-
 from conftest import invite_and_join
 from e2e_support import TESTAPP, start_services, stop_services
+from sqlalchemy import select, text
 
 pytestmark = [pytest.mark.browser, pytest.mark.mocked]
 
