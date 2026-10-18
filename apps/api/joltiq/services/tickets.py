@@ -119,6 +119,10 @@ def transition(db: Session, t: Ticket, to: str, *, actor_kind: str, actor_id: An
         data["technician_resolution_note"] = force_close_reason
     add_event(db, t, "status_changed", actor_kind=actor_kind, actor_id=actor_id, data=data)
     audit.record(db, org_id=t.org_id, actor_kind=actor_kind, actor_id=actor_id, action="ticket.status_changed", resource_type="ticket", resource_id=t.id, data=data)
+    if actor_kind != "integration":
+        from .integrations import on_ticket_event
+
+        on_ticket_event(db, t, "status", {"to": to})
     watchers = [u for u in (t.requester_id, t.assignee_id) if u]
     if to in (S.RESOLVED, S.ESCALATED, S.AWAITING_CUSTOMER, S.REOPENED) and watchers:
         cat = {"RESOLVED": "resolution", "ESCALATED": "escalation"}.get(to, "ticket")
@@ -140,6 +144,10 @@ def comment(db: Session, t: Ticket, body: str, *, author_id=None, author_kind: s
         t.first_responded_at = utcnow()
     add_event(db, t, "internal_note" if internal else "comment", actor_kind=author_kind, actor_id=author_id,
               data={"comment_id": str(c.id), "preview": body[:140]})
+    if author_kind != "integration":
+        from .integrations import on_ticket_event
+
+        on_ticket_event(db, t, "comment", {"comment_id": str(c.id), "body": body, "internal": internal})
     if not internal:
         targets = [u for u in (t.requester_id, t.assignee_id) if u and u != author_id]
         if targets:

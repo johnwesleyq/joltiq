@@ -136,6 +136,11 @@ def get_ctx(request: Request, db: Session = Depends(get_raw_session)) -> Ctx:
     if not p.org_id:
         raise Forbidden("Select an organization first", code="no_active_org")
     set_tenant(db, p.org_id)  # RLS context for every query in this request
+    from .models import Organization
+
+    org = db.get(Organization, p.org_id)
+    if org is not None and org.status == "suspended" and not p.is_platform:
+        raise Forbidden("This organization is suspended. Contact support.", code="org_suspended")
     request.state.principal = p
     return Ctx(db, p, request)
 

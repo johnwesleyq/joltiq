@@ -98,8 +98,8 @@ def meter(db: Session, org_id: uuid.UUID, meter_name: str, quantity: float, idem
     res = db.execute(insert(UsageEvent).values(
         id=uuid.uuid4(), org_id=org_id, meter=meter_name, quantity=quantity, idempotency_key=idempotency_key,
         occurred_at=utcnow(), meta=meta or {},
-    ).on_conflict_do_nothing(index_elements=["org_id", "idempotency_key"]))
-    return bool(res.rowcount)
+    ).on_conflict_do_nothing(index_elements=["org_id", "idempotency_key"]).returning(UsageEvent.id))
+    return res.scalar() is not None
 
 
 # ---------------- Stripe ----------------

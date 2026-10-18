@@ -165,8 +165,8 @@ def authenticate_device(db: Session, *, device_id: str, ts: str, nonce: str, cou
         audit.security_event(db, "device_replay", org_id=d.org_id, severity="critical", data={"device": str(d.id), "counter": ctr, "last": d.last_counter})
         raise Unauthorized("replayed or out-of-order request", code="replay")
     res = db.execute(insert(DeviceNonce).values(org_id=d.org_id, device_id=d.id, nonce=nonce, seen_at=utcnow())
-                     .on_conflict_do_nothing(index_elements=["device_id", "nonce"]))
-    if not res.rowcount:
+                     .on_conflict_do_nothing(index_elements=["device_id", "nonce"]).returning(DeviceNonce.nonce))
+    if res.scalar() is None:
         audit.security_event(db, "device_replay", org_id=d.org_id, severity="critical", data={"device": str(d.id), "nonce": nonce})
         raise Unauthorized("nonce reused", code="replay")
     d.last_counter = ctr

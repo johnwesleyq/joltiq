@@ -69,10 +69,14 @@ def validate_url(url: str, *, allowed_domains: list[str] | None = None, allow_pr
         addrs = [ipaddress.ip_address(i[4][0]) for i in infos]
     if not addrs:
         raise SSRFBlocked("no addresses")
-    if not allow_private:
-        for a in addrs:
-            if not _ip_is_public(a):
-                raise SSRFBlocked(f"address not public: {a}")
+    for a in addrs:
+        a4 = a.ipv4_mapped if isinstance(a, ipaddress.IPv6Address) and a.ipv4_mapped else a
+        # Link-local (cloud metadata 169.254.169.254, fe80::/10), multicast, reserved and unspecified are blocked in
+        # EVERY mode; allow_private only relaxes loopback/RFC1918 for local development and test fixtures.
+        if a4.is_link_local or a4.is_multicast or a4.is_reserved or a4.is_unspecified:
+            raise SSRFBlocked(f"address not allowed: {a}")
+        if not allow_private and not _ip_is_public(a):
+            raise SSRFBlocked(f"address not public: {a}")
     return parts.scheme, host, port, str(addrs[0])
 
 
