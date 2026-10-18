@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Windows OS integration: action provider (Process, Registry HKCU, EventLog, ServiceController, UI Automation) and
+       DPAPI key store. Builds on Windows only (windows-latest CI job / scripts/build.ps1). -->
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\JoltIQ.Agent.Core\JoltIQ.Agent.Core.csproj" />
+    <PackageReference Include="System.Diagnostics.EventLog" Version="8.0.1" />
+    <PackageReference Include="System.ServiceProcess.ServiceController" Version="8.0.1" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+    <PackageReference Include="System.IO.Pipes.AccessControl" Version="5.0.0" />
+  </ItemGroup>
+</Project>

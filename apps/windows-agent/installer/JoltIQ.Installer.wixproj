@@ -1,0 +1,11 @@
+<Project Sdk="WixToolset.Sdk/5.0.2">
+  <PropertyGroup>
+    <OutputName>JoltIQCompanion-$(ProductVersion)-x64</OutputName>
+    <ProductVersion Condition="'$(ProductVersion)'==''">1.0.0</ProductVersion>
+    <DefineConstants>ProductVersion=$(ProductVersion);PublishDir=$(PublishDir)</DefineConstants>
+    <Platform>x64</Platform>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="WixToolset.Util.wixext" Version="5.0.2" />
+  </ItemGroup>
+</Project>

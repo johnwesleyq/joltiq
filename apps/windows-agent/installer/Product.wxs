@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- JoltIQ Companion MSI (WiX v5). Per-machine install: tray app for all users (per-user Run key created on first launch,
+     user can disable), and the optional privileged broker as a Windows service. Supports install / repair / uninstall /
+     major upgrade. Binaries are signed by scripts/sign.ps1 BEFORE this is built when a certificate is available. -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="JoltIQ Companion" Manufacturer="JoltIQ" Version="$(var.ProductVersion)"
+           UpgradeCode="5B7C1E0A-6F3D-4C1B-9B2E-7A1D2C3E4F50" Scope="perMachine" Compressed="yes">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of JoltIQ Companion is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Launch Condition="Installed OR VersionNT64 &gt;= 603" Message="JoltIQ Companion requires 64-bit Windows 10 or later." />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="JoltIQ Companion">
+        <Directory Id="BROKERFOLDER" Name="Broker" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="MenuFolder" Name="JoltIQ" />
+    </StandardDirectory>
+
+    <ComponentGroup Id="TrayFiles" Directory="INSTALLFOLDER">
+      <Files Include="$(var.PublishDir)tray\**" />
+    </ComponentGroup>
+
+    <Component Id="StartMenu" Directory="MenuFolder" Guid="2E6B1B6E-3C8B-4D46-9E31-6A0C4F1E8A11">
+      <Shortcut Id="TrayShortcut" Name="JoltIQ Companion" Target="[INSTALLFOLDER]JoltIQCompanion.exe" WorkingDirectory="INSTALLFOLDER" />
+      <RemoveFolder Id="RemoveMenu" On="uninstall" />
+      <RegistryValue Root="HKCU" Key="Software\JoltIQ\Companion" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+
+    <ComponentGroup Id="BrokerFiles" Directory="BROKERFOLDER">
+      <Files Include="$(var.PublishDir)broker\**">
+        <Exclude Files="$(var.PublishDir)broker\JoltIQBroker.exe" />
+      </Files>
+      <Component Id="BrokerService" Guid="9A3F6C2D-1B7E-4E5A-8C9D-0F1E2D3C4B5A">
+        <File Id="BrokerExe" Source="$(var.PublishDir)broker\JoltIQBroker.exe" KeyPath="yes" />
+        <ServiceInstall Id="BrokerSvc" Name="JoltIQBroker" DisplayName="JoltIQ Companion Broker"
+                        Description="Performs a small allowlist of administrator actions (e.g. restarting the print spooler) for consented JoltIQ support sessions."
+                        Type="ownProcess" Start="auto" Account="LocalSystem" ErrorControl="normal" Vital="yes" />
+        <ServiceControl Id="BrokerCtl" Name="JoltIQBroker" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\JoltIQ\Broker" Name="AllowedServices" Type="multiString">
+          <MultiStringValue Value="Spooler" /><MultiStringValue Value="wuauserv" /><MultiStringValue Value="BITS" />
+          <MultiStringValue Value="Dnscache" /><MultiStringValue Value="W32Time" /><MultiStringValue Value="WSearch" />
+        </RegistryValue>
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="Main" Title="JoltIQ Companion" Level="1">
+      <ComponentGroupRef Id="TrayFiles" />
+      <ComponentRef Id="StartMenu" />
+    </Feature>
+    <Feature Id="Broker" Title="Privileged broker (restart allowlisted services)" Level="1">
+      <ComponentGroupRef Id="BrokerFiles" />
+    </Feature>
+  </Package>
+</Wix>
