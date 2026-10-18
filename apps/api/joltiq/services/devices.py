@@ -66,7 +66,9 @@ def server_public_pem() -> str:
 def sign_envelope(body: dict[str, Any]) -> dict[str, Any]:
     msg = canonical_json(body).encode()
     sig = server_key().sign(msg, ec.ECDSA(hashes.SHA256()))
-    return {"protocol": PROTOCOL_VERSION, "body": body, "signature": base64.b64encode(sig).decode(), "alg": "ES256-DER"}
+    # `payload` carries the exact signed bytes so verifiers never re-serialize JSON (no canonicalization drift).
+    return {"protocol": PROTOCOL_VERSION, "payload": base64.b64encode(msg).decode(), "body": body,
+            "signature": base64.b64encode(sig).decode(), "alg": "ES256-DER"}
 
 
 def request_string(method: str, path: str, ts: str, nonce: str, counter: str, body: bytes) -> bytes:

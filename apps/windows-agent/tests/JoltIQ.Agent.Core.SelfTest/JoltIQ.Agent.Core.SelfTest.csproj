@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Dependency-free unit test runner (works without nuget.org). The xUnit suite in JoltIQ.Agent.Tests covers the
+       same cases plus Windows-only providers and runs in the windows-latest CI job. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\JoltIQ.Agent.Core\JoltIQ.Agent.Core.csproj" />
+  </ItemGroup>
+</Project>
