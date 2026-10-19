@@ -243,3 +243,28 @@ def test_chat_shares_known_fix_from_imported_history(owner):
     drain()
     msgs = [m["content"] for m in owner.get(f"/api/v1/tickets/{r['ticket_id']}/runs").json()[0]["messages"]]
     assert not any("What fixed it" in m for m in msgs)
+
+
+def test_successful_run_is_remembered_and_recalled_next_time(app, owner):
+    import uuid as _uuid
+
+    from joltiq.db import session_scope
+    from joltiq.models import ComputerUseRun
+
+    d, sid = _setup(app, owner)
+    rid = owner.post(f"/api/v1/sessions/{sid}/computer-use", json={"goal": "Type the weekly note and save it"}).json()["id"]
+    log: list = []
+    _pump(d, owner, rid, log)
+    owner.post(f"/api/v1/computer-use/{rid}/respond", json={"approved": True})
+    run = _pump(d, owner, rid, log, until=("completed", "failed", "stopped"))
+    assert run["state"] == "completed" and run["success"] is True
+    drain()
+    docs = owner.get("/api/v1/knowledge/documents?page_size=50").json()["items"]
+    learned = [x for x in docs if x["source_type"] == "learned_fix"]
+    assert learned and learned[0]["status"] == "indexed" and "weekly note" in learned[0]["title"]
+    # Next similar request starts with the remembered fix in front of the model.
+    rid2 = owner.post(f"/api/v1/sessions/{sid}/computer-use", json={"goal": "Type the weekly note and save it again"}).json()["id"]
+    _pump(d, owner, rid2, [], rounds=2)
+    with session_scope(_uuid.UUID(owner.org_id)) as db:
+        first = db.get(ComputerUseRun, _uuid.UUID(rid2)).transcript[0]["content"][0]["text"]
+    assert "fixed similar problems before" in first and "Learned fix" in first

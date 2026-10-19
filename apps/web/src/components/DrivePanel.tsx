@@ -65,7 +65,8 @@ export default function DrivePanel({ sessionId, ready }: { sessionId: string; re
       <p className="text-sm text-slate">Describe what to fix. JoltIQ looks at the screen and clicks and types for you. You approve the goal first,
         it asks again before anything hard to undo, and you type any passwords yourself.</p>
       {r && <div className="rounded-md bg-paper p-3 text-sm"><Badge value={r.state} /> <b className="ml-1">Last run:</b> {r.goal}
-        {r.summary && <p className="mt-1">{r.summary}</p>}</div>}
+        {r.summary && <p className="mt-1">{r.summary}</p>}
+        {r.success && <p className="mt-1 text-verify">Saved to JoltIQ&apos;s memory. Next time this comes up, it starts from these steps (Knowledge → Sources).</p>}</div>}
       <ErrorNote error={err} />
       <form className="space-y-2" onSubmit={(e) => { e.preventDefault(); if (goal.trim()) start.mutate(goal.trim(), { onSuccess: () => setGoal("") }); }}>
         <label className="field"><span className="text-sm font-semibold">Goal</span>

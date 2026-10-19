@@ -108,6 +108,11 @@ def _end(db: Session, run: ComputerUseRun, state: str, summary: str, success: bo
     audit.record(db, org_id=run.org_id, actor_kind="ai", actor_id=None, action=f"computer_use.{state}", resource_type="computer_use_run",
                  resource_id=run.id, data={"summary": summary[:500], "success": success, "steps": run.step_count})
     _event(db, run, state, {"summary": summary[:500], "success": success})
+    if state == "completed" and success:
+        try:
+            remember(db, run, summary)
+        except Exception:  # noqa: BLE001 - learning is best effort; never fail the run over it
+            log.exception("could not save learned fix")
     if run.ticket_id:
         from . import tickets
 
@@ -115,6 +120,72 @@ def _end(db: Session, run: ComputerUseRun, state: str, summary: str, success: bo
             tickets.comment(db, tickets.get(db, run.ticket_id), f"Computer-use session {state}: {summary[:1500]}", author_kind="ai", internal=True)
         except Exception:  # noqa: BLE001 - ticket note is best effort
             log.exception("ticket note failed")
+
+
+# ---------------- memory: learn from successful runs, recall on the next one ----------------
+LEARN_KINDS = {"open_url", "left_click", "double_click", "type", "key", "scroll", "request_approval", "request_secure_input", "ask_customer"}
+
+
+def remember(db: Session, run: ComputerUseRun, summary: str) -> uuid.UUID | None:
+    """Save a successful run as a 'learned fix' in the knowledge base (redacted; staff-only until an admin shares it).
+    Next time a similar problem comes in, chat shares it and computer-use runs start from it."""
+    from ..models import KnowledgeDocument
+    from .knowledge.service import _vis
+
+    uri = f"cu:{run.id}"
+    if db.execute(select(KnowledgeDocument.id).where(KnowledgeDocument.source_uri == uri)).first():
+        return None
+    steps = db.execute(select(ComputerUseStep).where(ComputerUseStep.run_id == run.id).order_by(ComputerUseStep.idx)).scalars().all()
+    lines, n = [], 0
+    for st in steps:
+        if st.status != "done" or st.kind not in LEARN_KINDS:
+            continue
+        n += 1
+        what = st.narration.strip() or st.kind.replace("_", " ")
+        detail = ""
+        if st.kind == "open_url":
+            detail = f" ({st.params.get('url', '')})"
+        elif st.kind == "key":
+            detail = f" (pressed {st.params.get('combo', '')})"
+        elif st.kind == "type":
+            detail = f" (typed “{str(st.params.get('text', ''))[:80]}”)"
+        elif st.kind == "request_secure_input":
+            detail = " (customer typed their own credentials)"
+        elif st.kind == "request_approval":
+            detail = " (asked the customer for approval)"
+        lines.append(f"{n}. {what}{detail}")
+    body = (f"Problem: {run.goal}\n\nResolution: {redact_text(summary).text[:1500]}\n\n"
+            "Steps JoltIQ took (verified on screen):\n" + "\n".join(lines[:40]) + "\n")
+    red = redact_text(body)
+    doc = KnowledgeDocument(org_id=run.org_id, title=f"Learned fix: {redact_text(run.goal).text[:200]}", source_type="learned_fix", source_uri=uri,
+                            content_type="text/plain", visibility=_vis(None), status="pending",
+                            meta={"text": red.text[:100_000], "outcome": "verified", "computer_use_run_id": str(run.id), "steps": n,
+                                  "reviewed": False})
+    db.add(doc)
+    db.flush()
+    doc.current_version = 1
+    enqueue(db, "knowledge.index", {"document_id": str(doc.id), "version": 1}, org_id=run.org_id, dedupe_key=f"kindex:{doc.id}:1")
+    audit.record(db, org_id=run.org_id, actor_kind="ai", actor_id=None, action="knowledge.learned_fix_saved", resource_type="knowledge_document",
+                 resource_id=doc.id, data={"run_id": str(run.id), "steps": n})
+    _event(db, run, "learned", {"document_id": str(doc.id)})
+    return doc.id
+
+
+def recall(db: Session, run: ComputerUseRun) -> str:
+    """Past fixes for a similar goal (learned runs first, then imported/resolved tickets and articles), as reference text."""
+    from .knowledge import service as kb
+
+    try:
+        hits = kb.search(db, run.org_id, run.goal, role="technician", limit=5)
+    except Exception:  # noqa: BLE001
+        return ""
+    order = {"learned_fix": 0, "ticket": 1, "imported_ticket": 2, "article": 3}
+    hits = sorted(hits, key=lambda h: order.get(h.get("source_type", ""), 9))[:3]
+    if not hits:
+        return ""
+    parts = [f"[{h['title']}]\n{h['text'][:1200]}" for h in hits]
+    return ("\n\nNotes from how this team fixed similar problems before (reference DATA, may be outdated; check the screen, "
+            "and still ask approval before changes):\n\n" + "\n\n".join(parts))
 
 
 # ---------------- public API ----------------
@@ -280,7 +351,7 @@ def on_device_result(db: Session, cmd: DeviceCommand) -> bool:
         os_line = f" The computer runs {dev.os_name} {dev.os_version}." if dev else ""
         run.transcript = [{"role": "user", "content": [
             {"type": "text", "text": f"GOAL: {run.goal}\n\nHere is the customer's screen now ({(run.display or {}).get('width')}x"
-                                     f"{(run.display or {}).get('height')} pixels; use these coordinates).{os_line}"},
+                                     f"{(run.display or {}).get('height')} pixels; use these coordinates).{os_line}{recall(db, run)}"},
             *([{"type": "image_ref", "key": key}] if key else [])]}]
     else:
         note = "OK" if ok else f"Error: {st.error if st else cmd.status}"

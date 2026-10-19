@@ -35,6 +35,7 @@ Status legend: **IT** = IMPLEMENTED_AND_TESTED · **INT** = IMPLEMENTED_NOT_TEST
 | **Computer use (screen-driving agent)**: goal approval by the consenting customer, look→act loop, approval / question / “your turn to type” pauses, secret-typing refusal, step limit, budget, stop on session end, per-step screenshots + audit, live screen in the session page | IT (server, fake device + scripted fixture model) | `test_computer_use.py` (6 tests) through the real signed device protocol. Anthropic computer toolset adapter (`computer_toolset_20260801`, legacy `computer_20251124`) **INT (live)**: no key |
 | Device screen/input layer for computer use | **NI (by design here)** | Not in this repo. Plug in an established remote-support SDK or an in-house adapter; contract in `apps/desktop-agent/README.md`. Protocol client + local policy for macOS/Windows in `apps/desktop-agent` |
 | Bulk import of past tickets (CSV/JSON from Zendesk, Freshdesk, Intercom, HubSpot, Jira, spreadsheets) and help articles (ZIP) with PII redaction | IT | `test_computer_use.py::test_bulk_import…` |
+| Memory: successful computer-use runs saved as “Learned fix” knowledge (redacted, staff-only by default) and recalled at the start of the next similar run; chat shares known fixes from history | IT | `test_computer_use.py::test_successful_run_is_remembered…`, `…test_chat_shares_known_fix…` |
 | Desktop technician takeover (human driving the remote screen) | **NI** | Browser sessions only |
 | Integrations: Freshdesk (pull/push/status, idempotency, conflict detection, retry, rotate, revoke) | IT (mocked) / **INT (live)** | Fake Freshdesk transport. No Freshdesk account available. |
 | Generic REST inbound, outbound signed webhooks with retry, email-to-ticket | IT | Local webhook receiver, RFC 5322 messages |
@@ -59,7 +60,7 @@ Status legend: **IT** = IMPLEMENTED_AND_TESTED · **INT** = IMPLEMENTED_NOT_TEST
 
 | Command | Result |
 |---|---|
-| `cd apps/api && pytest` | **98 passed**, 0 failed (68 s). Includes real-Chromium browser E2E (6), desktop protocol E2E via .NET (2), security (29), model-adapter contracts (8). Tests marked `mocked` use local fixtures for AI, search, Freshdesk, SMTP and webhook receivers. |
+| `cd apps/api && pytest` | **99 passed**, 0 failed (68 s). Includes real-Chromium browser E2E (6), desktop protocol E2E via .NET (2), security (29), model-adapter contracts (8). Tests marked `mocked` use local fixtures for AI, search, Freshdesk, SMTP and webhook receivers. |
 | `ruff check joltiq tests` / `mypy joltiq` | All checks passed / no issues in 74 files (mypy caught and fixed an OpenAI-adapter `NameError`) |
 | `dotnet run --project apps/windows-agent/tests/JoltIQ.Agent.Core.SelfTest` | **10 passed**, 0 failed |
 | `dotnet build` Core / Simulator / SelfTest | Succeeded (offline config) |
