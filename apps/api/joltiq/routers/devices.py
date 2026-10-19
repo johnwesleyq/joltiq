@@ -187,6 +187,58 @@ def command_result(cid: uuid.UUID, body: ResultIn, dd=Depends(device_auth)):
     return {"ok": True, "status": cmd.status}
 
 
+@agent_router.post("/commands/{cid}/screenshot")
+async def command_screenshot(cid: uuid.UUID, request: Request, dd=Depends(device_auth)):
+    """Raw JPEG/PNG body (signed like every request). Upload before posting the command result."""
+    from ..models import DeviceCommand
+    from ..services import computer_use
+
+    db, d = dd
+    cmd = db.get(DeviceCommand, cid)
+    if not cmd:
+        raise NotFound("command not found")
+    key = computer_use.attach_screenshot(db, d, cmd, await request.body())
+    return {"ok": True, "stored": bool(key)}
+
+
+class DeviceRespondIn(BaseModel):
+    approved: bool | None = None
+    answer: str | None = Field(default=None, max_length=1000)
+    done: bool = False
+
+
+@agent_router.get("/computer-use/active")
+def device_cu_active(dd=Depends(device_auth)):
+    """What the companion should show: the active run's goal, and any question/approval/secure-input pause."""
+    from sqlalchemy import select
+
+    from ..models import ComputerUseRun
+    from ..services import computer_use
+
+    db, d = dd
+    sids = [s.id for s in db.execute(select(SupportSession).where(SupportSession.device_id == d.id, SupportSession.state == "active")).scalars()]
+    runs = db.execute(select(ComputerUseRun).where(ComputerUseRun.session_id.in_(sids), ComputerUseRun.state.in_(computer_use.ACTIVE))).scalars().all() if sids else []
+    return {"runs": [computer_use.ser(r) for r in runs]}
+
+
+@agent_router.post("/computer-use/{rid}/respond")
+def device_cu_respond(rid: uuid.UUID, body: DeviceRespondIn, dd=Depends(device_auth)):
+    """The person at the computer answered in the companion (approve/deny, answer, or 'I finished typing')."""
+    from ..models import ComputerUseRun
+    from ..services import computer_use
+
+    db, d = dd
+    run = db.get(ComputerUseRun, rid)
+    s = db.get(SupportSession, run.session_id) if run else None
+    if not run or not s or s.device_id != d.id:
+        raise NotFound("run not found")
+    if run.state == "pending_approval":
+        computer_use.approve_goal(db, run, user_id=None, approved=bool(body.approved))
+    else:
+        computer_use.respond(db, run, user_id=None, approved=body.approved, answer=body.answer, done=body.done, via="device")
+    return computer_use.ser(run)
+
+
 @agent_router.post("/unenroll")
 def unenroll(dd=Depends(device_auth)):
     db, d = dd

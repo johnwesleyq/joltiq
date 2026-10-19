@@ -1,0 +1,20 @@
+[project]
+name = "joltiq-desktop-agent"
+version = "1.1.0"
+description = "JoltIQ desktop companion (macOS + Windows): consented, signed, screen-driving support agent"
+requires-python = ">=3.10"
+dependencies = ["httpx>=0.27", "cryptography>=43"]
+
+[project.optional-dependencies]
+# Real screen/input control. Not needed for --simulate.
+desktop = ["mss>=9.0", "pynput>=1.7.7", "Pillow>=10.4"]
+
+[project.scripts]
+joltiq-agent = "joltiq_agent.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["joltiq_agent"]

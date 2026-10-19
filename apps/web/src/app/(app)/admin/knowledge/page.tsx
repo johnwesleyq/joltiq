@@ -8,7 +8,12 @@ type D = { id: string; title: string; source_type: string; status: string; error
 type A = { id: string; title: string; status: string; verified_resolution: boolean; executable: boolean; drafted_by_ai: boolean; updated_at: string };
 type H = { title: string; citation: string; text: string; score: number };
 export default function Knowledge() {
-  const [tab, setTab] = useState<"docs" | "articles" | "search">("docs");
+  const [tab, setTab] = useState<"docs" | "import" | "articles" | "search">("docs");
+  const [unresolved, setUnresolved] = useState(false);
+  type R = { imported: number; skipped: number; duplicates: number; errors: string[] };
+  const imp = useAct(({ f, kind }: { f: File; kind: "tickets" | "articles" }) => { const fd = new FormData(); fd.append("file", f); fd.append("kind", kind);
+    fd.append("include_unresolved", String(unresolved)); if (customerVisible) fd.append("visibility", "customer,technician");
+    return api<R>("/knowledge/import", { method: "POST", body: fd }); }, [["kdocs"]]);
   const docs = useApi<Page<D>>(["kdocs"], "/knowledge/documents?page_size=100", { refetchInterval: 5000 });
   const arts = useApi<Page<A>>(["karts"], "/knowledge/articles?page_size=100");
   const [url, setUrl] = useState(""); const [q, setQ] = useState(""); const [customerVisible, setCV] = useState(false);
@@ -18,8 +23,23 @@ export default function Knowledge() {
   const reindex = useAct((id: string) => api(`/knowledge/documents/${id}/reindex`, { method: "POST" }), [["kdocs"]]);
   const search = useAct(() => api<{ results: H[]; retrieval: { vector: string; semantic_model: boolean } }>("/knowledge/search", { json: { query: q } }));
   return <div><PageHead title="Knowledge" />
-    <div className="mb-5 flex gap-2">{(["docs", "articles", "search"] as const).map((t) => <button key={t} className={tab === t ? "btn btn-primary px-3 py-1" : "btn btn-ghost px-3 py-1"} onClick={() => setTab(t)}>{t === "docs" ? "Sources" : t === "articles" ? "Articles" : "Test search"}</button>)}</div>
-    <ErrorNote error={upload.error || addUrl.error || del.error} />
+    <div className="mb-5 flex gap-2">{(["docs", "import", "articles", "search"] as const).map((t) => <button key={t} className={tab === t ? "btn btn-primary px-3 py-1" : "btn btn-ghost px-3 py-1"} onClick={() => setTab(t)}>{t === "docs" ? "Sources" : t === "import" ? "Import history" : t === "articles" ? "Articles" : "Test search"}</button>)}</div>
+    <ErrorNote error={upload.error || addUrl.error || del.error || imp.error} />
+    {tab === "import" && <div className="grid max-w-[900px] gap-5 md:grid-cols-2">
+      <div className="panel space-y-3 p-5"><h2 className="text-lg font-bold">Past tickets</h2>
+        <p className="text-sm text-slate">Export from Zendesk, Freshdesk, Intercom, HubSpot, Jira or any spreadsheet (CSV or JSON). Columns are matched by name:
+          subject/title, description/body, resolution/solution, status, tags. Resolved tickets become fixes JoltIQ can learn from. Names, emails, phone numbers and other personal data are redacted on import.</p>
+        <label className="flex items-center gap-1.5 text-sm"><input type="checkbox" checked={unresolved} onChange={(e) => setUnresolved(e.target.checked)} /> Also import unresolved tickets</label>
+        <label className="btn btn-primary cursor-pointer">Choose CSV or JSON<input type="file" className="sr-only" accept=".csv,.json,.tsv,.txt" onChange={(e) => e.target.files?.[0] && imp.mutate({ f: e.target.files[0], kind: "tickets" })} /></label></div>
+      <div className="panel space-y-3 p-5"><h2 className="text-lg font-bold">Help-center articles</h2>
+        <p className="text-sm text-slate">A ZIP of your articles or runbooks (Markdown, HTML, text, PDF, Word). Most help centers can export to a ZIP.</p>
+        <label className="flex items-center gap-1.5 text-sm"><input type="checkbox" checked={customerVisible} onChange={(e) => setCV(e.target.checked)} /> Customers can see them</label>
+        <label className="btn btn-primary cursor-pointer">Choose ZIP<input type="file" className="sr-only" accept=".zip" onChange={(e) => e.target.files?.[0] && imp.mutate({ f: e.target.files[0], kind: "articles" })} /></label></div>
+      {imp.isPending && <p className="pulse text-slate md:col-span-2">Importing…</p>}
+      {imp.data && <div className="panel p-4 text-sm md:col-span-2" role="status"><b>Imported {imp.data.imported}</b> · skipped {imp.data.skipped} · duplicates {imp.data.duplicates}
+        {imp.data.errors.length > 0 && <ul className="mt-2 list-disc pl-5 text-stop">{imp.data.errors.map((e, i) => <li key={i}>{e}</li>)}</ul>}
+        <p className="mt-1 text-slate">Indexing runs in the background; items appear under Sources as they finish.</p></div>}
+    </div>}
     {tab === "docs" && <>
       <div className="panel mb-5 flex flex-wrap items-end gap-3 p-4">
         <label className="btn btn-primary cursor-pointer">Upload file<input type="file" className="sr-only" accept=".pdf,.docx,.txt,.md,.csv,.xlsx,.html,.vtt,.srt" onChange={(e) => e.target.files?.[0] && upload.mutate(e.target.files[0])} /></label>

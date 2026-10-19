@@ -124,6 +124,17 @@ def _resume_run(ctx: Ctx, s: SupportSession, reason: str) -> None:
 def frame(sid: uuid.UUID, ctx: Ctx = Depends(get_ctx)):
     """Latest masked screenshot for the live viewer (password/OTP/card fields are blacked out before capture)."""
     s = session_for(ctx, sid)
+    if s.kind == "desktop":
+        # Desktop view = the latest screenshot from a computer-use run (the companion has no continuous stream).
+        from ..models import ComputerUseRun
+        from ..services import storage
+
+        key = ctx.db.execute(select(ComputerUseRun.last_screenshot_key).where(ComputerUseRun.session_id == s.id,
+                             ComputerUseRun.last_screenshot_key.is_not(None)).order_by(ComputerUseRun.updated_at.desc()).limit(1)).scalar()
+        if not key:
+            raise Conflict("No screen view yet", code="no_view")
+        data = storage.get(ctx.org_id, key)
+        return Response(data, media_type="image/png" if data[:4] == b"\x89PNG" else "image/jpeg", headers={"cache-control": "no-store"})
     if s.kind != "browser" or not s.worker_session_ref or s.state in ("terminated", "expired", "pending_consent"):
         raise Conflict("No live browser view for this session", code="no_view")
     shot = browser_client.screenshot(s.worker_session_ref)

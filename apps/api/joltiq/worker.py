@@ -20,6 +20,7 @@ from .models import Integration, Organization, utcnow
 from .services import (  # noqa: F401 - register handlers
     agent,
     approvals,
+    computer_use,
     email,
     integrations,
     knowledge,

@@ -22,9 +22,9 @@ log = logging.getLogger("joltiq.ai")
 T = TypeVar("T", bound=BaseModel)
 
 TASKS = ["intent", "clarify", "retrieval", "diagnosis", "research", "planning", "vision", "tool_selection",
-         "verification_analysis", "article_drafting", "summary", "chat"]
+         "verification_analysis", "article_drafting", "summary", "chat", "computer_use"]
 DEFAULT_ORDER = ["anthropic", "openai", "gemini"]
-TASK_TIER = {"planning": "planning", "diagnosis": "planning", "vision": "vision"}
+TASK_TIER = {"planning": "planning", "diagnosis": "planning", "vision": "vision", "computer_use": "computer_use"}
 
 
 def available_providers(db: Session, org_id: uuid.UUID, task: str) -> list[tuple[str, str, ModelProviderConfig | None, str | None]]:
@@ -118,3 +118,41 @@ def _log_call(db, org_id, run_id, task, prov, model, tin, tout, cost, ms, ok, er
     db.add(mc)
     db.flush()
     return mc
+
+
+def computer_turn(db: Session, org_id: uuid.UUID, *, system: str, messages: list[dict], display: dict[str, int], spent_usd: float = 0.0):
+    """One computer-use model turn through the first approved provider that supports computer use.
+    Returns (Turn, cost_usd). Same tenant-approval, budget, fallback and cost rules as `call()`."""
+    from . import computer
+
+    budget = db.execute(select(AIBudget)).scalar_one_or_none()
+    if budget and spent_usd >= budget.per_run_usd_limit:
+        raise EntitlementExceeded(f"Per-run AI budget (${budget.per_run_usd_limit:.2f}) exhausted", code="run_budget_exhausted")
+    check_entitlement(db, org_id, "ai_usd", adding=0.0)
+    candidates = [c for c in available_providers(db, org_id, "computer_use") if c[0] in computer.SUPPORTED_PROVIDERS]
+    if not candidates:
+        raise Unavailable("Computer use needs an approved Anthropic API key. An admin can add one under Admin → AI models.",
+                          code="computer_use_not_configured")
+    errors: list[str] = []
+    for prov, model, cfg, key in candidates:
+        client = computer.build(prov, key, timeout=max(60, cfg.timeout_seconds if cfg else 120))
+        if client is None:
+            continue
+        for attempt in range(1 + (cfg.max_retries if cfg else 0)):
+            t0 = time.perf_counter()
+            try:
+                t = client.turn(model=model, system=system, messages=messages, display=display)
+            except ProviderError as e:
+                errors.append(f"{prov}: {e}")
+                _log_call(db, org_id, None, "computer_use", prov, model, 0, 0, 0.0, int((time.perf_counter() - t0) * 1000), False, str(e), client.live)
+                if not e.retryable:
+                    break
+                time.sleep(min(4.0, 0.5 * 2**attempt))
+                continue
+            cost = (t.input_tokens / 1e6 * cfg.input_cost_per_mtok + t.output_tokens / 1e6 * cfg.output_cost_per_mtok) if cfg else 0.0
+            mc = _log_call(db, org_id, None, "computer_use", prov, t.model or model, t.input_tokens, t.output_tokens, cost, t.latency_ms, True, None, t.live)
+            meter(db, org_id, "ai_tokens", t.input_tokens + t.output_tokens, f"mc-tokens:{mc.id}", {"provider": prov})
+            if cost:
+                meter(db, org_id, "ai_usd", cost, f"mc-usd:{mc.id}", {"provider": prov})
+            return t, cost
+    raise Unavailable("All computer-use providers failed: " + "; ".join(errors[-4:]), code="ai_failed")

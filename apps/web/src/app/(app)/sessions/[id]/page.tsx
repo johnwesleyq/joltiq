@@ -5,6 +5,7 @@ import { Badge, ErrorNote, Loading, PageHead } from "@/components/ui";
 import type { Session } from "@/components/types";
 import { api, STAFF } from "@/lib/api";
 import { useAct, useApi, useMe } from "@/lib/hooks";
+import DrivePanel from "@/components/DrivePanel";
 
 /** Live session: consent, masked live view, exclusive control, protected sign-in, pause/resume, hand back, emergency stop. */
 export default function SessionPage({ params }: { params: Promise<{ id: string }> }) {
@@ -125,6 +126,7 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
         : d.state === "terminated" ? "This session has ended." : "Waiting for the person at the computer to accept the session in the companion app."}</p>
       {d.state !== "terminated" && <button className="btn btn-ghost mt-3" onClick={() => end.mutate(undefined)}>End session</button>}
     </div>}
+    {d.kind === "desktop" && d.state !== "pending_consent" && <div className="mt-6"><DrivePanel sessionId={id} ready={d.state === "active" && !!d.consent?.device_local_consent} /></div>}
 
     {d.state === "terminated" && <p className="mt-4 text-slate">This session has ended{d.emergency_stopped ? " (emergency stop)" : ""}. {d.ticket_id && <Link className="underline" href={staff ? `/console/tickets/${d.ticket_id}` : `/portal/tickets/${d.ticket_id}`}>Back to the ticket</Link>}</p>}
   </div>;

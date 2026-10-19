@@ -98,7 +98,7 @@ def index_document(db: Session, doc: KnowledgeDocument, version: int) -> int:
             if v is None:
                 v = KnowledgeDocumentVersion(org_id=doc.org_id, document_id=doc.id, version=version, sha256=sha, size_bytes=len(res.body))
                 db.add(v)
-        elif doc.source_type in ("ticket",):
+        elif doc.source_type in ("ticket", "imported_ticket"):
             sections = [Section((doc.meta or {}).get("text", ""), heading=doc.title)]
             v = None
         else:

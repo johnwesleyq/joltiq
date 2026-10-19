@@ -190,6 +190,9 @@ def terminate(db: Session, s: SupportSession, *, by_kind: str, user_id=None, rea
         return
     release_lease(db, s, reason)
     s.state, s.terminated_at = "terminated", utcnow()
+    from .computer_use import stop_for_session
+
+    stop_for_session(db, s, f"Session ended: {reason}")
     if s.kind == "browser" and s.worker_session_ref:
         browser_client.close(s.worker_session_ref)
     if s.consented_at:

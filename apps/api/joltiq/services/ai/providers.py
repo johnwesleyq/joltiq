@@ -53,7 +53,7 @@ CAPABILITIES: dict[str, dict[str, bool]] = {
 DEFAULT_MODELS: dict[str, dict[str, str]] = {
     # Model ids are tenant-configurable in Admin → Models; these are starting defaults only.
     "openai": {"default": "gpt-4.1-mini", "planning": "gpt-4.1", "vision": "gpt-4.1"},
-    "anthropic": {"default": "claude-sonnet-4-5", "planning": "claude-sonnet-4-5", "vision": "claude-sonnet-4-5"},
+    "anthropic": {"default": "claude-sonnet-5-5", "planning": "claude-opus-5-5", "vision": "claude-sonnet-5-5", "computer_use": "claude-sonnet-5-5"},
     "gemini": {"default": "gemini-2.5-flash", "planning": "gemini-2.5-pro", "vision": "gemini-2.5-flash"},
     "local_fixture": {"default": "local-rules-v1"},
 }

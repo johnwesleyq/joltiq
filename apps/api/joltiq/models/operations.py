@@ -345,3 +345,47 @@ class Job(IdMixin, TimestampMixin, Base):
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     dedupe_key: Mapped[str | None] = mapped_column(String(200), nullable=True, unique=True)
+
+
+# ---------------- Computer use (screen-driving agent on an enrolled device) ----------------
+class ComputerUseRun(IdMixin, TimestampMixin, TenantMixin, Base):
+    """One goal-driven 'see the screen, act, repeat' run on a consented desktop session."""
+
+    __tablename__ = "computer_use_runs"
+    session_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("support_sessions.id", ondelete="CASCADE"), index=True)
+    ticket_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("tickets.id", ondelete="SET NULL"), nullable=True)
+    started_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    goal: Mapped[str] = mapped_column(Text)
+    # pending_approval|running|waiting_device|waiting_customer|completed|failed|stopped
+    state: Mapped[str] = mapped_column(String(30), default="pending_approval", index=True)
+    waiting_for: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # {kind: approval|question|secure_input, text, tool_use_id}
+    provider: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    step_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_steps: Mapped[int] = mapped_column(Integer, default=60)
+    # Model transcript with screenshots referenced by storage key (never inline base64 in the DB).
+    transcript: Mapped[list] = mapped_column(JSONB, default=list)
+    pending_command_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # Tool uses from the current model turn not yet executed, and results gathered so far for that turn.
+    queue: Mapped[list] = mapped_column(JSONB, default=list)
+    results: Mapped[list] = mapped_column(JSONB, default=list)
+    last_screenshot_key: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    display: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # {width, height} of screenshots the model sees
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    success: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ComputerUseStep(IdMixin, TimestampMixin, TenantMixin, Base):
+    __tablename__ = "computer_use_steps"
+    __table_args__ = (UniqueConstraint("run_id", "idx"),)
+    run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("computer_use_runs.id", ondelete="CASCADE"), index=True)
+    idx: Mapped[int] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(String(40))  # model action name or control tool (ask_customer, request_approval, ...)
+    params: Mapped[dict] = mapped_column(JSONB, default=dict)  # typed text is stored redacted
+    narration: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending|done|failed|blocked
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    command_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    screenshot_key: Mapped[str | None] = mapped_column(String(300), nullable=True)  # screen AFTER the step

@@ -21,6 +21,13 @@ class ActionSpec:
     default_postconditions: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     reversible: bool = True
     requires_admin: bool = False
+    computer_use: bool = False  # low-level screen/input primitive, only issued by a computer-use run (never by the planner)
+
+
+_XY = {"x": {"type": "integer", "min": 0, "max": 10000}, "y": {"type": "integer", "min": 0, "max": 10000}}
+_COMBO = r"^[A-Za-z0-9_+\- ]{1,60}$"
+def _CU_SPECS(rows: list[tuple[str, R, str, dict[str, dict[str, Any]], str]]) -> list[tuple[str, R, str, dict[str, dict[str, Any]], str]]:  # noqa: N802
+    return rows
 
 
 SERVICE_NAME = r"^[A-Za-z0-9_.\- ]{1,80}$"
@@ -74,6 +81,34 @@ ACTIONS: dict[str, ActionSpec] = {a.id: a for a in [
                {"process": {"type": "string", "pattern": PROCESS_NAME, "required": True},
                 "automation_id": {"type": "string", "max": 200, "required": True}, "text": {"type": "string", "max": 500, "required": True}},
                "Types text into a field in the user's application."),
+    # ---------------- Computer use (screen-driving; issued only by a consented computer-use run) ----------------
+    # Coordinates are in the pixel space of the most recent screenshot the device sent; the device maps them back.
+    *[ActionSpec(i, "desktop", r, d, p, e, computer_use=True) for i, r, d, p, e in _CU_SPECS([
+        ("screen.capture", R.READ_ONLY, "Capture the screen (scaled; secret fields are not masked — sent only to approved AI providers).",
+         {"max_long_edge": {"type": "integer", "min": 640, "max": 1920}}, "None (read-only)."),
+        ("input.click", R.SENSITIVE, "Click at a screen coordinate.",
+         {**_XY, "button": {"type": "string", "enum": ["left", "right", "middle"]}, "count": {"type": "integer", "min": 1, "max": 3},
+          "modifiers": {"type": "string", "pattern": _COMBO}}, "Clicks on the user's screen."),
+        ("input.drag", R.SENSITIVE, "Press, drag and release the left mouse button.",
+         {**_XY, "to_x": {"type": "integer", "min": 0, "max": 10000, "required": True},
+          "to_y": {"type": "integer", "min": 0, "max": 10000, "required": True}}, "Drags on the user's screen."),
+        ("input.move", R.LOW_RISK, "Move the mouse pointer.", _XY, "Moves the pointer."),
+        ("input.mouse", R.SENSITIVE, "Press or release the left mouse button.", {"state": {"type": "string", "enum": ["down", "up"], "required": True}},
+         "Presses/releases the mouse button."),
+        ("input.type", R.SENSITIVE, "Type non-secret text at the keyboard focus (secrets are refused server- and device-side).",
+         {"text": {"type": "string", "max": 2000, "required": True}}, "Types text on the user's computer."),
+        ("input.key", R.SENSITIVE, "Press a key or key combination (e.g. Return, ctrl+s).",
+         {"combo": {"type": "string", "pattern": _COMBO, "required": True}, "repeat": {"type": "integer", "min": 1, "max": 50},
+          "hold_seconds": {"type": "integer", "min": 0, "max": 10}}, "Presses keys on the user's computer."),
+        ("input.scroll", R.LOW_RISK, "Scroll at a position.",
+         {"x": {"type": "integer", "min": 0, "max": 10000}, "y": {"type": "integer", "min": 0, "max": 10000},
+          "direction": {"type": "string", "enum": ["up", "down", "left", "right"], "required": True},
+          "amount": {"type": "integer", "min": 1, "max": 30}}, "Scrolls."),
+        ("input.wait", R.READ_ONLY, "Wait, then capture the screen.", {"seconds": {"type": "integer", "min": 1, "max": 30, "required": True}}, "None."),
+        ("input.cursor", R.READ_ONLY, "Report the pointer position.", {}, "None."),
+        ("url.open", R.SENSITIVE, "Open an http(s) URL in the user's default browser (where they are already signed in).",
+         {"url": {"type": "string", "max": 2000, "pattern": r"^https?://[^\s]+$", "required": True}}, "Opens a web page on the user's computer."),
+    ])],
     # ---------------- Browser (executed by the isolated browser worker) ----------------
     ActionSpec("browser.navigate", "browser", R.LOW_RISK, "Open a URL in the isolated session (consented domains only).",
                {"url": {"type": "string", "max": 2000, "required": True}}, "Loads a page."),
@@ -157,4 +192,4 @@ def default_postconditions(action_id: str, params: dict[str, Any]) -> list[dict[
 
 def registry_for_prompt() -> list[dict[str, Any]]:
     return [{"id": a.id, "channel": a.channel, "description": a.description, "params": a.params, "effects": a.effects}
-            for a in ACTIONS.values() if a.risk != R.DESTRUCTIVE]
+            for a in ACTIONS.values() if a.risk != R.DESTRUCTIVE and not a.computer_use]

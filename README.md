@@ -10,6 +10,7 @@ JoltIQ is an AI support technician for MSPs, B2B software support teams, interna
 |---|---|
 | `apps/api` | FastAPI backend: auth, tenancy (PostgreSQL RLS), tickets, knowledge, AI orchestrator, research, policy, approvals, verifier, sessions, devices, integrations, billing, admin. Alembic migrations in `apps/api/migrations`. Tests in `apps/api/tests`. |
 | `apps/web` | Next.js 15 / React 19 / Tailwind 4 / TanStack Query web app: marketing, auth, customer portal, technician console, org admin, platform admin. |
+| `apps/desktop-agent` | Cross-platform (macOS/Windows) companion: signed protocol client + local policy for computer use. The screen/input layer is supplied separately (see its README). |
 | `apps/windows-agent` | .NET 8 Windows companion: `Core` (protocol, crypto, local policy; cross-platform), `Windows` (UI Automation, registry, event log, services, DPAPI), `Tray` (consent dialog, banner, kill switch), `Broker` (privileged service), WiX installer, PowerShell scripts. |
 | `services/browser-worker` | Isolated Playwright/Chromium worker (per-session contexts, domain allowlist at the network layer, secret-field masking). |
 | `packages/agent-protocol` | `PROTOCOL.md`, the signed device protocol. |
@@ -50,7 +51,7 @@ cd apps/web && npm ci && npm run build && JOLTIQ_API_URL=http://127.0.0.1:8000 n
 
 ```bash
 createdb joltiq_test && psql joltiq_test -c 'create extension vector'
-cd apps/api && .venv/bin/pytest                      # 89 tests: unit, integration, security, browser E2E, desktop protocol E2E
+cd apps/api && .venv/bin/pytest                      # 96 tests: unit, integration, security, browser E2E, desktop protocol E2E
 cd apps/web && npm run typecheck && npm run build
 python tests/e2e/web/ui_smoke.py http://127.0.0.1:3000 ./shots   # real-browser UI smoke (stack must be running)
 python tests/performance/perf.py                     # latency/concurrency against a running stack

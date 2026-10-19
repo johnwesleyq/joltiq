@@ -32,7 +32,10 @@ Status legend: **IT** = IMPLEMENTED_AND_TESTED · **INT** = IMPLEMENTED_NOT_TEST
 | Windows OS actions (UIA, registry HKCU, event log, services, processes), DPAPI key store, tray consent dialog / banner / kill switch hotkey, privileged broker | **B** | Source written; **cannot compile on Linux** (Windows Desktop SDK). Needs a Windows build host + an authorized Windows 11 test machine. |
 | Windows installer (WiX v5 MSI), signing, repair/uninstall | **B** | `installer/Product.wxs`, `scripts/build.ps1`, `sign.ps1`, `test-on-windows.ps1`. Not built. **Not signed** (no certificate). |
 | Companion authenticated auto-update | **P** | Heartbeat reports latest/required version. No signed downloader yet. |
-| Desktop screen viewing + technician takeover on desktop | **NI** | Browser sessions only |
+| **Computer use (screen-driving agent)**: goal approval by the consenting customer, look→act loop, approval / question / “your turn to type” pauses, secret-typing refusal, step limit, budget, stop on session end, per-step screenshots + audit, live screen in the session page | IT (server, fake device + scripted fixture model) | `test_computer_use.py` (6 tests) through the real signed device protocol. Anthropic computer toolset adapter (`computer_toolset_20260801`, legacy `computer_20251124`) **INT (live)**: no key |
+| Device screen/input layer for computer use | **NI (by design here)** | Not in this repo. Plug in an established remote-support SDK or an in-house adapter; contract in `apps/desktop-agent/README.md`. Protocol client + local policy for macOS/Windows in `apps/desktop-agent` |
+| Bulk import of past tickets (CSV/JSON from Zendesk, Freshdesk, Intercom, HubSpot, Jira, spreadsheets) and help articles (ZIP) with PII redaction | IT | `test_computer_use.py::test_bulk_import…` |
+| Desktop technician takeover (human driving the remote screen) | **NI** | Browser sessions only |
 | Integrations: Freshdesk (pull/push/status, idempotency, conflict detection, retry, rotate, revoke) | IT (mocked) / **INT (live)** | Fake Freshdesk transport. No Freshdesk account available. |
 | Generic REST inbound, outbound signed webhooks with retry, email-to-ticket | IT | Local webhook receiver, RFC 5322 messages |
 | Zendesk, ServiceNow, Jira SM, HaloPSA, ConnectWise, Intune, NinjaOne, Datto, M365, Google, Slack, Teams | **NI** (documented extension points; API returns 501) | |
@@ -56,7 +59,7 @@ Status legend: **IT** = IMPLEMENTED_AND_TESTED · **INT** = IMPLEMENTED_NOT_TEST
 
 | Command | Result |
 |---|---|
-| `cd apps/api && pytest` | **89 passed**, 0 failed (68 s). Includes real-Chromium browser E2E (6), desktop protocol E2E via .NET (2), security (29), model-adapter contracts (8). Tests marked `mocked` use local fixtures for AI, search, Freshdesk, SMTP and webhook receivers. |
+| `cd apps/api && pytest` | **96 passed**, 0 failed (68 s). Includes real-Chromium browser E2E (6), desktop protocol E2E via .NET (2), security (29), model-adapter contracts (8). Tests marked `mocked` use local fixtures for AI, search, Freshdesk, SMTP and webhook receivers. |
 | `ruff check joltiq tests` / `mypy joltiq` | All checks passed / no issues in 74 files (mypy caught and fixed an OpenAI-adapter `NameError`) |
 | `dotnet run --project apps/windows-agent/tests/JoltIQ.Agent.Core.SelfTest` | **10 passed**, 0 failed |
 | `dotnet build` Core / Simulator / SelfTest | Succeeded (offline config) |
@@ -84,6 +87,7 @@ Status legend: **IT** = IMPLEMENTED_AND_TESTED · **INT** = IMPLEMENTED_NOT_TEST
 7. SMTP provider credentials.
 
 ## Where to resume (next tasks, in order)
+0. Computer use: choose and integrate the device screen/input layer (remote-support SDK or in-house adapter per `apps/desktop-agent/README.md`), then run a live goal with an Anthropic key on a test machine. Add OpenAI computer-use adapter.
 1. On Windows: `pwsh apps/windows-agent/scripts/build.ps1 -Version 1.0.0`, fix any compile errors in the Windows / Tray / Broker projects, run `JoltIQ.Agent.Tests`, then `scripts/test-on-windows.ps1` on an authorized Windows 11 host. Record results here.
 2. With credentials: run live smoke tests for each AI provider (Admin → AI models → Test), live research, Stripe checkout and webhook, and Freshdesk sync. Add `@pytest.mark.live` tests.
 3. Implement OIDC (Entra) login (`/auth/oidc/{start,callback}` with PyJWT/JWKS validation).

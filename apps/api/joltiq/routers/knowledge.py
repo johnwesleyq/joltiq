@@ -49,6 +49,26 @@ async def upload(file: UploadFile = File(...), title: str = Form(""), visibility
     return ser_doc(d)
 
 
+@router.post("/import", status_code=201)
+async def bulk_import(file: UploadFile = File(...), kind: str = Form("tickets"), include_unresolved: bool = Form(False), visibility: str = Form(""),
+                      ctx: Ctx = Depends(perm("knowledge.write"))):
+    """Onboard history: past tickets (CSV/JSON helpdesk export) or help articles (ZIP)."""
+    from ..services.knowledge import importer
+
+    data = await file.read()
+    if len(data) > 50 * 1024 * 1024:
+        raise AppError("File is larger than 50 MB; split it into parts", code="upload_rejected")
+    name = file.filename or "import"
+    if kind == "tickets":
+        r = importer.import_tickets(ctx.db, ctx.org_id, filename=name, data=data, user_id=ctx.p.user_id, include_unresolved=include_unresolved)
+    elif kind == "articles":
+        vis = [v.strip() for v in visibility.split(",") if v.strip()] or None
+        r = importer.import_articles_zip(ctx.db, ctx.org_id, filename=name, data=data, user_id=ctx.p.user_id, visibility=vis)
+    else:
+        raise AppError("kind must be tickets or articles", code="validation_error")
+    return r.as_dict()
+
+
 class UrlIn(BaseModel):
     url: HttpUrl
     title: str | None = Field(default=None, max_length=300)

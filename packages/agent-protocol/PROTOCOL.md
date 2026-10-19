@@ -43,3 +43,9 @@ Action ids, parameters and risk levels are defined in `apps/api/joltiq/services/
 
 ## 6. Other endpoints
 `POST /agent/v1/heartbeat` (facts, version → update info), `POST /agent/v1/unenroll`.
+
+## 7. Computer use (v1 extension)
+Issued only by a computer-use run on a session the person accepted on the device. Actions: `screen.capture`, `input.click`, `input.drag`, `input.move`, `input.mouse`, `input.type`, `input.key`, `input.scroll`, `input.wait`, `input.cursor`, `url.open`. Coordinates are in the pixel space of the last screenshot the device sent.
+* For each command: `POST /agent/v1/commands/{id}/screenshot` (raw JPEG/PNG, signed) with the screen **after** the action, then `POST /agent/v1/commands/{id}/result` `{status, result: {ok, width, height, text?}}`.
+* `GET /agent/v1/computer-use/active` lists the active run, its goal and any pause (`approval`, `question`, `secure_input`). The companion shows it to the person and answers with `POST /agent/v1/computer-use/{id}/respond` `{approved?, answer?, done?}`. A goal still `pending_approval` can also be approved or declined here.
+* The device must refuse secret-looking text and lock/log-out/shutdown key combos locally (`apps/desktop-agent/joltiq_agent/policy.py`).

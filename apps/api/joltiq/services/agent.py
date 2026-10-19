@@ -446,6 +446,8 @@ def h_plan(db, run):
     steps: list[dict] = []
     for st in plan.steps:
         try:
+            if st.action in ACTIONS and ACTIONS[st.action].computer_use:
+                raise ActionValidationError(f"{st.action} is a computer-use primitive and cannot be planned")
             params = validate_params(st.action, st.params)
         except ActionValidationError as e:
             _escalate(db, run, f"Model proposed an invalid action ({e}); refusing plan")
@@ -705,6 +707,10 @@ HANDLERS = {R.NEW: h_new, R.INTAKE: h_intake, R.COLLECTING_CONTEXT: h_collect, R
 def _device_result(db: Session, payload: dict) -> None:
     cmd = db.get(DeviceCommand, uuid.UUID(payload["command_id"]))
     if not cmd:
+        return
+    from . import computer_use
+
+    if computer_use.on_device_result(db, cmd):
         return
     if cmd.execution_id:
         ex = db.get(ActionExecution, cmd.execution_id)
