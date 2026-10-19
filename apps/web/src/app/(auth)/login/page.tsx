@@ -30,7 +30,7 @@ function LoginForm() {
       setErr(e);
     }
   });
-  return <form onSubmit={onSubmit} className="space-y-4" noValidate>
+  return <form method="post" onSubmit={onSubmit} className="space-y-4" noValidate>
     <h1 className="text-2xl font-bold">Sign in</h1>
     <ErrorNote error={err} />
     <Field label="Email" error={f.formState.errors.email?.message}><input className="input" type="email" autoComplete="email" {...f.register("email")} /></Field>

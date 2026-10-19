@@ -14,7 +14,7 @@ export default function Pricing() {
     <h1 className="text-4xl font-bold">Pricing</h1>
     <p className="mt-3 max-w-[62ch] text-slate">Every plan starts with a 14-day trial. Annual billing is two months free. These prices are an early proposal and may change before general availability.</p>
     <div className="mt-10 grid gap-px overflow-hidden rounded-lg border border-line bg-line md:grid-cols-4">
-      {TIERS.map((t) => <div key={t.name} className="bg-white p-6">
+      {TIERS.map((t) => <div key={t.name} className="bg-surface p-6">
         <h2 className="text-xl font-bold">{t.name}</h2>
         <div className="mt-3"><span className="font-display text-3xl font-bold">{t.price}</span> <span className="text-sm text-slate">{t.note}</span></div>
         <ul className="mt-5 space-y-1.5 text-[0.93rem]">{t.rows.map((r) => <li key={r}>{r}</li>)}</ul>

@@ -9,8 +9,8 @@ const STATUS_TONE: Record<string, string> = {
   FAILED: "bg-stop-soft text-stop", DENIED: "bg-stop-soft text-stop", ESCALATED: "bg-stop-soft text-stop", CANCELLED: "bg-paper text-slate",
   PARTIAL: "bg-jolt-soft text-ink", PARTIALLY_RESOLVED: "bg-jolt-soft text-ink", UNKNOWN: "bg-paper text-slate",
   AI_INVESTIGATING: "bg-jolt-soft text-ink", EXECUTING: "bg-jolt-soft text-ink", VERIFYING: "bg-jolt-soft text-ink",
-  AWAITING_APPROVAL: "bg-white text-ink ring-1 ring-ink", PENDING: "bg-white text-ink ring-1 ring-ink", active: "bg-jolt-soft text-ink",
-  terminated: "bg-paper text-slate", pending_consent: "bg-white text-ink ring-1 ring-ink", awaiting_user_auth: "bg-white text-ink ring-1 ring-ink",
+  AWAITING_APPROVAL: "bg-surface text-ink ring-1 ring-ink", PENDING: "bg-surface text-ink ring-1 ring-ink", active: "bg-jolt-soft text-ink",
+  terminated: "bg-paper text-slate", pending_consent: "bg-surface text-ink ring-1 ring-ink", awaiting_user_auth: "bg-surface text-ink ring-1 ring-ink",
   READ_ONLY: "bg-paper text-slate", LOW_RISK: "bg-paper text-ink", SENSITIVE: "bg-jolt-soft text-ink", PRIVILEGED: "bg-stop-soft text-stop", DESTRUCTIVE: "bg-stop text-white",
   indexed: "bg-verify-soft text-verify", failed: "bg-stop-soft text-stop", connected: "bg-verify-soft text-verify", error: "bg-stop-soft text-stop",
 };

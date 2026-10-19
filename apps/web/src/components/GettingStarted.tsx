@@ -20,6 +20,7 @@ export default function GettingStarted({ admin }: { admin: boolean }) {
     { done: (devices.data?.total ?? 0) > 0, title: "Let it fix computers", body: "Enroll a test PC with a one-time code. JoltIQ can then take over (with permission) and fix things while the user watches.", href: "/admin/devices", cta: "Add a computer" },
   ].filter((s) => admin || !s.adminOnly);
   const left = steps.filter((s) => !s.done).length;
+  const next = steps.findIndex((s) => !s.done);
   if (hidden) return <button className="mb-4 text-sm underline" onClick={() => { setHidden(false); try { localStorage.removeItem("jq_gs_hidden"); } catch { /* ignore */ } }}>Show “How JoltIQ works”</button>;
   return <section className="panel mb-6 p-5">
     <div className="flex flex-wrap items-start justify-between gap-3">
@@ -30,10 +31,10 @@ export default function GettingStarted({ admin }: { admin: boolean }) {
       </div>
       <button className="text-sm text-slate underline" onClick={() => { setHidden(true); try { localStorage.setItem("jq_gs_hidden", "1"); } catch { /* ignore */ } }}>Hide</button>
     </div>
-    <ol className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">{steps.map((s, i) => <li key={s.title} className={s.done ? "rounded-lg border border-verify bg-verify-soft p-4" : "rounded-lg border border-line p-4"}>
+    <ol className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">{steps.map((s, i) => <li key={s.title} className={s.done ? "rounded-xl border border-verify/50 bg-verify-soft p-4" : i === next ? "rounded-xl border border-ion/60 bg-surface-2/60 p-4" : "rounded-xl border border-line p-4"}>
       <div className="text-sm text-slate">Step {i + 1}{s.done && " · done ✓"}</div>
       <b>{s.title}</b><p className="mt-1 text-sm text-slate">{s.body}</p>
-      <Link className={s.done ? "btn btn-ghost mt-3 px-3 py-1 text-sm" : "btn btn-primary mt-3 px-3 py-1 text-sm"} href={s.href}>{s.cta}</Link>
+      <Link className={i === next ? "btn btn-primary mt-3 px-3 py-1 text-sm" : "btn btn-ghost mt-3 px-3 py-1 text-sm"} href={s.href}>{s.cta}</Link>
     </li>)}</ol>
     {left === 0 && <p className="mt-3 text-sm text-verify">All set. Share the Ask JoltIQ page with your customers.</p>}
   </section>;

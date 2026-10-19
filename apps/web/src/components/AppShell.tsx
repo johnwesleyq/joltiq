@@ -6,6 +6,7 @@ import { useEffect, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { ADMINS, api, STAFF } from "@/lib/api";
 import { useApi, useLiveEvents, useMe } from "@/lib/hooks";
+import Core from "./Core";
 import { Loading } from "./ui";
 
 type Nav = { href: string; label: string; roles?: string[]; platform?: boolean };
@@ -51,27 +52,27 @@ export default function AppShell({ children }: { children: ReactNode }) {
   async function logout() { await api("/auth/logout", { method: "POST" }); qc.clear(); router.replace("/login"); }
 
   return <div className="grid min-h-screen md:grid-cols-[232px_1fr]">
-    <aside className="border-r border-line bg-ink text-white/90 md:sticky md:top-0 md:h-screen md:overflow-y-auto">
+    <aside className="border-r border-line bg-[#0a0f28]/80 text-ink/90 backdrop-blur md:sticky md:top-0 md:h-screen md:overflow-y-auto">
       <div className="flex items-center gap-2 px-5 py-5">
-        <span aria-hidden className="inline-block h-3 w-3 rotate-45 bg-jolt" />
-        <span className="font-display text-lg font-bold text-white">{brand}</span>
+        <Core size={26} />
+        <span className="font-display text-lg font-semibold text-white">{brand}</span>
       </div>
       {m.organizations.length > 1 && <div className="px-4 pb-3">
         <label className="sr-only" htmlFor="org">Organization</label>
-        <select id="org" className="w-full rounded bg-ink-2 px-2 py-1.5 text-sm text-white" value={m.active_organization?.id}
+        <select id="org" className="input py-1.5 text-sm" value={m.active_organization?.id}
                 onChange={(e) => switchOrg(e.target.value)}>
           {m.organizations.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
         </select></div>}
       <nav className="pb-6 text-[0.92rem]">
         {NAV.map((g) => { const items = g.items.filter(visible); return items.length ? <div key={g.group} className="mt-3">
-          <div className="px-5 pb-1 text-xs text-white/45">{g.group}</div>
-          {items.map((n) => <Link key={n.href} href={n.href} className={clsx("block px-5 py-1.5 hover:bg-ink-2",
-            (path === n.href || (n.href !== "/portal" && n.href !== "/console" && path.startsWith(n.href))) && "bg-ink-2 text-white shadow-[inset_3px_0_0_var(--color-jolt)]")}>{n.label}</Link>)}
+          <div className="px-5 pb-1 text-xs text-slate/70">{g.group}</div>
+          {items.map((n) => <Link key={n.href} href={n.href} className={clsx("mx-2 block rounded-lg px-3 py-1.5 hover:bg-surface-2",
+            (path === n.href || (n.href !== "/portal" && n.href !== "/console" && path.startsWith(n.href))) && "bg-surface-2 text-white shadow-[inset_3px_0_0_var(--color-ion)]")}>{n.label}</Link>)}
         </div> : null; })}
       </nav>
     </aside>
     <div className="min-w-0">
-      <header className="flex items-center justify-end gap-4 border-b border-line bg-white px-6 py-2.5 text-sm">
+      <header className="flex items-center justify-end gap-4 border-b border-line bg-paper/60 px-6 py-2.5 text-sm backdrop-blur">
         {!m.user.email_verified && <Link href="/account" className="text-stop">Verify your email</Link>}
         <Link href="/notifications" className="hover:underline">Notifications{notes.data?.unread_count ? ` (${notes.data.unread_count})` : ""}</Link>
         <Link href="/account" className="text-slate hover:text-ink">{m.user.name || m.user.email} · {m.active_organization?.name}</Link>

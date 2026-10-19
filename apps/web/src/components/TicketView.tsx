@@ -44,7 +44,7 @@ export default function TicketView({ id, staff }: { id: string; staff: boolean }
           {d.attachments.length > 0 && <ul className="mt-3 text-sm">{d.attachments.map((a) => <li key={a.id}><a className="underline" href={`/api/v1/tickets/${id}/attachments/${a.id}`}>{a.filename}</a> <span className="text-slate">({Math.ceil(a.size_bytes / 1024)} KB)</span></li>)}</ul>}
         </div>
         <div className="space-y-3">
-          {d.comments.map((c) => <div key={c.id} className={c.internal ? "rounded-md border border-dashed border-slate/40 bg-paper p-3" : c.author_kind === "ai" ? "rounded-md border-l-4 border-jolt bg-white p-3" : "panel p-3"}>
+          {d.comments.map((c) => <div key={c.id} className={c.internal ? "rounded-md border border-dashed border-slate/40 bg-paper p-3" : c.author_kind === "ai" ? "rounded-md border-l-4 border-jolt bg-surface p-3" : "panel p-3"}>
             <div className="mb-1 text-xs text-slate">{c.author_kind === "ai" ? "Assistant" : c.author?.name ?? c.author_kind} · {fmtDate(c.created_at)}{c.internal && " · internal note"}</div>
             <div className="whitespace-pre-wrap">{c.body}</div></div>)}
         </div>

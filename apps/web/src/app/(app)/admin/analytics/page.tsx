@@ -32,7 +32,7 @@ function Daily({ data }: { data: D["daily"] }) {
       <text x="0" y={H + 16} fontSize="11" fill="var(--color-slate)">{data[0]!.date}</text>
       <text x={W} y={H + 16} fontSize="11" fill="var(--color-slate)" textAnchor="end">{data.at(-1)!.date}</text>
     </svg>
-    {hover != null && <div className="pointer-events-none absolute top-0 rounded border border-line bg-white px-2 py-1 text-xs shadow" style={{ left: `${((hover + 0.5) / data.length) * 100}%` }}>
+    {hover != null && <div className="pointer-events-none absolute top-0 rounded border border-line bg-surface px-2 py-1 text-xs shadow" style={{ left: `${((hover + 0.5) / data.length) * 100}%` }}>
       <b>{data[hover]!.date}</b><br />Resolved {data[hover]!.resolved} · Escalated {data[hover]!.escalated}</div>}</div>}
   </figure>;
 }
@@ -46,7 +46,7 @@ export default function Analytics() {
         {[["Verified resolution rate", pct(r.data.verified_resolution_rate)], ["Escalation rate", pct(r.data.escalation_rate)], ["Finished runs", String(r.data.runs.finished)],
           ["Avg. approval wait", r.data.approval_latency_seconds_avg == null ? "—" : `${Math.round(r.data.approval_latency_seconds_avg / 60)} min`],
           ["Cost per verified fix", r.data.cost_per_verified_resolution_usd == null ? "—" : `$${r.data.cost_per_verified_resolution_usd.toFixed(2)}`],
-          ["Open tickets past SLA", String(r.data.sla_breached_open)]].map(([l, v]) => <div key={l} className="bg-white p-4"><div className="font-display text-2xl font-bold">{v}</div><div className="text-sm text-slate">{l}</div></div>)}
+          ["Open tickets past SLA", String(r.data.sla_breached_open)]].map(([l, v]) => <div key={l} className="bg-surface p-4"><div className="font-display text-2xl font-bold">{v}</div><div className="text-sm text-slate">{l}</div></div>)}
       </div>
       <Daily data={r.data.daily} />
       <div className="grid gap-6 lg:grid-cols-2">

@@ -13,7 +13,7 @@ export default function Notifications() {
   return <div className="grid gap-10 lg:grid-cols-[1fr_320px]"><div>
     <PageHead title="Notifications">{!!r.data?.unread_count && <button className="btn btn-ghost" onClick={() => read.mutate(undefined)}>Mark all as read</button>}</PageHead>
     {r.isLoading ? <Loading /> : !r.data?.items.length ? <Empty>You&apos;re all caught up.</Empty> :
-      <ul className="divide-y divide-line rounded-lg border border-line bg-white">{r.data.items.map((n) => <li key={n.id} className={n.read ? "p-3" : "p-3 shadow-[inset_3px_0_0_var(--color-ink)]"}>
+      <ul className="divide-y divide-line rounded-lg border border-line bg-surface">{r.data.items.map((n) => <li key={n.id} className={n.read ? "p-3" : "p-3 shadow-[inset_3px_0_0_var(--color-ink)]"}>
         <div className="flex justify-between gap-4"><b>{n.link ? <Link href={n.link} className="hover:underline">{n.title}</Link> : n.title}</b><span className="shrink-0 text-xs text-slate">{fmtDate(n.at)}</span></div>
         {n.body && <p className="text-sm text-slate">{n.body}</p>}</li>)}</ul>}</div>
     <div><h2 className="mb-3 text-lg font-bold">Delivery</h2>

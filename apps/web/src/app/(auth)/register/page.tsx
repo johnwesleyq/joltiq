@@ -24,7 +24,7 @@ export default function Register() {
     try { qc.setQueryData(["me"], await api<Me>("/auth/register", { json: v })); router.replace("/console"); } catch (e) { setErr(e); }
   });
   const e = f.formState.errors;
-  return <form onSubmit={onSubmit} className="space-y-4" noValidate>
+  return <form method="post" onSubmit={onSubmit} className="space-y-4" noValidate>
     <h1 className="text-2xl font-bold">Start your trial</h1>
     <p className="text-sm text-slate">14 days, no card required. You&apos;ll be the owner of your organization.</p>
     <ErrorNote error={err} />

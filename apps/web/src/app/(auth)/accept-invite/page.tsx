@@ -17,7 +17,7 @@ function Accept() {
   const [pw, setPw] = useState("");
   useEffect(() => { api<Info>(`/auth/invitations/${encodeURIComponent(token)}`).then(setInfo).catch(setErr); }, [token]);
   if (!info) return err ? <ErrorNote error={err} /> : <Loading />;
-  return <form className="space-y-4" onSubmit={async (e) => { e.preventDefault(); setErr(null);
+  return <form method="post" className="space-y-4" onSubmit={async (e) => { e.preventDefault(); setErr(null);
       try { const me = await api<Me>("/auth/invitations/accept", { json: { token, name, password: pw } }); qc.setQueryData(["me"], me);
             router.replace(STAFF.includes(info.role) ? "/console" : "/portal"); } catch (x) { setErr(x); } }}>
     <h1 className="text-2xl font-bold">Join {info.organization}</h1>

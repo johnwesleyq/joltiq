@@ -4,6 +4,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { ApprovalCard } from "@/components/RunPanel";
 import type { Run, Session } from "@/components/types";
+import Core from "@/components/Core";
 import { ErrorNote } from "@/components/ui";
 import { api, STAFF } from "@/lib/api";
 import { useApi, useMe } from "@/lib/hooks";
@@ -31,8 +32,8 @@ const WORKING: Record<string, string> = {
 };
 const DONE = ["RESOLVED", "ESCALATED", "FAILED", "CANCELLED", "PARTIALLY_RESOLVED"];
 
-function Avatar() {
-  return <span aria-hidden className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-ink"><span className="h-3 w-3 rotate-45 bg-jolt" /></span>;
+function Avatar({ thinking = false }: { thinking?: boolean }) {
+  return <Core size={34} thinking={thinking} />;
 }
 
 function Chat() {
@@ -101,30 +102,30 @@ function Chat() {
 
   const empty = bubbles.length === 0;
   return <div className="mx-auto flex min-h-[calc(100vh-4rem)] max-w-[820px] flex-col">
-    <header className="flex items-center gap-3 border-b border-line pb-4">
-      <Avatar />
-      <div className="grow"><div className="font-display text-lg font-bold">{brand}</div>
+    <header className="flex items-center gap-3 border-b border-line/60 pb-4">
+      <Avatar thinking={working} />
+      <div className="grow"><div className="font-display text-base font-semibold">{brand}</div>
         <div className="flex items-center gap-1.5 text-sm text-slate"><span className="h-2 w-2 rounded-full bg-verify" />AI support technician · online</div></div>
       {!empty && <button className="btn btn-ghost px-3 py-1 text-sm" onClick={reset}>New conversation</button>}
     </header>
 
     <div className="grow space-y-4 py-6" aria-live="polite">
-      {empty && <div className="space-y-6">
-        <div className="flex gap-3"><Avatar /><div className="rounded-2xl rounded-tl-sm bg-white px-4 py-3 shadow-sm">
-          <p>Hi{first ? ` ${first}` : ""}, I&apos;m {brand}, your AI support technician. Tell me what&apos;s wrong in your own words.</p>
-          <p className="mt-2 text-slate">I can answer from your company&apos;s past fixes and, with your permission, take over your browser or computer and fix it while you watch.</p>
-        </div></div>
-        <div className="grid gap-2 sm:grid-cols-2">{CAN_DO.map(([t, d]) => <div key={t} className="rounded-lg border border-line bg-white px-4 py-3">
-          <b>{t}</b><div className="text-sm text-slate">{d}</div></div>)}</div>
-        <div><div className="mb-2 text-sm text-slate">Try one:</div>
-          <div className="flex flex-wrap gap-2">{SUGGESTIONS.map((s) => <button key={s} className="rounded-full border border-line bg-white px-3 py-1.5 text-sm hover:border-ink" onClick={() => send(s)}>{s}</button>)}</div></div>
+      {empty && <div className="flex flex-col items-center pt-6 text-center">
+        <Core size={120} />
+        <h1 className="mt-8 max-w-[18ch] text-[clamp(1.7rem,4vw,2.6rem)]">Hi{first ? ` ${first}` : ""}. What&apos;s broken?</h1>
+        <p className="mt-3 max-w-[56ch] text-slate">I&apos;m {brand}, an AI technician. Describe the problem in your own words. I&apos;ll check how your team fixed it before,
+          and with your OK I can take over your browser or computer and fix it while you watch.</p>
+        <div className="mt-8 flex max-w-[680px] flex-wrap justify-center gap-2">{SUGGESTIONS.map((s) => <button key={s}
+          className="rounded-full border border-line bg-surface/70 px-3.5 py-1.5 text-sm transition hover:border-ion hover:text-white" onClick={() => send(s)}>{s}</button>)}</div>
+        <dl className="mt-10 grid w-full gap-3 text-left sm:grid-cols-2">{CAN_DO.map(([t, d]) => <div key={t} className="rounded-xl border border-line/70 bg-surface/50 px-4 py-3">
+          <dt className="font-semibold text-white">{t}</dt><dd className="text-sm text-slate">{d}</dd></div>)}</dl>
       </div>}
 
       {bubbles.map((b) => b.who === "ai"
-        ? <div key={b.id} className="flex gap-3"><Avatar /><div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-tl-sm bg-white px-4 py-3 shadow-sm">{b.text}</div></div>
-        : <div key={b.id} className="flex justify-end"><div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-tr-sm bg-ink px-4 py-3 text-white">{b.text}</div></div>)}
+        ? <div key={b.id} className="flex gap-3"><Avatar /><div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-tl-sm bg-surface px-4 py-3 shadow-sm">{b.text}</div></div>
+        : <div key={b.id} className="flex justify-end"><div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-tr-sm bg-gradient-to-br from-plasma to-[#5b4fd6] px-4 py-3 text-white">{b.text}</div></div>)}
 
-      {(working || busy) && <div className="flex gap-3"><Avatar /><div className="rounded-2xl rounded-tl-sm bg-white px-4 py-3 text-slate shadow-sm">
+      {(working || busy) && <div className="flex gap-3"><Avatar thinking /><div className="rounded-2xl rounded-tl-sm bg-surface px-4 py-3 text-slate shadow-sm">
         <span className="pulse">{WORKING[run?.state ?? "NEW"] ?? "Working on it…"}</span></div></div>}
 
       {run?.paused_for === "customer" && <p className="pl-12 text-sm text-slate">Answer in the box below.</p>}
@@ -145,11 +146,11 @@ function Chat() {
       <div ref={endRef} />
     </div>
 
-    <form onSubmit={(e) => { e.preventDefault(); send(msg); }} className="sticky bottom-0 border-t border-line bg-paper pb-4 pt-3">
+    <form onSubmit={(e) => { e.preventDefault(); send(msg); }} className="sticky bottom-0 bg-gradient-to-t from-paper via-paper/95 to-transparent pb-4 pt-6">
       <ErrorNote error={err} />
-      <div className="flex items-end gap-2 rounded-2xl border border-line bg-white p-2 focus-within:border-ink">
+      <div className="flex items-end gap-2 rounded-3xl border border-line bg-surface/90 p-2 shadow-[0_10px_40px_-20px_rgb(92_225_255/.5)] focus-within:border-ion">
         <label htmlFor="msg" className="sr-only">Message {brand}</label>
-        <textarea id="msg" rows={1} className="max-h-40 min-h-[44px] grow resize-none bg-transparent px-2 py-2 outline-none" value={msg}
+        <textarea id="msg" rows={1} className="max-h-40 min-h-[44px] grow resize-none bg-transparent px-2 py-2 outline-none focus-visible:outline-none" value={msg}
                   onChange={(e) => setMsg(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(msg); } }}
                   placeholder={empty ? "Describe the problem… e.g. Outlook closes when I open a PDF" : "Reply…"} />
         {voice && <button type="button" className="btn btn-ghost px-3" onClick={toggleVoice} aria-pressed={listening} aria-label={listening ? "Stop dictation" : "Dictate"}>{listening ? "■" : "🎤"}</button>}

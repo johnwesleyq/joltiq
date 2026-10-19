@@ -12,7 +12,7 @@ function Form() {
   const [err, setErr] = useState<unknown>(null);
   if (done) return <div className="space-y-3"><h1 className="text-2xl font-bold">Password changed</h1>
     <p className="text-slate">You&apos;ve been signed out everywhere. Sign in with your new password.</p><Link href="/login" className="btn btn-primary">Sign in</Link></div>;
-  return <form className="space-y-4" onSubmit={async (e) => { e.preventDefault(); setErr(null);
+  return <form method="post" className="space-y-4" onSubmit={async (e) => { e.preventDefault(); setErr(null);
       try { await api("/auth/password/reset", { json: { token, password: pw } }); setDone(true); } catch (x) { setErr(x); } }}>
     <h1 className="text-2xl font-bold">Choose a new password</h1>
     <ErrorNote error={err} />
