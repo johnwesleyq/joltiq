@@ -15,7 +15,9 @@ x-api-env: &api-env
   JOLTIQ_WEB_ORIGIN: ${JOLTIQ_WEB_ORIGIN:-http://localhost:3000}
   JOLTIQ_SMTP_HOST: ${JOLTIQ_SMTP_HOST:-mailpit}
   JOLTIQ_SMTP_PORT: ${JOLTIQ_SMTP_PORT:-1025}
-  JOLTIQ_S3_ENDPOINT: http://minio:9000
+  # S3 (MinIO) is optional: run with --profile s3 and set JOLTIQ_S3_ENDPOINT=http://minio:9000
+  JOLTIQ_S3_ENDPOINT: ${JOLTIQ_S3_ENDPOINT:-}
+  JOLTIQ_LOCAL_STORAGE_DIR: /app/.storage
   JOLTIQ_S3_BUCKET: joltiq
   JOLTIQ_S3_ACCESS_KEY: ${MINIO_ROOT_USER:-joltiq}
   JOLTIQ_S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-joltiq-minio-secret}
@@ -38,12 +40,14 @@ services:
     image: redis:7.4-alpine
     healthcheck: { test: ["CMD", "redis-cli", "ping"], interval: 5s }
   minio:
+    profiles: [s3]
     image: minio/minio:RELEASE.2025-04-22T22-12-26Z
     command: server /data --console-address :9001
     environment: { MINIO_ROOT_USER: "${MINIO_ROOT_USER:-joltiq}", MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-joltiq-minio-secret}" }
     volumes: [miniodata:/data]
     ports: ["9001:9001"]
   minio-init:
+    profiles: [s3]
     image: minio/mc:RELEASE.2025-04-16T18-13-26Z
     depends_on: [minio]
     entrypoint: ["/bin/sh", "-c", "until mc alias set l http://minio:9000 $${MINIO_ROOT_USER:-joltiq} $${MINIO_ROOT_PASSWORD:-joltiq-minio-secret}; do sleep 1; done; mc mb -p l/joltiq; mc encrypt set sse-s3 l/joltiq || true"]
@@ -60,11 +64,13 @@ services:
   api:
     build: { context: ., dockerfile: infrastructure/docker/api.Dockerfile }
     environment: *api-env
+    volumes: ["appdata:/app/.storage"]
     ports: ["8000:8000"]
     depends_on: { migrate: { condition: service_completed_successfully }, redis: { condition: service_healthy } }
   worker:
     build: { context: ., dockerfile: infrastructure/docker/api.Dockerfile }
     environment: *api-env
+    volumes: ["appdata:/app/.storage"]
     command: ["python", "-m", "joltiq.worker"]
     depends_on: { migrate: { condition: service_completed_successfully } }
     stop_grace_period: 60s
@@ -93,4 +99,4 @@ services:
     volumes: ["./tests/e2e/testapp:/testapp:ro"]
     command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8300"]
 
-volumes: { pgdata: {}, miniodata: {} }
+volumes: { pgdata: {}, miniodata: {}, appdata: {} }
