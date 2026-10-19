@@ -228,3 +228,18 @@ def test_import_hubspot_service_hub_zipped_csv(owner):
     assert r.json()["imported"] == 1 and r.json()["skipped"] == 1
     r = owner.post("/api/v1/knowledge/import", data={"kind": "tickets"}, files={"file": ("t.xlsx", b"PK\x03\x04xx", "application/octet-stream")})
     assert r.status_code == 400 and "CSV" in r.json()["error"]["message"]
+
+
+def test_chat_shares_known_fix_from_imported_history(owner):
+    csv_data = (b"Ticket ID,Ticket name,Ticket description,Ticket status,Resolution\n"
+                b"7001,Printer shows offline,HP printer offline on laptop,Closed,Printer IP changed; updated the TCP/IP port and reserved the IP.\n")
+    owner.post("/api/v1/knowledge/import", data={"kind": "tickets"}, files={"file": ("h.csv", csv_data, "text/csv")})
+    drain()
+    r = owner.post("/api/v1/agents/chat", json={"message": "My printer shows offline"}).json()
+    drain()
+    msgs = [m["content"] for m in owner.get(f"/api/v1/tickets/{r['ticket_id']}/runs").json()[0]["messages"]]
+    assert any("What fixed it: Printer IP changed" in m for m in msgs)
+    r = owner.post("/api/v1/agents/chat", json={"message": "my coffee machine is broken"}).json()
+    drain()
+    msgs = [m["content"] for m in owner.get(f"/api/v1/tickets/{r['ticket_id']}/runs").json()[0]["messages"]]
+    assert not any("What fixed it" in m for m in msgs)

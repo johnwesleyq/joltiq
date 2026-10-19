@@ -11,7 +11,7 @@ import { Loading } from "./ui";
 type Nav = { href: string; label: string; roles?: string[]; platform?: boolean };
 const NAV: { group: string; items: Nav[] }[] = [
   { group: "Support", items: [
-    { href: "/portal", label: "Get help" }, { href: "/portal/tickets", label: "My tickets", roles: ["customer"] },
+    { href: "/portal", label: "Ask JoltIQ" }, { href: "/portal/tickets", label: "My tickets", roles: ["customer"] },
     { href: "/portal/devices", label: "My devices", roles: ["customer"] }, { href: "/approvals", label: "Approvals" },
   ] },
   { group: "Technician", items: [

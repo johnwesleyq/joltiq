@@ -363,6 +363,7 @@ def h_search_internal(db, run):
             if e["id"] == p["evidence_id"]:
                 e["procedure"] = True
     _ctx_update(run, evidence=ev, procedures=procs)
+    _share_known_fix(db, run, q)
     org = db.get(Organization, run.org_id)
     research_ok = ((org.settings if org else {}) or {}).get("external_research_enabled", True)
     strong = bool(procs) or any(e.get("outcome") == "verified" for e in ev)
@@ -370,6 +371,46 @@ def h_search_internal(db, run):
         transition(db, run, R.RESEARCHING_EXTERNAL, f"{len(ev)} internal results, none with a verified/approved fix")
     else:
         transition(db, run, R.DIAGNOSING, f"{len(ev)} internal results, {len(procs)} approved procedures")
+
+
+_STOP = {"the", "and", "for", "with", "when", "this", "that", "from", "have", "has", "not", "can", "cant", "can't", "won't", "wont", "does",
+         "doesn't", "my", "our", "your", "you", "are", "was", "is", "it", "its", "to", "of", "on", "in", "a", "an", "i", "me", "we", "keeps", "after"}
+
+
+def _words(t: str) -> set[str]:
+    import re as _re
+
+    return {w for w in _re.findall(r"[a-z0-9]{3,}", t.lower()) if w not in _STOP}
+
+
+def _share_known_fix(db, run, query: str) -> None:
+    """Tell the person right away when the company has solved this before, using only knowledge THEY may see.
+    Deterministic (no model needed), so it works even before an AI key is added."""
+    if run.context.get("shared_known_fix"):
+        return
+    from ..models import Membership
+
+    role = "customer"
+    if run.started_by:
+        m = db.execute(select(Membership.role).where(Membership.user_id == run.started_by, Membership.org_id == run.org_id)).scalar()
+        role = m or "customer"
+    hits = kb.search(db, run.org_id, query, role=role, limit=3)
+    qw = _words(query)
+    for h in hits:
+        body = h["text"]
+        if len(qw & _words(h.get("title", "") + " " + body)) < min(2, len(qw)):
+            continue
+        fix = body.split("Resolution:", 1)[1].strip() if "Resolution:" in body else ""
+        fix = fix.split("\n")[0].strip()
+        if not fix or fix.startswith("(not recorded)"):
+            if h.get("source_type") in ("imported_ticket", "ticket"):
+                continue
+            fix = body.strip()[:500]
+        _ctx_update(run, shared_known_fix=True)
+        _say(db, run, f"I found a similar issue we've solved before ({h['title']}).\n\nWhat fixed it: {fix[:600]}\n\n"
+                      "You can try that now. I'll keep working on it and let you know what I find.",
+             data={"citations": [{"citation": h["citation"], "document_id": h["document_id"]}], "kind": "known_fix"})
+        return
 
 
 def h_research(db, run):
@@ -439,7 +480,10 @@ def h_plan(db, run):
              "If no safe plan exists, set escalate_instead.")
     plan = _model(db, run, "planning", S.ProposedPlan, payload, extra)
     if plan.escalate_instead or not plan.steps:
-        _say(db, run, f"I couldn't find a safe, verified fix to apply automatically. {plan.escalation_reason or ''}".strip())
+        if run.context.get("shared_known_fix"):
+            _say(db, run, "I don't have an approved way to apply that fix for you automatically yet, so I won't change anything on your system.")
+        else:
+            _say(db, run, f"I couldn't find a safe, verified fix to apply automatically. {plan.escalation_reason or ''}".strip())
         _escalate(db, run, plan.escalation_reason or "No safe plan")
         return
     # Validate every step against the registry. The model cannot set risk or skip postconditions.

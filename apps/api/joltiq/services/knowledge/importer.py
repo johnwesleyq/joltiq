@@ -118,7 +118,8 @@ def _ticket_files(filename: str, data: bytes) -> list[tuple[str, bytes]]:
     return out
 
 
-def import_tickets(db: Session, org_id: uuid.UUID, *, filename: str, data: bytes, user_id, include_unresolved: bool = False) -> ImportResult:
+def import_tickets(db: Session, org_id: uuid.UUID, *, filename: str, data: bytes, user_id, include_unresolved: bool = False,
+                   visibility: list[str] | None = None) -> ImportResult:
     if filename.lower().endswith((".xlsx", ".xls")):
         raise AppError("Excel files aren't supported yet. Export as CSV instead.", code="validation_error")
     rows = [r for n, d in _ticket_files(filename, data) for r in _rows(n, d)]
@@ -148,7 +149,7 @@ def import_tickets(db: Session, org_id: uuid.UUID, *, filename: str, data: bytes
                 "".join(f"{k.title()}: {v}\n" for k in ("tags", "product") if (v := _pick(row, k))))
         red = redact_text(body)
         doc = KnowledgeDocument(org_id=org_id, title=(f"Past ticket {ext}: " if ext else "Past ticket: ") + redact_text(subject or desc[:80]).text[:250],
-                                source_type="imported_ticket", source_uri=uri[:1000], content_type="text/plain", visibility=_vis(None),
+                                source_type="imported_ticket", source_uri=uri[:1000], content_type="text/plain", visibility=_vis(visibility),
                                 status="pending", uploaded_by=user_id,
                                 meta={"text": red.text[:100_000], "outcome": "historical", "status": status or None, "import_batch": batch,
                                       "redacted": red.findings})

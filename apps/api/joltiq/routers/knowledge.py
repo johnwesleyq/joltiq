@@ -59,10 +59,11 @@ async def bulk_import(file: UploadFile = File(...), kind: str = Form("tickets"),
     if len(data) > 50 * 1024 * 1024:
         raise AppError("File is larger than 50 MB; split it into parts", code="upload_rejected")
     name = file.filename or "import"
+    vis = [v.strip() for v in visibility.split(",") if v.strip()] or None
     if kind == "tickets":
-        r = importer.import_tickets(ctx.db, ctx.org_id, filename=name, data=data, user_id=ctx.p.user_id, include_unresolved=include_unresolved)
+        r = importer.import_tickets(ctx.db, ctx.org_id, filename=name, data=data, user_id=ctx.p.user_id, include_unresolved=include_unresolved,
+                                    visibility=vis)
     elif kind == "articles":
-        vis = [v.strip() for v in visibility.split(",") if v.strip()] or None
         r = importer.import_articles_zip(ctx.db, ctx.org_id, filename=name, data=data, user_id=ctx.p.user_id, visibility=vis)
     else:
         raise AppError("kind must be tickets or articles", code="validation_error")

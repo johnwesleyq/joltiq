@@ -1,19 +1,22 @@
 "use client";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import GettingStarted from "@/components/GettingStarted";
 import TicketList from "@/components/TicketList";
 import { ErrorNote, PageHead } from "@/components/ui";
-import { api } from "@/lib/api";
-import { useAct } from "@/lib/hooks";
+import { ADMINS, api } from "@/lib/api";
+import { useAct, useMe } from "@/lib/hooks";
 
 export default function Queue() {
   const router = useRouter();
+  const me = useMe();
   const [open, setOpen] = useState(false);
   const [subject, setSubject] = useState("");
   const [desc, setDesc] = useState("");
   const [prio, setPrio] = useState("normal");
   const create = useAct(() => api<{ id: string }>("/tickets", { json: { subject, description: desc, priority: prio } }), [["tickets"]]);
   return <div>
+    <GettingStarted admin={ADMINS.includes(me.data?.active_organization?.role ?? "")} />
     <PageHead title="Ticket queue"><button className="btn btn-primary" onClick={() => setOpen(!open)}>New ticket</button></PageHead>
     {open && <form className="panel mb-6 space-y-3 p-4" onSubmit={(e) => { e.preventDefault(); create.mutate(undefined, { onSuccess: (t) => router.push(`/console/tickets/${t.id}`) }); }}>
       <ErrorNote error={create.error} />

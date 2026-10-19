@@ -30,6 +30,7 @@ export default function Knowledge() {
         <p className="text-sm text-slate">Export from Zendesk, Freshdesk, Intercom, HubSpot Service Hub, Jira or any spreadsheet as CSV or JSON (a ZIP of CSVs is fine; Excel files aren’t supported yet). Columns are matched by name:
           subject/title, description/body, resolution/solution, status, tags. Resolved tickets become fixes JoltIQ can learn from. Names, emails, phone numbers and other personal data are redacted on import.</p>
         <label className="flex items-center gap-1.5 text-sm"><input type="checkbox" checked={unresolved} onChange={(e) => setUnresolved(e.target.checked)} /> Also import unresolved tickets</label>
+        <label className="flex items-center gap-1.5 text-sm"><input type="checkbox" checked={customerVisible} onChange={(e) => setCV(e.target.checked)} /> Let JoltIQ share these fixes with customers in chat</label>
         <label className="btn btn-primary cursor-pointer">Choose CSV or JSON<input type="file" className="sr-only" accept=".csv,.json,.tsv,.txt,.zip" onChange={(e) => e.target.files?.[0] && imp.mutate({ f: e.target.files[0], kind: "tickets" })} /></label></div>
       <div className="panel space-y-3 p-5"><h2 className="text-lg font-bold">Help-center articles</h2>
         <p className="text-sm text-slate">A ZIP of your articles or runbooks (Markdown, HTML, text, PDF, Word). Most help centers can export to a ZIP.</p>

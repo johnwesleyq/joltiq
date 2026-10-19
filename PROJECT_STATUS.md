@@ -59,7 +59,7 @@ Status legend: **IT** = IMPLEMENTED_AND_TESTED · **INT** = IMPLEMENTED_NOT_TEST
 
 | Command | Result |
 |---|---|
-| `cd apps/api && pytest` | **96 passed**, 0 failed (68 s). Includes real-Chromium browser E2E (6), desktop protocol E2E via .NET (2), security (29), model-adapter contracts (8). Tests marked `mocked` use local fixtures for AI, search, Freshdesk, SMTP and webhook receivers. |
+| `cd apps/api && pytest` | **98 passed**, 0 failed (68 s). Includes real-Chromium browser E2E (6), desktop protocol E2E via .NET (2), security (29), model-adapter contracts (8). Tests marked `mocked` use local fixtures for AI, search, Freshdesk, SMTP and webhook receivers. |
 | `ruff check joltiq tests` / `mypy joltiq` | All checks passed / no issues in 74 files (mypy caught and fixed an OpenAI-adapter `NameError`) |
 | `dotnet run --project apps/windows-agent/tests/JoltIQ.Agent.Core.SelfTest` | **10 passed**, 0 failed |
 | `dotnet build` Core / Simulator / SelfTest | Succeeded (offline config) |
