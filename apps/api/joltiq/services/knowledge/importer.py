@@ -29,12 +29,12 @@ ARTICLE_EXT = (".md", ".markdown", ".txt", ".html", ".htm", ".pdf", ".docx", ".c
 # Column aliases seen in common helpdesk exports (lower-cased, spaces/underscores normalised away).
 ALIASES = {
     "id": ["id", "ticketid", "ticketnumber", "number", "key", "issuekey", "conversationid"],
-    "subject": ["subject", "title", "summary", "name", "issue"],
-    "description": ["description", "body", "problem", "question", "details", "firstmessage", "message", "content"],
-    "resolution": ["resolution", "solution", "answer", "fix", "resolutionnotes", "resolutioncomment", "lastagentreply", "agentreply",
+    "subject": ["subject", "ticketname", "title", "summary", "name", "issue"],
+    "description": ["description", "ticketdescription", "body", "problem", "question", "details", "firstmessage", "message", "content"],
+    "resolution": ["resolution", "resolutiondetails", "solution", "answer", "fix", "resolutionnotes", "resolutioncomment", "lastagentreply", "agentreply",
                    "internalnotes", "notes"],
-    "status": ["status", "state", "ticketstatus"],
-    "tags": ["tags", "labels", "category", "type", "tickettype"],
+    "status": ["status", "state", "ticketstatus", "pipelinestage", "stage"],
+    "tags": ["tags", "labels", "category", "ticketcategory", "type", "tickettype"],
     "product": ["product", "application", "app", "service", "component"],
 }
 RESOLVED = {"resolved", "closed", "solved", "done", "completed", "fixed"}
@@ -97,8 +97,31 @@ def _rows(filename: str, data: bytes) -> list[dict[str, Any]]:
     return list(csv.DictReader(io.StringIO(text), dialect=dialect))
 
 
+def _ticket_files(filename: str, data: bytes) -> list[tuple[str, bytes]]:
+    """Large helpdesk exports (e.g. HubSpot CSVs over 2 MB) arrive zipped: accept a ZIP of CSV/JSON files."""
+    if not data[:4] == b"PK\x03\x04":
+        return [(filename, data)]
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile as e:
+        raise AppError("Not a valid ZIP file", code="validation_error") from e
+    out = []
+    for i in zf.infolist():
+        n = i.filename.rsplit("/", 1)[-1]
+        if i.is_dir() or i.filename.startswith("__MACOSX/") or n.startswith(".") or not n.lower().endswith((".csv", ".json", ".tsv", ".txt")):
+            continue
+        if i.file_size > MAX_UNZIPPED:
+            raise AppError("ZIP expands to more than 200 MB", code="upload_rejected")
+        out.append((n, zf.read(i)))
+    if not out:
+        raise AppError("The ZIP has no CSV or JSON files. XLSX isn't supported: export as CSV.", code="validation_error")
+    return out
+
+
 def import_tickets(db: Session, org_id: uuid.UUID, *, filename: str, data: bytes, user_id, include_unresolved: bool = False) -> ImportResult:
-    rows = _rows(filename, data)
+    if filename.lower().endswith((".xlsx", ".xls")):
+        raise AppError("Excel files aren't supported yet. Export as CSV instead.", code="validation_error")
+    rows = [r for n, d in _ticket_files(filename, data) for r in _rows(n, d)]
     if not rows:
         raise AppError("No tickets found. Expected a CSV with a header row, or a JSON list.", code="validation_error")
     if len(rows) > MAX_ROWS:

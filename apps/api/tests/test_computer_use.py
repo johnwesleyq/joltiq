@@ -211,3 +211,20 @@ def test_bulk_import_tickets_csv_json_and_articles_zip(owner):
     assert "PdfPreview" in text and "555-123-4567" not in text
     hits = owner.post("/api/v1/knowledge/search", json={"query": "VPN error 809"}).json()
     assert "UDP 500" in json.dumps(hits)
+
+
+def test_import_hubspot_service_hub_zipped_csv(owner):
+    import io
+    import zipfile
+
+    hub = (b"Ticket ID,Ticket name,Ticket description,Pipeline,Ticket status,Priority,Category\n"
+           b"88001,Can't log in to portal,User gets error 403 after password reset,Support Pipeline,Closed,High,Account access\n"
+           b"88002,Billing question,Invoice amount looks wrong,Support Pipeline,New,Low,Billing\n")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("hubspot-crm-exports-all-tickets-2026-10-19.csv", hub)
+    r = owner.post("/api/v1/knowledge/import", data={"kind": "tickets"}, files={"file": ("export.zip", buf.getvalue(), "application/zip")})
+    assert r.status_code == 201, r.text
+    assert r.json()["imported"] == 1 and r.json()["skipped"] == 1
+    r = owner.post("/api/v1/knowledge/import", data={"kind": "tickets"}, files={"file": ("t.xlsx", b"PK\x03\x04xx", "application/octet-stream")})
+    assert r.status_code == 400 and "CSV" in r.json()["error"]["message"]
