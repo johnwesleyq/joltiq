@@ -8,7 +8,7 @@ import uuid
 
 import httpx
 import pytest
-from conftest import invite_and_join
+from conftest import invite_and_join, publish_executable
 from e2e_support import TESTAPP, start_services, stop_services
 from sqlalchemy import select, text
 
@@ -39,7 +39,7 @@ def team(app, owner):
     return owner, tech, customer
 
 
-def publish_procedure(owner, *, readback_value=EMAIL):
+def publish_procedure(app, owner, *, readback_value=EMAIL):
     settings_url = f"{TESTAPP}/app/settings"
     body = {
         "symptoms": ["FieldDesk is not sending job notifications to dispatch", "Dispatch email missing in notification settings"],
@@ -61,9 +61,7 @@ def publish_procedure(owner, *, readback_value=EMAIL):
         ],
     }
     art = owner.post("/api/v1/knowledge/articles", json={"title": "FieldDesk job notifications not sending to dispatch", "body": body}).json()
-    assert owner.post(f"/api/v1/knowledge/articles/{art['id']}/review", json={"decision": "approve"}).status_code == 200
-    r = owner.post(f"/api/v1/knowledge/articles/{art['id']}/review", json={"decision": "publish", "executable": True})
-    assert r.status_code == 200, r.text
+    publish_executable(app, owner, art["id"])
     drain()  # index the published article
     return art
 
@@ -119,7 +117,7 @@ def human_sign_in(customer, sess_id):
 def test_browser_vertical_slice_verified_resolution(services, app, team):
     owner, tech, customer = team
     httpx.post(f"{TESTAPP}/__test__/reset")
-    publish_procedure(owner)
+    publish_procedure(app, owner)
 
     chat = start_chat(customer)
     run_id = chat["run_id"]
@@ -179,7 +177,7 @@ def test_browser_vertical_slice_verified_resolution(services, app, team):
 def test_execution_success_but_verification_failure_escalates(services, app, team):
     owner, tech, customer = team
     httpx.post(f"{TESTAPP}/__test__/reset", params={"buggy_save": True})  # app says "saved" but doesn't persist
-    publish_procedure(owner)
+    publish_procedure(app, owner)
     chat = start_chat(customer)
     run_id = chat["run_id"]
     run = wait_state(customer, run_id, lambda r: r["state"] == "AWAITING_APPROVAL")
@@ -199,7 +197,7 @@ def test_execution_success_but_verification_failure_escalates(services, app, tea
 def test_denied_approval_escalates_without_executing(services, app, team):
     owner, tech, customer = team
     httpx.post(f"{TESTAPP}/__test__/reset")
-    publish_procedure(owner)
+    publish_procedure(app, owner)
     chat = start_chat(customer)
     run = wait_state(customer, chat["run_id"], lambda r: r["state"] == "AWAITING_APPROVAL")
     sess_id, pending = approve_and_consent(customer, run, chat["run_id"])
@@ -235,7 +233,7 @@ def test_cross_tenant_cannot_touch_session_or_approval(services, app, team, new_
 
     owner, tech, customer = team
     httpx.post(f"{TESTAPP}/__test__/reset")
-    publish_procedure(owner)
+    publish_procedure(app, owner)
     chat = start_chat(customer)
     run = wait_state(customer, chat["run_id"], lambda r: r["state"] == "AWAITING_APPROVAL")
     approval_id = run["approvals"][0]["id"]
@@ -251,7 +249,7 @@ def test_cross_tenant_cannot_touch_session_or_approval(services, app, team, new_
 def test_emergency_stop_terminates_and_escalates(services, app, team):
     owner, tech, customer = team
     httpx.post(f"{TESTAPP}/__test__/reset")
-    publish_procedure(owner)
+    publish_procedure(app, owner)
     chat = start_chat(customer)
     run = wait_state(customer, chat["run_id"], lambda r: r["state"] == "AWAITING_APPROVAL")
     sess_id, pending = approve_and_consent(customer, run, chat["run_id"])

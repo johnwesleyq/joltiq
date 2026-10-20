@@ -461,3 +461,92 @@ def test_windows_procedure_identity_and_outcome_fields_round_trip(app, owner):
     assert article_json["procedure_hash"] == procedure_hash
     assert [review["procedure_hash"] for review in article_json["reviews"]] == [procedure_hash, procedure_hash]
     assert all(review["mfa_passed"] is True and review["auth_session_id"] for review in article_json["reviews"])
+
+
+def test_executable_procedure_requires_distinct_mfa_admins_and_same_hash(app, owner):
+    """Catches self-publication, non-MFA publication, or publishing content changed after approval."""
+    from conftest import invite_and_join
+    from sqlalchemy import select
+    from test_procedures import outlook_body
+
+    from joltiq.db import session_scope
+    from joltiq.models import AuthSession, KnowledgeArticle, User
+
+    publisher = invite_and_join(app, owner, "admin")
+    technician = invite_and_join(app, owner, "technician")
+    article = owner.post("/api/v1/knowledge/articles", json={"title": "Approved Outlook PDF fix", "body": outlook_body()}).json()
+
+    no_mfa = owner.post(
+        f"/api/v1/knowledge/articles/{article['id']}/review", json={"decision": "approve", "executable": True}
+    )
+    assert no_mfa.status_code == 403
+    technician_denied = technician.post(
+        f"/api/v1/knowledge/articles/{article['id']}/review", json={"decision": "approve", "executable": True}
+    )
+    assert technician_denied.status_code == 403
+
+    with session_scope(owner.org_id) as db:
+        user = db.get(User, owner.me["user"]["id"])
+        user.mfa_enabled = True
+        auth_session = db.execute(
+            select(AuthSession).where(AuthSession.user_id == user.id).order_by(AuthSession.created_at.desc())
+        ).scalars().first()
+        auth_session.mfa_passed = False
+    failed_mfa = owner.post(
+        f"/api/v1/knowledge/articles/{article['id']}/review", json={"decision": "approve", "executable": True}
+    )
+    assert failed_mfa.status_code == 401
+
+    with session_scope(owner.org_id) as db:
+        for client in (owner, publisher):
+            user = db.get(User, client.me["user"]["id"])
+            user.mfa_enabled = True
+            session = db.execute(
+                select(AuthSession).where(AuthSession.user_id == user.id).order_by(AuthSession.created_at.desc())
+            ).scalars().first()
+            session.mfa_passed = True
+
+    approved = owner.post(
+        f"/api/v1/knowledge/articles/{article['id']}/review", json={"decision": "approve", "executable": True}
+    )
+    assert approved.status_code == 200, approved.text
+    procedure_hash = approved.json()["procedure_hash"]
+
+    same_admin = owner.post(
+        f"/api/v1/knowledge/articles/{article['id']}/review", json={"decision": "publish", "executable": True}
+    )
+    assert same_admin.status_code == 409
+
+    published = publisher.post(
+        f"/api/v1/knowledge/articles/{article['id']}/review", json={"decision": "publish", "executable": True}
+    )
+    assert published.status_code == 200 and published.json()["procedure_hash"] == procedure_hash
+
+    evidence = publisher.get(f"/api/v1/knowledge/articles/{article['id']}").json()["reviews"]
+    assert [row["decision"] for row in evidence] == ["approve_executable", "publish"]
+    assert evidence[0]["reviewer_id"] != evidence[1]["reviewer_id"]
+    assert all(row["mfa_passed"] and row["procedure_hash"] == procedure_hash for row in evidence)
+
+    changed = owner.post("/api/v1/knowledge/articles", json={"title": "Changed Outlook PDF fix", "body": outlook_body()}).json()
+    assert owner.post(
+        f"/api/v1/knowledge/articles/{changed['id']}/review", json={"decision": "approve", "executable": True}
+    ).status_code == 200
+    with session_scope(owner.org_id) as db:
+        stored = db.get(KnowledgeArticle, changed["id"])
+        changed_body = dict(stored.body)
+        changed_body["messages"] = {**changed_body["messages"], "remediation": "Different approved wording"}
+        stored.body = changed_body
+    changed_publish = publisher.post(
+        f"/api/v1/knowledge/articles/{changed['id']}/review", json={"decision": "publish", "executable": True}
+    )
+    assert changed_publish.status_code == 409 and changed_publish.json()["error"]["code"] == "procedure_changed"
+
+    reused = owner.post("/api/v1/knowledge/articles", json={"title": "Unapproved copy", "body": outlook_body()}).json()
+    with session_scope(owner.org_id) as db:
+        stored = db.get(KnowledgeArticle, reused["id"])
+        stored.status = "approved"
+        stored.procedure_hash = procedure_hash
+    reused_publish = publisher.post(
+        f"/api/v1/knowledge/articles/{reused['id']}/review", json={"decision": "publish", "executable": True}
+    )
+    assert reused_publish.status_code == 409 and reused_publish.json()["error"]["code"] == "approval_required"

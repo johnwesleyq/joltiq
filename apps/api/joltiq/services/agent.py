@@ -333,6 +333,8 @@ def _maybe_collect_diagnostics(db, run) -> bool:
 
 def _procedures_for(db, hits: list[dict]) -> list[dict]:
     """Executable procedures only come from human-approved, published knowledge articles."""
+    from .procedures import load_published_procedure, publication_hash
+
     out = []
     for h in hits:
         doc = db.get(KnowledgeDocument, uuid.UUID(h["document_id"]))
@@ -342,10 +344,26 @@ def _procedures_for(db, hits: list[dict]) -> list[dict]:
         art = db.get(KnowledgeArticle, uuid.UUID(aid))
         if not art or art.status != "published" or not art.executable:
             continue
-        proc = (art.body or {}).get("procedure") or []
+        body = art.body or {}
+        try:
+            if body.get("procedure_schema") == 2:
+                definition = load_published_procedure(art)
+                proc = [step.model_dump(mode="json") for step in definition.procedure]
+            else:
+                if not art.procedure_hash or publication_hash(body) != art.procedure_hash:
+                    raise ValueError("published procedure fingerprint mismatch")
+                proc = body.get("procedure") or []
+        except (TypeError, ValueError) as exc:
+            log.warning("Refusing executable procedure %s: %s", art.id, exc)
+            audit.security_event(
+                db, "executable_procedure_integrity_failed", org_id=art.org_id, severity="high",
+                data={"article_id": str(art.id), "reason": str(exc)},
+            )
+            continue
         if proc:
             out.append({"article_id": str(art.id), "title": art.title, "steps": proc, "evidence_id": h["eid"],
-                        "hypothesis": (art.body or {}).get("hypothesis", art.title), "risks": (art.body or {}).get("risks", [])})
+                        "hypothesis": body.get("hypothesis", art.title), "risks": body.get("risks", []),
+                        "procedure": {"article_id": str(art.id), "version": art.version, "hash": art.procedure_hash}})
     return out
 
 

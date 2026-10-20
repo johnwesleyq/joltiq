@@ -24,7 +24,7 @@ import pytest  # noqa: E402
 from alembic import command  # noqa: E402
 from alembic.config import Config  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from sqlalchemy import create_engine, text  # noqa: E402
+from sqlalchemy import create_engine, select, text  # noqa: E402
 
 HERE = os.path.dirname(__file__)
 
@@ -140,6 +140,31 @@ def invite_and_join(app, admin: ApiClient, role: str, customer_id: str | None = 
     assert r.status_code == 200, r.text
     c.email = email
     return c
+
+
+def publish_executable(app, approver: ApiClient, article_id: str) -> dict:
+    """Approve and publish a test procedure with two distinct MFA-backed admins."""
+    from joltiq.db import session_scope
+    from joltiq.models import AuthSession, User
+
+    publisher = invite_and_join(app, approver, "admin")
+    with session_scope(approver.org_id) as db:
+        for client in (approver, publisher):
+            user = db.get(User, client.me["user"]["id"])
+            user.mfa_enabled = True
+            auth_session = db.execute(
+                select(AuthSession).where(AuthSession.user_id == user.id).order_by(AuthSession.created_at.desc())
+            ).scalars().first()
+            auth_session.mfa_passed = True
+    approved = approver.post(
+        f"/api/v1/knowledge/articles/{article_id}/review", json={"decision": "approve", "executable": True}
+    )
+    assert approved.status_code == 200, approved.text
+    published = publisher.post(
+        f"/api/v1/knowledge/articles/{article_id}/review", json={"decision": "publish", "executable": True}
+    )
+    assert published.status_code == 200, published.text
+    return published.json()
 
 
 @pytest.fixture

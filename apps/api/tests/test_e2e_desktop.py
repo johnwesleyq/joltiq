@@ -13,7 +13,7 @@ import time
 
 import httpx
 import pytest
-from conftest import invite_and_join
+from conftest import invite_and_join, publish_executable
 
 pytestmark = [pytest.mark.mocked]
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -59,18 +59,27 @@ def drain():
     return d()
 
 
-def publish_desktop_procedure(owner):
-    body = {"symptoms": ["Outlook closes when opening PDF attachments"], "environment": ["Outlook for Microsoft 365"],
-            "prerequisites": ["Enrolled device", "Customer consent"], "diagnostics": ["Event 1000 faulting module PdfPreview.dll"],
+def publish_desktop_procedure(app, owner):
+    body = {"procedure_schema": 2, "kind": "windows_outlook_pdf_crash",
+            "display": {"addin_name": "PDF Preview", "addin_progid": "PdfPreview.Connect"},
+            "symptoms": ["Outlook closes when opening PDF attachments"], "environment": ["Classic Outlook for Microsoft 365"],
+            "prerequisites": ["Enrolled device", "Customer consent"],
+            "diagnostics": [{"action": "outlook.pdf_crash.inspect",
+                             "params": {"addin_progid": "PdfPreview.Connect", "faulting_module": "PdfPreview.dll", "lookback_hours": 24},
+                             "expect": {"supported": True, "outlook.kind": "classic", "addin.installed": True, "crash.matched": True}}],
             "remediation": ["Disable the PdfPreview add-in for the user", "Restart Outlook"], "risk": "SENSITIVE",
             "verification": ["Add-in LoadBehavior = 2", "Outlook responding"],
             "procedure": [
                 {"action": "office.addin.set_load_behavior", "params": {"app": "Outlook", "addin_progid": "PdfPreview.Connect", "enabled": False},
-                 "rationale": "Disable faulty PDF preview add-in", "postconditions": []},
-                {"action": "app.restart", "params": {"process": "outlook.exe"}, "rationale": "Restart Outlook to apply", "postconditions": []}]}
+                 "rationale": "Disable faulty PDF preview add-in",
+                 "postconditions": [{"type": "device_config_equals", "params": {"enabled": False}}]},
+                {"action": "app.restart", "params": {"process": "outlook.exe"}, "rationale": "Restart Outlook to apply",
+                 "postconditions": [{"type": "device_process_responding", "params": {"process": "outlook.exe"}}]}],
+            "rollback": {"action": "office.addin.restore_load_behavior", "source_step": 0,
+                         "restart": {"action": "app.restart", "params": {"process": "outlook.exe"}}},
+            "messages": {"diagnostic_consent": "Check Outlook crash evidence", "remediation": "Apply the approved Outlook fix"}}
     art = owner.post("/api/v1/knowledge/articles", json={"title": "Outlook crashes opening PDF attachments (PdfPreview add-in)", "body": body}).json()
-    owner.post(f"/api/v1/knowledge/articles/{art['id']}/review", json={"decision": "approve"})
-    assert owner.post(f"/api/v1/knowledge/articles/{art['id']}/review", json={"decision": "publish", "executable": True}).status_code == 200
+    publish_executable(app, owner, art["id"])
     drain()
 
 
@@ -97,7 +106,7 @@ def setup_device(app, owner, tmp):
 
 def test_desktop_fix_verified_via_companion_protocol(api_server, app, owner):
     tmp = tempfile.mkdtemp()
-    publish_desktop_procedure(owner)
+    publish_desktop_procedure(app, owner)
     customer, dev = setup_device(app, owner, tmp)
     t = customer.post("/api/v1/tickets", json={"subject": "Outlook crashes when opening PDF attachments",
                                                "description": "Outlook closes every time I open a PDF attachment.", "device_id": dev["device_id"]}).json()
@@ -121,7 +130,7 @@ def test_desktop_fix_verified_via_companion_protocol(api_server, app, owner):
 
 def test_device_declines_consent_nothing_runs(api_server, app, owner):
     tmp = tempfile.mkdtemp()
-    publish_desktop_procedure(owner)
+    publish_desktop_procedure(app, owner)
     customer, dev = setup_device(app, owner, tmp)
     t = customer.post("/api/v1/tickets", json={"subject": "Outlook crashes when opening PDF attachments", "description": "crash on pdf",
                                                "device_id": dev["device_id"]}).json()

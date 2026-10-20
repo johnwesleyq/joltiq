@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field, HttpUrl
 from sqlalchemy import select
 
 from ..config import get_settings
-from ..core.errors import AppError, Conflict, NotFound
+from ..core.errors import AppError, Conflict, Forbidden, NotFound
 from ..deps import Ctx, perm
 from ..models import ArticleReview, KnowledgeArticle, KnowledgeDocument, Organization
 from ..services import audit
@@ -217,9 +217,25 @@ def review(aid: uuid.UUID, body: ReviewIn, ctx: Ctx = Depends(perm("knowledge.re
     allowed_from, to = flow[d]
     if a.status not in allowed_from:
         raise Conflict(f"Cannot {d} an article that is {a.status}", code="invalid_transition")
+    review_decision = d
+    review_hash = None
+    if d == "approve" and body.executable:
+        ctx.p.require("knowledge.publish")
+        if not ctx.p.user.mfa_enabled or not ctx.p.session.mfa_passed:
+            raise Forbidden("Executable procedure approval requires MFA", code="mfa_required")
+        from ..services.procedures import publication_hash
+
+        try:
+            review_hash = publication_hash(a.body or {})
+        except ValueError as exc:
+            raise AppError(f"Procedure is not executable: {exc}", code="validation_error") from exc
+        a.procedure_hash = review_hash
+        review_decision = "approve_executable"
     if d == "publish":
         ctx.p.require("knowledge.publish")
         if body.executable:
+            if not ctx.p.user.mfa_enabled or not ctx.p.session.mfa_passed:
+                raise Forbidden("Executable procedure publication requires MFA", code="mfa_required")
             # Executable procedures require: verified resolution evidence, not derived solely from external research,
             # and an explicit admin decision. This is the ONLY way a procedure becomes runnable by the AI.
             if a.drafted_by_ai and not a.verified_resolution:
@@ -228,13 +244,24 @@ def review(aid: uuid.UUID, body: ReviewIn, ctx: Ctx = Depends(perm("knowledge.re
             if (a.body or {}).get("derived_from_external_research"):
                 raise Conflict("Procedures derived only from external research cannot be made executable automatically; "
                                "re-author it as a technician-written procedure", code="external_fix")
-            from ..services.actions.registry import ActionValidationError, validate_params
+            from ..services.procedures import publication_hash
 
-            for st in (a.body or {}).get("procedure", []):
-                try:
-                    validate_params(st["action"], st.get("params", {}))
-                except (ActionValidationError, KeyError) as e:
-                    raise AppError(f"Procedure step invalid: {e}", code="validation_error") from e
+            try:
+                review_hash = publication_hash(a.body or {})
+            except ValueError as exc:
+                raise AppError(f"Procedure is not executable: {exc}", code="validation_error") from exc
+            if not a.procedure_hash or a.procedure_hash != review_hash:
+                raise Conflict("Executable procedure changed after approval", code="procedure_changed")
+            prior = ctx.db.execute(select(ArticleReview).where(
+                ArticleReview.article_id == a.id,
+                ArticleReview.decision == "approve_executable",
+                ArticleReview.procedure_hash == review_hash,
+                ArticleReview.mfa_passed.is_(True),
+            ).order_by(ArticleReview.created_at.desc())).scalars().first()
+            if not prior:
+                raise Conflict("Executable procedure needs an MFA-backed admin approval", code="approval_required")
+            if prior.reviewer_id == ctx.p.user_id:
+                raise Conflict("A second administrator must publish this executable procedure", code="second_admin_required")
         a.executable = bool(body.executable)
         _publish_as_document(ctx, a)
         if a.previous_version_id:
@@ -247,7 +274,11 @@ def review(aid: uuid.UUID, body: ReviewIn, ctx: Ctx = Depends(perm("knowledge.re
             kb.delete_document(ctx.db, doc, ctx.p.user_id)
         a.executable = False
     a.status = to
-    ctx.db.add(ArticleReview(org_id=ctx.org_id, article_id=a.id, reviewer_id=ctx.p.user_id, decision=d, comment=body.comment))
+    ctx.db.add(ArticleReview(
+        org_id=ctx.org_id, article_id=a.id, reviewer_id=ctx.p.user_id, decision=review_decision, comment=body.comment,
+        procedure_hash=review_hash, auth_session_id=ctx.p.session.id if review_hash else None,
+        mfa_passed=bool(review_hash and ctx.p.user.mfa_enabled and ctx.p.session.mfa_passed),
+    ))
     audit.record(ctx.db, org_id=ctx.org_id, actor_kind="user", actor_id=ctx.p.user_id, action=f"article.{d}", resource_type="knowledge_article",
                  resource_id=a.id, data={"executable": a.executable})
     return ser_art(a)
