@@ -89,6 +89,19 @@ T("policy: file + registry scoping", () =>
     Assert(p.Evaluate("config.read", J("{\"key\":\"HKCU\\\\Software\\\\Microsoft\\\\Office\\\\Outlook\\\\Addins\\\\X\",\"value\":\"LoadBehavior\"}"), active).Allowed);
     Assert(!p.Evaluate("config.read", J("{\"key\":\"HKLM\\\\SAM\\\\SAM\",\"value\":\"F\"}"), active).Allowed, "HKLM");
 });
+T("policy: Outlook PDF inspection is typed and narrowly scoped", () =>
+{
+    var p = new LocalPolicy();
+    Assert(p.Evaluate("outlook.pdf_crash.inspect", J("{\"addin_progid\":\"PdfPreview.Connect\",\"faulting_module\":\"PdfPreview.dll\",\"lookback_hours\":24,\"since\":\"2026-10-20T12:00:00Z\"}"), active).Allowed);
+    foreach (var bad in new[]
+    {
+        "{}",
+        "{\"addin_progid\":\"PdfPreview.Connect\",\"faulting_module\":\"PdfPreview.dll\",\"lookback_hours\":0}",
+        "{\"addin_progid\":\"..\\\\Bad\",\"faulting_module\":\"PdfPreview.dll\",\"lookback_hours\":24}",
+        "{\"addin_progid\":\"PdfPreview.Connect\",\"faulting_module\":\"C:\\\\evil.dll\",\"lookback_hours\":24}",
+        "{\"addin_progid\":\"PdfPreview.Connect\",\"faulting_module\":\"PdfPreview.dll\",\"lookback_hours\":24,\"log\":\"Security\"}",
+    }) Assert(!p.Evaluate("outlook.pdf_crash.inspect", J(bad), active).Allowed, bad);
+});
 T("redactor scrubs secrets and secret-named keys", () =>
 {
     var n = Redactor.RedactNode(JsonNode.Parse("{\"password\":\"x\",\"msg\":\"user bob@acme.com at C:\\\\Users\\\\bob\\\\a token=abc123\",\"list\":[\"4111 1111 1111 1111\"]}"))!;

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Diagnostics.Eventing.Reader;
+using System.IO;
 using System.IO.Pipes;
 using System.Net.NetworkInformation;
 using System.Runtime.Versioning;
@@ -19,11 +20,13 @@ namespace JoltIQ.Agent.Windows;
 public sealed class WindowsActionProvider : IActionProvider
 {
     public const string BrokerPipe = "JoltIQ.Agent.Broker.v1";
+    private readonly string? _enrolledUserSid;
+    public WindowsActionProvider(string? enrolledUserSid = null) => _enrolledUserSid = enrolledUserSid;
 
     public IReadOnlyCollection<string> Capabilities { get; } = new[]
     {
         "system.info", "process.list", "app.info", "disk.usage", "network.diagnostics", "eventlog.query", "service.status",
-        "file.inspect", "config.read", "app.restart", "office.addin.set_load_behavior", "service.restart", "ui.invoke", "ui.set_text",
+        "outlook.pdf_crash.inspect", "file.inspect", "config.read", "app.restart", "office.addin.set_load_behavior", "service.restart", "ui.invoke", "ui.set_text",
     };
 
     public IDictionary<string, string> Facts() => new Dictionary<string, string>
@@ -45,6 +48,9 @@ public sealed class WindowsActionProvider : IActionProvider
             "disk.usage" => Disks(),
             "network.diagnostics" => await Network(O("resolve_host"), ct),
             "eventlog.query" => Events(S("log"), O("provider"), O("level"), I("hours", 24), I("max_events", 20)),
+            "outlook.pdf_crash.inspect" => new OutlookInspector(new InteractiveSessionInspector(_enrolledUserSid)).Inspect(
+                S("addin_progid"), S("faulting_module"), I("lookback_hours", 24),
+                DateTimeOffset.TryParse(O("since"), out var since) ? since : null),
             "service.status" => ServiceStatus(S("name")),
             "file.inspect" => InspectFile(Environment.ExpandEnvironmentVariables(S("path"))),
             "config.read" => ReadRegistry(S("key"), S("value")),
@@ -216,7 +222,7 @@ public sealed class WindowsActionProvider : IActionProvider
     {
         await using var pipe = new NamedPipeClientStream(".", BrokerPipe, PipeDirection.InOut, PipeOptions.Asynchronous);
         try { await pipe.ConnectAsync(3000, ct); }
-        catch (TimeoutException) { return new JsonObject { ["ok"] = false, ["error"] = "privileged broker service is not installed or not running" }; }
+        catch (System.TimeoutException) { return new JsonObject { ["ok"] = false, ["error"] = "privileged broker service is not installed or not running" }; }
         var bytes = Encoding.UTF8.GetBytes(req.ToJsonString() + "\n");
         await pipe.WriteAsync(bytes, ct);
         await pipe.FlushAsync(ct);

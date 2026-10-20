@@ -179,6 +179,33 @@ def test_injected_instructions_in_knowledge_cannot_change_plan(owner):
         validate_params("app.restart", {"process": "lsass.exe", "args": "-x"})
 
 
+@pytest.mark.parametrize("params", [
+    {},
+    {"addin_progid": "PdfPreview.Connect", "faulting_module": "PdfPreview.dll", "lookback_hours": 0},
+    {"addin_progid": "PdfPreview.Connect", "faulting_module": "PdfPreview.dll", "lookback_hours": 169},
+    {"addin_progid": r"..\\Bad", "faulting_module": "PdfPreview.dll", "lookback_hours": 24},
+    {"addin_progid": "PdfPreview.Connect", "faulting_module": r"C:\\Windows\\evil.dll", "lookback_hours": 24},
+    {"addin_progid": "PdfPreview.Connect", "faulting_module": "PdfPreview.dll", "lookback_hours": 24, "log": "Security"},
+    {"addin_progid": "PdfPreview.Connect", "faulting_module": "PdfPreview.dll", "lookback_hours": 24, "since": "yesterday"},
+])
+def test_outlook_inspection_rejects_arbitrary_or_malformed_targets(params):
+    """Catches turning the typed inspector into arbitrary registry/event-log access."""
+    from joltiq.services.actions.registry import ActionValidationError, validate_params
+
+    with pytest.raises(ActionValidationError):
+        validate_params("outlook.pdf_crash.inspect", params)
+
+
+def test_outlook_inspection_accepts_only_exact_typed_parameters():
+    from joltiq.services.actions.registry import ACTIONS, validate_params
+
+    params = {"addin_progid": "PdfPreview.Connect", "faulting_module": "PdfPreview.dll", "lookback_hours": 24,
+              "since": "2026-10-20T12:00:00Z"}
+    assert validate_params("outlook.pdf_crash.inspect", params) == params
+    assert ACTIONS["outlook.pdf_crash.inspect"].channel == "desktop"
+    assert ACTIONS["outlook.pdf_crash.inspect"].risk.value == "READ_ONLY"
+
+
 def test_redaction_of_research_queries():
     from joltiq.security.redaction import redact_text
 

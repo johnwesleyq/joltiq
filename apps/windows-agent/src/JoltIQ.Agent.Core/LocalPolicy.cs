@@ -14,9 +14,10 @@ public sealed class LocalPolicy
     private static readonly Regex ProcessName = new(@"^[A-Za-z0-9_.\- ]{1,80}(\.exe)?$", RegexOptions.Compiled);
     private static readonly Regex Host = new(@"^[A-Za-z0-9.-]{1,253}$", RegexOptions.Compiled);
     private static readonly Regex ProgId = new(@"^[A-Za-z0-9_.\-]{1,120}$", RegexOptions.Compiled);
+    private static readonly Regex ModuleName = new(@"^[A-Za-z0-9_.\-]{1,180}$", RegexOptions.Compiled);
 
     public static readonly IReadOnlySet<string> ReadOnlyActions = new HashSet<string>
-        { "system.info", "process.list", "app.info", "disk.usage", "network.diagnostics", "eventlog.query", "service.status" };
+        { "system.info", "process.list", "app.info", "disk.usage", "network.diagnostics", "eventlog.query", "outlook.pdf_crash.inspect", "service.status" };
 
     public static readonly IReadOnlySet<string> AllActions = new HashSet<string>(ReadOnlyActions)
         { "file.inspect", "config.read", "app.restart", "office.addin.set_load_behavior", "service.restart", "ui.invoke", "ui.set_text" };
@@ -64,6 +65,17 @@ public sealed class LocalPolicy
                 if (S("log") is not ("Application" or "System")) return No("log must be Application or System");
                 if (I("hours") is { } hrs && (hrs < 1 || hrs > 168)) return No("hours out of range");
                 if (I("max_events") is { } m && (m < 1 || m > 100)) return No("max_events out of range");
+                return Ok();
+            case "outlook.pdf_crash.inspect":
+                var allowed = new HashSet<string> { "addin_progid", "faulting_module", "lookback_hours", "since" };
+                if (p.ValueKind != JsonValueKind.Object || p.EnumerateObject().Any(x => !allowed.Contains(x.Name))) return No("unexpected parameter");
+                if (S("addin_progid") is not { } opid || !ProgId.IsMatch(opid)) return No("bad add-in id");
+                if (S("faulting_module") is not { } module || !ModuleName.IsMatch(module)) return No("bad faulting module");
+                if (I("lookback_hours") is not { } lookback || lookback < 1 || lookback > 168) return No("lookback_hours out of range");
+                if (Has("since") && (S("since") is not { } since || !DateTimeOffset.TryParseExact(
+                        since, new[] { "yyyy-MM-dd'T'HH:mm:ssK", "yyyy-MM-dd'T'HH:mm:ss.FFFFFFFK" },
+                        System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _)))
+                    return No("since must be ISO-8601");
                 return Ok();
             case "service.status":
                 return S("name") is { } sn && ServiceName.IsMatch(sn) ? Ok() : No("bad service name");

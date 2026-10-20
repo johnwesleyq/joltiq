@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Security.Principal;
 using JoltIQ.Agent.Core;
 using JoltIQ.Agent.Windows;
 
@@ -62,7 +63,7 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
         if (string.IsNullOrEmpty(_cfg.ServerUrl)) return;
         _client = new AgentClient(_cfg.ServerUrl, new DpapiKeyStore());
         if (!_client.Enrolled) return;
-        _runtime = new AgentRuntime(_client, new WindowsActionProvider(), this);
+        _runtime = new AgentRuntime(_client, new WindowsActionProvider(_client.State.EnrolledUserSid), this);
         _cts = new CancellationTokenSource();
         _ = Task.Run(() => _runtime.RunAsync(_cts.Token));
         _icon.Text = $"JoltIQ Companion — connected ({_client.State.DeviceId?[..8]})";
@@ -78,7 +79,8 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
             _cfg.ServerUrl = f.ServerUrl; _cfg.Save();
             _client = new AgentClient(f.ServerUrl, new DpapiKeyStore());
             var prov = new WindowsActionProvider();
-            _client.EnrollAsync(f.Code, Environment.MachineName, "Windows", Environment.OSVersion.Version.ToString(), prov.Capabilities).GetAwaiter().GetResult();
+            var sid = WindowsIdentity.GetCurrent().User?.Value ?? throw new InvalidOperationException("Cannot identify the enrolling Windows user");
+            _client.EnrollAsync(f.Code, Environment.MachineName, "Windows", Environment.OSVersion.Version.ToString(), prov.Capabilities, sid).GetAwaiter().GetResult();
             MessageBox.Show("This device is enrolled. Support sessions always ask for your permission first.", "JoltIQ", MessageBoxButtons.OK, MessageBoxIcon.Information);
             Start();
         }

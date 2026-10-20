@@ -11,6 +11,7 @@ public sealed class AgentState
     public string? DeviceId { get; set; }
     public string? OrgId { get; set; }
     public string? ServerPublicKeyPem { get; set; }
+    public string? EnrolledUserSid { get; set; }
     public long Counter { get; set; }
 }
 
@@ -46,7 +47,8 @@ public sealed class AgentClient : IDisposable
 
     private void Persist() => _store.Save("state.json", JsonSerializer.SerializeToUtf8Bytes(State));
 
-    public async Task EnrollAsync(string code, string hostname, string osName, string osVersion, IEnumerable<string> capabilities, CancellationToken ct = default)
+    public async Task EnrollAsync(string code, string hostname, string osName, string osVersion, IEnumerable<string> capabilities,
+        string? enrolledUserSid = null, CancellationToken ct = default)
     {
         _key?.Dispose();
         _key = DeviceKey.Create();
@@ -62,6 +64,7 @@ public sealed class AgentClient : IDisposable
         State.DeviceId = j["device_id"]!.GetValue<string>();
         State.OrgId = j["org_id"]!.GetValue<string>();
         State.ServerPublicKeyPem = j["server_public_key_pem"]!.GetValue<string>();
+        State.EnrolledUserSid = enrolledUserSid;
         State.Counter = 0;
         _store.Save("device.key", _key.ExportPkcs8());
         Persist();
