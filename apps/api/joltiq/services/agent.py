@@ -849,6 +849,8 @@ def run_detail(db: Session, run: AgentRun, *, customer_view: bool) -> dict[str, 
         steps = db.execute(select(PlanStep).where(PlanStep.plan_id == p.id).order_by(PlanStep.ordinal)).scalars().all()
         plan_out.append({"id": str(p.id), "revision": p.revision, "summary": p.summary, "hypothesis": p.hypothesis, "risks": p.risks,
                          "status": p.status, "plan_hash": p.plan_hash, "citations": p.citations,
+                         "procedure": {"article_id": str(p.procedure_article_id), "version": p.procedure_version, "hash": p.procedure_hash}
+                         if p.procedure_article_id else None,
                          "steps": [{"id": str(s.id), "ordinal": s.ordinal, "action": s.action, "params": s.params, "risk": s.risk,
                                     "rationale": s.rationale, "postconditions": s.postconditions, "status": s.status,
                                     "target": s.target} for s in steps]})
@@ -864,6 +866,7 @@ def run_detail(db: Session, run: AgentRun, *, customer_view: bool) -> dict[str, 
     out = {
         "id": str(run.id), "ticket_id": str(run.ticket_id) if run.ticket_id else None, "state": run.state, "paused_for": run.paused_for,
         "retries": run.retries, "max_retries": run.max_retries, "cost_usd": round(run.cost_usd or 0, 4), "outcome_summary": run.outcome_summary,
+        "outcome_stage": run.outcome_stage,
         "correlation_id": run.correlation_id, "created_at": run.created_at.isoformat(),
         "messages": [{"id": str(m.id), "role": m.role, "content": m.content, "data": m.data, "at": m.created_at.isoformat()} for m in msgs if m.role in ("user", "assistant")],
         "transitions": [{"from": t.from_state, "to": t.to_state, "reason": t.reason, "at": t.created_at.isoformat()} for t in trans],

@@ -399,3 +399,65 @@ def test_knowledge_ingest_search_permissions_and_url_ssrf(app, owner):
     tech.delete(f"/api/v1/knowledge/documents/{r.json()['id']}")
     assert all(h["title"] != "VPN runbook" for h in tech.post("/api/v1/knowledge/search", json={"query": "vpn"}).json()["results"])
     _ = internal
+
+
+def test_windows_procedure_identity_and_outcome_fields_round_trip(app, owner):
+    """Catches dropping procedure/consent/outcome bindings during persistence or serialization."""
+    from sqlalchemy import select
+
+    from joltiq.db import session_scope
+    from joltiq.models import AgentPlan, AgentRun, ArticleReview, AuthSession, KnowledgeArticle, SupportSession
+    from joltiq.services import agent, sessions
+
+    procedure_hash = "a" * 64
+    with session_scope(owner.org_id) as db:
+        auth_session = db.execute(
+            select(AuthSession).where(AuthSession.user_id == owner.me["user"]["id"]).order_by(AuthSession.created_at.desc())
+        ).scalars().first()
+        article = KnowledgeArticle(
+            org_id=owner.org_id, title="Outlook PDF crash", body={}, status="approved", executable=False,
+            drafted_by_ai=False, procedure_hash=procedure_hash,
+        )
+        db.add(article)
+        db.flush()
+        db.add_all([
+            ArticleReview(
+                org_id=owner.org_id, article_id=article.id, reviewer_id=owner.me["user"]["id"], decision="approve_executable",
+                procedure_hash=procedure_hash, auth_session_id=auth_session.id, mfa_passed=True,
+            ),
+            ArticleReview(
+                org_id=owner.org_id, article_id=article.id, reviewer_id=owner.me["user"]["id"], decision="publish",
+                procedure_hash=procedure_hash, auth_session_id=auth_session.id, mfa_passed=True,
+            ),
+        ])
+        support_session = SupportSession(
+            org_id=owner.org_id, kind="desktop", owner_id=owner.me["user"]["id"],
+            request_details={"purpose": "Diagnose Outlook PDF crashes", "procedure_hash": procedure_hash},
+        )
+        db.add(support_session)
+        db.flush()
+        run = AgentRun(
+            org_id=owner.org_id, session_id=support_session.id, correlation_id="windows-outlook-test",
+            outcome_stage="FIX_APPLIED_VERIFIED", context={},
+        )
+        db.add(run)
+        db.flush()
+        plan = AgentPlan(
+            org_id=owner.org_id, run_id=run.id, summary="Approved Outlook fix", plan_hash="b" * 64,
+            procedure_article_id=article.id, procedure_version=1, procedure_hash=procedure_hash,
+        )
+        db.add(plan)
+        db.flush()
+
+        detail = agent.run_detail(db, run, customer_view=False)
+        session_json = sessions.ser(support_session)
+        article_id = article.id
+
+    assert detail["outcome_stage"] == "FIX_APPLIED_VERIFIED"
+    assert detail["plans"][0]["procedure"] == {"article_id": str(article_id), "version": 1, "hash": procedure_hash}
+    assert session_json["request_details"] == {"purpose": "Diagnose Outlook PDF crashes", "procedure_hash": procedure_hash}
+
+    article_json = owner.get(f"/api/v1/knowledge/articles/{article_id}").json()
+    assert article_json["procedure_hash"] == procedure_hash
+    assert [review["procedure_hash"] for review in article_json["reviews"]] == [procedure_hash, procedure_hash]
+    assert all(review["mfa_passed"] is True and review["auth_session_id"] for review in article_json["reviews"])

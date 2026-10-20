@@ -220,6 +220,7 @@ def ser(s: SupportSession, lease: ControlLease | None = None) -> dict[str, Any]:
             "device_id": str(s.device_id) if s.device_id else None, "allowed_domains": s.allowed_domains, "consent": s.consent,
             "expires_at": s.expires_at.isoformat() if s.expires_at else None, "emergency_stopped": s.emergency_stopped,
             "recording_enabled": s.recording_enabled, "pause_reason": s.pause_reason, "run_id": str(s.run_id) if s.run_id else None,
+            "request_details": s.request_details,
             "control": {"holder_kind": lease.holder_kind, "holder_user_id": str(lease.holder_user_id) if lease.holder_user_id else None,
                         "expires_at": lease.expires_at.isoformat()} if lease else None,
             "created_at": s.created_at.isoformat()}

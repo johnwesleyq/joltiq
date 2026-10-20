@@ -81,3 +81,33 @@ def test_audit_hash_chain_detects_tampering(app, new_client):
     with session_scope(a) as db:
         res = audit.verify_chain(db, a)
     assert res["ok"] is False
+
+
+def test_windows_procedure_bindings_remain_tenant_scoped(app, new_client):
+    """Catches an RLS omission on any new Windows-procedure persistence path."""
+    from joltiq.db import session_scope
+    from joltiq.models import AgentPlan, AgentRun, KnowledgeArticle, SupportSession, User
+
+    a, b = _org_ids(new_client)
+    with session_scope(a) as db:
+        owner_id = db.execute(select(User.id).limit(1)).scalar_one()
+        article = KnowledgeArticle(org_id=a, title="Tenant A procedure", body={}, procedure_hash="c" * 64)
+        session = SupportSession(org_id=a, kind="desktop", owner_id=owner_id, request_details={"private": "A"})
+        db.add_all([article, session])
+        db.flush()
+        run = AgentRun(org_id=a, session_id=session.id, correlation_id="tenant-a", outcome_stage="UNCONFIRMED")
+        db.add(run)
+        db.flush()
+        plan = AgentPlan(
+            org_id=a, run_id=run.id, summary="A", plan_hash="d" * 64, procedure_article_id=article.id,
+            procedure_version=1, procedure_hash="c" * 64,
+        )
+        db.add(plan)
+        db.flush()
+        ids = article.id, session.id, run.id, plan.id
+
+    with session_scope(b) as db:
+        assert db.get(KnowledgeArticle, ids[0]) is None
+        assert db.get(SupportSession, ids[1]) is None
+        assert db.get(AgentRun, ids[2]) is None
+        assert db.get(AgentPlan, ids[3]) is None

@@ -89,6 +89,7 @@ class SupportSession(IdMixin, TimestampMixin, TenantMixin, Base):
     emergency_stopped: Mapped[bool] = mapped_column(Boolean, default=False)
     terminated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     pause_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    request_details: Mapped[dict] = mapped_column(JSONB, default=dict)
 
 
 class SessionParticipant(IdMixin, TimestampMixin, TenantMixin, Base):
@@ -169,6 +170,7 @@ class AgentRun(IdMixin, TimestampMixin, TenantMixin, Base):
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
     paused_for: Mapped[str | None] = mapped_column(String(50), nullable=True)  # approval|customer|auth
     outcome_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    outcome_stage: Mapped[str] = mapped_column(String(40), default="UNCONFIRMED")
     workflow_engine: Mapped[str] = mapped_column(String(20), default="db")  # db|temporal
     lock_owner: Mapped[str | None] = mapped_column(String(80), nullable=True)
     lock_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -219,6 +221,11 @@ class AgentPlan(IdMixin, TimestampMixin, TenantMixin, Base):
     plan_hash: Mapped[str] = mapped_column(String(64))  # sha256 of canonical steps; approvals bind to this
     status: Mapped[str] = mapped_column(String(20), default="proposed")  # proposed|approved|executing|done|superseded|rejected
     citations: Mapped[list] = mapped_column(JSONB, default=list)
+    procedure_article_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("knowledge_articles.id", ondelete="SET NULL"), nullable=True
+    )
+    procedure_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    procedure_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class PlanStep(IdMixin, TimestampMixin, TenantMixin, Base):

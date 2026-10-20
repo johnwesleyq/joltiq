@@ -146,6 +146,7 @@ class KnowledgeArticle(IdMixin, TimestampMixin, TenantMixin, Base):
     drafted_by_ai: Mapped[bool] = mapped_column(Boolean, default=True)
     published_document_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     previous_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    procedure_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class ArticleReview(IdMixin, TimestampMixin, TenantMixin, Base):
@@ -154,6 +155,11 @@ class ArticleReview(IdMixin, TimestampMixin, TenantMixin, Base):
     reviewer_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"))
     decision: Mapped[str] = mapped_column(String(20))  # approve|reject|request_changes|publish|archive
     comment: Mapped[str] = mapped_column(Text, default="")
+    procedure_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    auth_session_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("auth_sessions.id", ondelete="SET NULL"), nullable=True
+    )
+    mfa_passed: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 # ---------------- Research ----------------

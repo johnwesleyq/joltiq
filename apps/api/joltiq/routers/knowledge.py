@@ -143,7 +143,8 @@ def search(body: SearchIn, ctx: Ctx = Depends(perm("knowledge.read"))):
 def ser_art(a: KnowledgeArticle) -> dict:
     return {"id": str(a.id), "title": a.title, "status": a.status, "version": a.version, "body": a.body, "citations": a.citations,
             "source_ticket_id": str(a.source_ticket_id) if a.source_ticket_id else None, "verified_resolution": a.verified_resolution,
-            "executable": a.executable, "drafted_by_ai": a.drafted_by_ai, "created_at": a.created_at.isoformat(),
+            "executable": a.executable, "drafted_by_ai": a.drafted_by_ai, "procedure_hash": a.procedure_hash,
+            "created_at": a.created_at.isoformat(),
             "updated_at": a.updated_at.isoformat(), "previous_version_id": str(a.previous_version_id) if a.previous_version_id else None}
 
 
@@ -174,7 +175,10 @@ def get_article(aid: uuid.UUID, ctx: Ctx = Depends(perm("knowledge.review"))):
     if not a:
         raise NotFound("Article not found")
     reviews = ctx.db.execute(select(ArticleReview).where(ArticleReview.article_id == aid).order_by(ArticleReview.created_at)).scalars()
-    return {**ser_art(a), "reviews": [{"decision": r.decision, "comment": r.comment, "reviewer_id": str(r.reviewer_id), "at": r.created_at.isoformat()} for r in reviews]}
+    return {**ser_art(a), "reviews": [{"decision": r.decision, "comment": r.comment, "reviewer_id": str(r.reviewer_id),
+                                        "procedure_hash": r.procedure_hash,
+                                        "auth_session_id": str(r.auth_session_id) if r.auth_session_id else None,
+                                        "mfa_passed": r.mfa_passed, "at": r.created_at.isoformat()} for r in reviews]}
 
 
 @router.patch("/articles/{aid}")
