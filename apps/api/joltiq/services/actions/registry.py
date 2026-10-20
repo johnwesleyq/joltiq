@@ -32,6 +32,7 @@ def _CU_SPECS(rows: list[tuple[str, R, str, dict[str, dict[str, Any]], str]]) ->
 
 SERVICE_NAME = r"^[A-Za-z0-9_.\- ]{1,80}$"
 PROCESS_NAME = r"^[A-Za-z0-9_.\- ]{1,80}(\.exe)?$"
+COMMAND_ID = r"^[A-Za-z0-9_-]{1,100}$"
 
 ACTIONS: dict[str, ActionSpec] = {a.id: a for a in [
     # ---------------- Windows desktop (executed by the companion) ----------------
@@ -75,6 +76,15 @@ ACTIONS: dict[str, ActionSpec] = {a.id: a for a in [
                 "enabled": {"type": "boolean", "required": True}},
                "Changes whether an Office add-in loads at startup. Reversible.",
                default_postconditions=({"type": "device_config_equals", "params_from": {"app": "app", "addin_progid": "addin_progid", "enabled": "enabled"}},)),
+    ActionSpec("office.addin.restore_load_behavior", "desktop", R.SENSITIVE,
+               "Restore the exact typed add-in state saved locally for an earlier approved change.",
+               {"source_command_id": {"type": "string", "pattern": COMMAND_ID, "required": True}},
+               "Restores only the local journal state for the named change command; no registry state is accepted from the server.",
+               default_postconditions=({"type": "device_addin_restore_matches", "params_from": {"source_command_id": "source_command_id"}},)),
+    ActionSpec("office.addin.verify_restored", "desktop", R.READ_ONLY,
+               "Compare the live add-in setting with the original state retained in the PC's local journal.",
+               {"source_command_id": {"type": "string", "pattern": COMMAND_ID, "required": True}},
+               "Reads the fixed local journal target and registry value; no saved registry state leaves the PC."),
     ActionSpec("service.restart", "desktop", R.PRIVILEGED, "Restart an allowlisted Windows service (via the separate privileged broker).",
                {"name": {"type": "string", "pattern": SERVICE_NAME, "required": True}},
                "Stops and starts the service; dependent apps may briefly disconnect.",

@@ -13,5 +13,12 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\JoltIQ.Agent.Windows\JoltIQ.Agent.Windows.csproj" />
+    <ProjectReference Include="..\JoltIQ.Agent.FixtureApp\JoltIQ.Agent.FixtureApp.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
+  <Target Name="CopyFixtureApp" AfterTargets="Build">
+    <ItemGroup>
+      <FixtureAppFiles Include="..\JoltIQ.Agent.FixtureApp\bin\$(Configuration)\net8.0-windows10.0.19041.0\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(FixtureAppFiles)" DestinationFolder="$(OutDir)FixtureApp" />
+  </Target>
 </Project>

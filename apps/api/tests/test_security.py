@@ -206,6 +206,45 @@ def test_outlook_inspection_accepts_only_exact_typed_parameters():
     assert ACTIONS["outlook.pdf_crash.inspect"].risk.value == "READ_ONLY"
 
 
+def test_restore_action_accepts_only_source_command_id_and_readback_ignores_claimed_success():
+    from joltiq.models.enums import VerificationStatus as V
+    from joltiq.services.actions.registry import ACTIONS, ActionValidationError, validate_params
+    from joltiq.services.verification import evaluate_device_result
+
+    assert validate_params("office.addin.restore_load_behavior", {"source_command_id": "change-command-1"}) == {
+        "source_command_id": "change-command-1"
+    }
+    with pytest.raises(ActionValidationError):
+        validate_params("office.addin.restore_load_behavior", {
+            "source_command_id": "change-command-1", "key": "HKCU\\Software\\bad", "value": 3,
+        })
+    assert ACTIONS["office.addin.restore_load_behavior"].risk.value == "SENSITIVE"
+    assert validate_params("office.addin.verify_restored", {"source_command_id": "change-command-1"}) == {
+        "source_command_id": "change-command-1"
+    }
+    assert ACTIONS["office.addin.verify_restored"].risk.value == "READ_ONLY"
+
+    status, _ = evaluate_device_result(
+        "device_config_equals", {"enabled": False}, {"ok": True, "exists": True, "data": 3}
+    )
+    assert status == V.FAILED
+    status, _ = evaluate_device_result(
+        "device_process_responding", {"process": "OUTLOOK.EXE"},
+        {"ok": True, "processes": [{"responding": True, "main_window": False}]},
+    )
+    assert status == V.FAILED
+    status, _ = evaluate_device_result(
+        "device_process_responding", {"process": "OUTLOOK.EXE"},
+        {"ok": False, "processes": [{"responding": True, "main_window": True}]},
+    )
+    assert status == V.VERIFIED
+    status, _ = evaluate_device_result(
+        "device_addin_restore_matches", {"source_command_id": "change-command-1"},
+        {"ok": False, "matches_local_journal": True},
+    )
+    assert status == V.VERIFIED
+
+
 def test_desktop_candidate_selection_cannot_invent_or_modify_a_procedure():
     from joltiq.services.agent import select_candidate_procedure
 
@@ -262,6 +301,9 @@ def test_outlook_diagnostic_gate_requires_exact_trustworthy_evidence():
 
 
 def test_canonical_windows_plan_is_copied_from_published_procedure_not_model(owner):
+    import base64
+    import json
+
     from sqlalchemy import select
     from test_procedures import outlook_body
 
@@ -281,6 +323,7 @@ def test_canonical_windows_plan_is_copied_from_published_procedure_not_model(own
     )
     from joltiq.services.agent import build_canonical_plan, h_collecting_diagnostics, h_plan
     from joltiq.services.customer_messages import DIAGNOSTIC_UNSUPPORTED
+    from joltiq.services.devices import queue_command
     from joltiq.services.procedures import procedure_hash, validate_executable_body
 
     org_id = uuid.UUID(owner.org_id)
@@ -316,6 +359,12 @@ def test_canonical_windows_plan_is_copied_from_published_procedure_not_model(own
         assert [(s.action, s.params) for s in steps] == [(s.action, s.params) for s in definition.procedure]
         assert len(approvals) == 2 and all(a.approver_roles == ["customer"] for a in approvals)
         assert "untrusted model text" not in repr([(s.action, s.params, s.rationale) for s in steps])
+        command = queue_command(
+            db, device, action=steps[0].action, params=steps[0].params, session=session,
+            execution_id=uuid.uuid4(), procedure_hash=plan.procedure_hash,
+        )
+        signed_payload = json.loads(base64.b64decode(command.envelope["payload"]))
+        assert signed_payload["procedure_hash"] == article.procedure_hash
 
         blocked = AgentRun(
             org_id=org_id, ticket_id=ticket.id, state="PLANNING", correlation_id="blocked-canonical-plan-test",
@@ -359,7 +408,11 @@ def test_canonical_windows_plan_is_copied_from_published_procedure_not_model(own
             select(AgentMessage.content).where(AgentMessage.run_id == unsupported_run.id)
         ).scalars().all()
         commands = db.execute(
-            select(DeviceCommand.action).where(DeviceCommand.id != failed_diagnostic.id, DeviceCommand.session_id == session.id)
+            select(DeviceCommand.action).where(
+                DeviceCommand.id != failed_diagnostic.id,
+                DeviceCommand.session_id == session.id,
+                DeviceCommand.created_at >= failed_diagnostic.created_at,
+            )
         ).scalars().all()
         assert unsupported_run.state == "ESCALATED"
         assert DIAGNOSTIC_UNSUPPORTED in messages

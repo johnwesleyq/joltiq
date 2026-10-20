@@ -17,10 +17,12 @@ public sealed class LocalPolicy
     private static readonly Regex ModuleName = new(@"^[A-Za-z0-9_.\-]{1,180}$", RegexOptions.Compiled);
 
     public static readonly IReadOnlySet<string> ReadOnlyActions = new HashSet<string>
-        { "system.info", "process.list", "app.info", "disk.usage", "network.diagnostics", "eventlog.query", "outlook.pdf_crash.inspect", "service.status" };
+        { "system.info", "process.list", "app.info", "disk.usage", "network.diagnostics", "eventlog.query", "outlook.pdf_crash.inspect",
+          "office.addin.verify_restored", "service.status" };
 
     public static readonly IReadOnlySet<string> AllActions = new HashSet<string>(ReadOnlyActions)
-        { "file.inspect", "config.read", "app.restart", "office.addin.set_load_behavior", "service.restart", "ui.invoke", "ui.set_text" };
+        { "file.inspect", "config.read", "app.restart", "office.addin.set_load_behavior", "office.addin.restore_load_behavior",
+          "service.restart", "ui.invoke", "ui.set_text" };
 
     /// <summary>Applications the companion may restart or drive via UI Automation. Admin-extensible via local config.</summary>
     public HashSet<string> AllowedApps { get; } = new(StringComparer.OrdinalIgnoreCase)
@@ -89,6 +91,15 @@ public sealed class LocalPolicy
                 if (S("app") is not ("Outlook" or "Excel" or "Word")) return No("bad app");
                 if (S("addin_progid") is not { } pid || !ProgId.IsMatch(pid)) return No("bad add-in id");
                 return Has("enabled") ? Ok() : No("enabled required");
+            case "office.addin.restore_load_behavior":
+            case "office.addin.verify_restored":
+                var restoreAllowed = new HashSet<string> { "source_command_id" };
+                if (p.ValueKind != JsonValueKind.Object || p.EnumerateObject().Any(x => !restoreAllowed.Contains(x.Name)))
+                    return No("restore accepts only source_command_id");
+                return S("source_command_id") is { Length: > 0 and <= 100 } source &&
+                       source.All(c => char.IsLetterOrDigit(c) || c is '-' or '_')
+                    ? Ok()
+                    : No("bad source command id");
             case "config.read":
                 return S("key") is { } key && AllowedRegistryPrefixes.Any(pr => key.StartsWith(pr, StringComparison.OrdinalIgnoreCase))
                        && !key.Contains("..") && S("value") is { Length: > 0 and <= 120 } ? Ok() : No("registry key not allowlisted");

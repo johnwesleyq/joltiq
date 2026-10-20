@@ -21,8 +21,10 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..models import (
     ActionExecution,
+    AgentPlan,
     Device,
     DeviceCommand,
+    PlanStep,
     SupportSession,
     TicketComment,
     VerificationEvidence,
@@ -38,6 +40,7 @@ DEVICE_CHECKS = {
     "device_service_running": ("service.status", lambda p: {"name": p["name"]}),
     "device_process_responding": ("process.list", lambda p: {"name_filter": p["process"]}),
     "device_config_equals": ("config.read", lambda p: _addin_key(p)),
+    "device_addin_restore_matches": ("office.addin.verify_restored", lambda p: {"source_command_id": p["source_command_id"]}),
 }
 SUPPORTED = {"browser_readback", "http_ok", "ticket_comment_exists", "ticket_field_equals", *DEVICE_CHECKS}
 
@@ -158,7 +161,11 @@ def _queue_device_check(db, vr, device, session, t, p) -> dict:
 
     action, mk = DEVICE_CHECKS[t]
     try:
-        cmd = queue_command(db, device, action=action, params=mk(p), session=session)
+        execution = db.get(ActionExecution, vr.execution_id)
+        step = db.get(PlanStep, execution.step_id) if execution and execution.step_id else None
+        plan = db.get(AgentPlan, step.plan_id) if step else None
+        cmd = queue_command(db, device, action=action, params=mk(p), session=session,
+                            procedure_hash=plan.procedure_hash if plan else None)
     except Exception as e:  # noqa: BLE001
         return {"status": V.UNKNOWN, "reason": f"could not queue device read-back: {str(e)[:200]}"}
     cmd.envelope = {**cmd.envelope}
@@ -172,8 +179,8 @@ def evaluate_device_result(t: str, params: dict, result: dict) -> tuple[str, str
         return (V.VERIFIED if st == "running" else V.FAILED), f"service status {r.get('status')}"
     if t == "device_process_responding":
         procs = r.get("processes", [])
-        ok = any(pr.get("responding", False) for pr in procs)
-        return (V.VERIFIED if ok else V.FAILED), f"{len(procs)} matching processes, responding={ok}"
+        ok = any(pr.get("main_window", False) and pr.get("responding", False) for pr in procs)
+        return (V.VERIFIED if ok else V.FAILED), f"{len(procs)} matching processes, responding main window={ok}"
     if t == "device_config_equals":
         val = r.get("data")
         if "enabled" in params:
@@ -182,6 +189,9 @@ def evaluate_device_result(t: str, params: dict, result: dict) -> tuple[str, str
             return (V.VERIFIED if ok else V.FAILED), f"LoadBehavior={val} (expected {expected})"
         ok = str(val) == str(params.get("equals"))
         return (V.VERIFIED if ok else V.FAILED), f"value={val}"
+    if t == "device_addin_restore_matches":
+        ok = r.get("matches_local_journal") is True
+        return (V.VERIFIED if ok else V.FAILED), f"live setting matches local pre-state={ok}"
     return V.UNKNOWN, "unknown check"
 
 

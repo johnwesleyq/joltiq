@@ -9,7 +9,7 @@ namespace JoltIQ.Agent.Core;
 public interface IActionProvider
 {
     IReadOnlyCollection<string> Capabilities { get; }
-    Task<JsonObject> ExecuteAsync(string action, JsonElement parameters, CancellationToken ct);
+    Task<JsonObject> ExecuteAsync(string action, JsonElement parameters, CancellationToken ct, ActionExecutionContext? context = null);
     IDictionary<string, string> Facts();
 }
 
@@ -199,7 +199,15 @@ public sealed class AgentRuntime
         string status;
         try
         {
-            result = await _provider.ExecuteAsync(action, p, linked.Token);
+            var executionContext = new ActionExecutionContext(
+                cid,
+                _client.State.DeviceId ?? "",
+                sessionId ?? "",
+                "",
+                b.TryGetProperty("procedure_hash", out var procedureHash) && procedureHash.ValueKind == JsonValueKind.String
+                    ? procedureHash.GetString()
+                    : null);
+            result = await _provider.ExecuteAsync(action, p, linked.Token, executionContext);
             result["ok"] ??= true;
             status = result["ok"]!.GetValue<bool>() ? "done" : "failed";
             _ui.ActionPerformed(s.SessionId, Describe(action, p));

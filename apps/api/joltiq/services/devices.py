@@ -183,7 +183,8 @@ def authenticate_device(db: Session, *, device_id: str, ts: str, nonce: str, cou
 
 
 # ---------------- commands ----------------
-def queue_command(db: Session, device: Device, *, action: str, params: dict, session: SupportSession | None, execution_id=None) -> DeviceCommand:
+def queue_command(db: Session, device: Device, *, action: str, params: dict, session: SupportSession | None, execution_id=None,
+                  procedure_hash: str | None = None) -> DeviceCommand:
     if ACTIONS.get(action) is None or (ACTIONS[action].computer_use and get_settings().env != "test"):
         raise AppError("Windows MVP does not dispatch screen-control actions", code="unsupported_action")
     clean = validate_params(action, params)
@@ -195,10 +196,13 @@ def queue_command(db: Session, device: Device, *, action: str, params: dict, ses
                         action=action, params=clean, status="queued", expires_at=utcnow() + timedelta(seconds=COMMAND_TTL_S))
     db.add(cmd)
     db.flush()
-    cmd.envelope = sign_envelope({"type": "action", "command_id": str(cmd.id), "device_id": str(device.id),
-                                  "session_id": str(session.id) if session else None, "action": action, "params": clean,
-                                  "issued_at": int(utcnow().timestamp()), "expires_at": int(cmd.expires_at.timestamp()),
-                                  "nonce": new_token(12), "risk": ACTIONS[action].risk})
+    payload = {"type": "action", "command_id": str(cmd.id), "device_id": str(device.id),
+               "session_id": str(session.id) if session else None, "action": action, "params": clean,
+               "issued_at": int(utcnow().timestamp()), "expires_at": int(cmd.expires_at.timestamp()),
+               "nonce": new_token(12), "risk": ACTIONS[action].risk}
+    if procedure_hash:
+        payload["procedure_hash"] = procedure_hash
+    cmd.envelope = sign_envelope(payload)
     return cmd
 
 

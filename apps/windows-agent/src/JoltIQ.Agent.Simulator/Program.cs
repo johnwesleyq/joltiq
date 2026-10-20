@@ -62,7 +62,7 @@ sealed class SimulatedOs(bool brokenService) : IActionProvider
 
     public IDictionary<string, string> Facts() => new Dictionary<string, string> { ["simulated"] = "true", ["os"] = "Windows 11 23H2 (simulated)" };
 
-    public Task<JsonObject> ExecuteAsync(string action, JsonElement p, CancellationToken ct)
+    public Task<JsonObject> ExecuteAsync(string action, JsonElement p, CancellationToken ct, ActionExecutionContext? context = null)
     {
         Executed.Add(action);
         string S(string k) => p.GetProperty(k).GetString()!;
@@ -84,10 +84,12 @@ sealed class SimulatedOs(bool brokenService) : IActionProvider
                 ["crash"] = new JsonObject { ["log_readable"] = true, ["log_enabled"] = true, ["service_running"] = true,
                                               ["window_trustworthy"] = true, ["matched"] = true, ["matching_event_count"] = 1 },
             },
-            "process.list" => new() { ["processes"] = new JsonArray(new JsonObject { ["name"] = "OUTLOOK.EXE", ["pid"] = 4242, ["responding"] = _outlookResponding }) },
+            "process.list" => new() { ["processes"] = new JsonArray(new JsonObject { ["name"] = "OUTLOOK.EXE", ["pid"] = 4242,
+                                                                                       ["main_window"] = _outlookResponding, ["responding"] = _outlookResponding }) },
             "service.status" => new() { ["name"] = S("name"), ["status"] = _services.GetValueOrDefault(S("name"), "NotFound") },
             "service.restart" => Restart(S("name")),
-            "app.restart" => new() { ["restarted"] = S("process"), ["note"] = "simulated" },
+            "app.restart" => new() { ["was_running"] = true, ["close_requested"] = true, ["started"] = false,
+                                      ["restarted"] = true, ["responding"] = true, ["safe"] = true, ["note"] = "simulated" },
             "office.addin.set_load_behavior" => SetAddin(S("addin_progid"), p.GetProperty("enabled").GetBoolean()),
             "config.read" => ReadConfig(S("key")),
             "network.diagnostics" => new() { ["gateway_reachable"] = true, ["dns_ok"] = true },

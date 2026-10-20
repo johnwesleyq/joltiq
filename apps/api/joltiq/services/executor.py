@@ -89,7 +89,8 @@ def execute_step(db: Session, run: AgentRun, plan: AgentPlan, step: PlanStep) ->
         if spec_channel == "desktop":
             if s is None or device is None:  # policy already denies this; defensive
                 return _done(db, run, ex, s, "failed", "no desktop session/device")
-            cmd = queue_command(db, device, action=step.action, params=dec.params, session=s, execution_id=ex.id)
+            cmd = queue_command(db, device, action=step.action, params=dec.params, session=s, execution_id=ex.id,
+                                procedure_hash=plan.procedure_hash)
             ex.result = {"command_id": str(cmd.id)}
             sessions.event(db, s, "action_dispatched", actor_kind="ai", data={"action": step.action, "params": dec.params})
             return Outcome("pending_device", "waiting for device", ex)

@@ -21,13 +21,33 @@ public sealed class WindowsActionProvider : IActionProvider
 {
     public const string BrokerPipe = "JoltIQ.Agent.Broker.v1";
     private readonly string? _enrolledUserSid;
-    public WindowsActionProvider(string? enrolledUserSid = null) => _enrolledUserSid = enrolledUserSid;
+    private readonly OfficeAddinManager _addins;
+    private readonly TimeSpan _restartTimeout;
+    private readonly TimeSpan _restartSettle;
 
-    public IReadOnlyCollection<string> Capabilities { get; } = new[]
+    public WindowsActionProvider(
+        string? enrolledUserSid = null,
+        ICommandJournal? journal = null,
+        ActionHost host = ActionHost.InteractiveTray,
+        Func<string?>? currentSid = null,
+        TimeSpan? restartTimeout = null,
+        TimeSpan? restartSettle = null)
     {
-        "system.info", "process.list", "app.info", "disk.usage", "network.diagnostics", "eventlog.query", "service.status",
-        "outlook.pdf_crash.inspect", "file.inspect", "config.read", "app.restart", "office.addin.set_load_behavior", "service.restart", "ui.invoke", "ui.set_text",
-    };
+        _enrolledUserSid = enrolledUserSid;
+        _addins = new OfficeAddinManager(enrolledUserSid, journal, host, currentSid);
+        _restartTimeout = restartTimeout ?? TimeSpan.FromSeconds(20);
+        _restartSettle = restartSettle ?? TimeSpan.FromSeconds(4);
+        var capabilities = new List<string>
+        {
+            "system.info", "process.list", "app.info", "disk.usage", "network.diagnostics", "eventlog.query", "service.status",
+            "outlook.pdf_crash.inspect", "file.inspect", "config.read", "app.restart", "service.restart", "ui.invoke", "ui.set_text",
+        };
+        if (_addins.Available)
+            capabilities.AddRange(new[] { "office.addin.set_load_behavior", "office.addin.restore_load_behavior", "office.addin.verify_restored" });
+        Capabilities = capabilities;
+    }
+
+    public IReadOnlyCollection<string> Capabilities { get; }
 
     public IDictionary<string, string> Facts() => new Dictionary<string, string>
     {
@@ -35,7 +55,7 @@ public sealed class WindowsActionProvider : IActionProvider
         ["build"] = Registry.GetValue(@"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion", "DisplayVersion", "")?.ToString() ?? "",
     };
 
-    public async Task<JsonObject> ExecuteAsync(string action, JsonElement p, CancellationToken ct)
+    public async Task<JsonObject> ExecuteAsync(string action, JsonElement p, CancellationToken ct, ActionExecutionContext? context = null)
     {
         string S(string k) => p.GetProperty(k).GetString()!;
         string? O(string k) => p.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
@@ -55,7 +75,9 @@ public sealed class WindowsActionProvider : IActionProvider
             "file.inspect" => InspectFile(Environment.ExpandEnvironmentVariables(S("path"))),
             "config.read" => ReadRegistry(S("key"), S("value")),
             "app.restart" => await RestartApp(S("process"), O("args"), ct),
-            "office.addin.set_load_behavior" => SetAddin(S("app"), S("addin_progid"), p.GetProperty("enabled").GetBoolean()),
+            "office.addin.set_load_behavior" => _addins.SetLoadBehavior(S("app"), S("addin_progid"), p.GetProperty("enabled").GetBoolean(), context),
+            "office.addin.restore_load_behavior" => _addins.Restore(S("source_command_id"), context),
+            "office.addin.verify_restored" => _addins.VerifyRestored(S("source_command_id"), context),
             "service.restart" => await Broker(new JsonObject { ["op"] = "service.restart", ["name"] = S("name") }, ct),
             "ui.invoke" => UiInvoke(S("process"), O("automation_id"), O("name"), O("control_type")),
             "ui.set_text" => UiSetText(S("process"), S("automation_id"), S("text")),
@@ -82,8 +104,9 @@ public sealed class WindowsActionProvider : IActionProvider
         {
             try
             {
+                var mainWindow = pr.MainWindowHandle != IntPtr.Zero;
                 arr.Add(new JsonObject { ["name"] = pr.ProcessName + ".exe", ["pid"] = pr.Id, ["memory_mb"] = pr.WorkingSet64 / 1048576,
-                                         ["responding"] = pr.MainWindowHandle == IntPtr.Zero || pr.Responding });
+                                         ["main_window"] = mainWindow, ["responding"] = mainWindow && pr.Responding });
             }
             catch (InvalidOperationException) { }
             finally { pr.Dispose(); }
@@ -182,41 +205,120 @@ public sealed class WindowsActionProvider : IActionProvider
     private static JsonObject ReadRegistry(string key, string value)
     {
         var sub = key.StartsWith(@"HKCU\", StringComparison.OrdinalIgnoreCase) ? key[5..] : throw new InvalidOperationException("HKCU only");
-        using var k = Registry.CurrentUser.OpenSubKey(sub);
-        var v = k?.GetValue(value);
-        return v is null ? new JsonObject { ["exists"] = false } : new JsonObject { ["exists"] = true, ["data"] = v.ToString() };
+        var found = new List<(string View, object Data, RegistryValueKind Kind)>();
+        foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
+        {
+            using var root = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, view);
+            using var k = root.OpenSubKey(sub);
+            if (k is null || !k.GetValueNames().Contains(value, StringComparer.OrdinalIgnoreCase)) continue;
+            var data = k.GetValue(value, null, RegistryValueOptions.DoNotExpandEnvironmentNames);
+            if (data is not null) found.Add((view == RegistryView.Registry32 ? "32" : "64", data, k.GetValueKind(value)));
+        }
+        if (found.Count == 0) return new JsonObject { ["exists"] = false };
+        if (found.Count > 1) return new JsonObject { ["ok"] = false, ["error"] = "registry value exists in both views; refusing ambiguous read-back" };
+        return new JsonObject { ["exists"] = true, ["data"] = found[0].Data.ToString(), ["kind"] = found[0].Kind.ToString(),
+                                ["registry_view"] = found[0].View };
     }
 
-    private static JsonObject SetAddin(string app, string progId, bool enabled)
-    {
-        // Per-user add-in key (no admin). LoadBehavior 3 = load at startup, 2 = do not load.
-        using var k = Registry.CurrentUser.CreateSubKey($@"Software\Microsoft\Office\{app}\Addins\{progId}");
-        var before = k.GetValue("LoadBehavior");
-        k.SetValue("LoadBehavior", enabled ? 3 : 2, RegistryValueKind.DWord);
-        return new JsonObject { ["addin"] = progId, ["before"] = before?.ToString(), ["after"] = enabled ? 3 : 2 };
-    }
-
-    private static async Task<JsonObject> RestartApp(string proc, string? args, CancellationToken ct)
+    private async Task<JsonObject> RestartApp(string proc, string? args, CancellationToken ct)
     {
         var name = Path.GetFileNameWithoutExtension(proc);
         string? exe = null;
-        foreach (var p in Process.GetProcessesByName(name))
+        var initial = Process.GetProcessesByName(name);
+        var wasRunning = initial.Length > 0;
+        var closeRequested = wasRunning;
+        foreach (var process in initial)
         {
-            try { exe ??= p.MainModule?.FileName; p.CloseMainWindow(); } catch (InvalidOperationException) { }
+            try
+            {
+                exe ??= process.MainModule?.FileName;
+                closeRequested &= process.MainWindowHandle != IntPtr.Zero && process.CloseMainWindow();
+            }
+            catch (Exception e) when (e is InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+                closeRequested = false;
+            }
+            finally { process.Dispose(); }
         }
-        var deadline = DateTime.UtcNow.AddSeconds(20);
-        while (Process.GetProcessesByName(name).Length > 0 && DateTime.UtcNow < deadline) await Task.Delay(500, ct);
-        if (Process.GetProcessesByName(name).Length > 0)
-            return new JsonObject { ["ok"] = false, ["error"] = "application did not close (the user may have unsaved work); not forcing" };
+        var deadline = DateTime.UtcNow.Add(_restartTimeout);
+        while (HasProcesses(name) && DateTime.UtcNow < deadline) await Task.Delay(100, ct);
+        if (HasProcesses(name))
+            return RestartResult(false, wasRunning, closeRequested, false, false, false,
+                "application did not close normally (the user may have unsaved work); it was not forced");
         exe ??= AppPathFromRegistry(LocalPolicy.Normalize(proc));
-        if (exe is null) return new JsonObject { ["ok"] = false, ["error"] = "could not locate application executable" };
-        Process.Start(new ProcessStartInfo(exe, args ?? "") { UseShellExecute = true });
-        await Task.Delay(4000, ct);
-        return new JsonObject { ["restarted"] = proc, ["running"] = Process.GetProcessesByName(name).Length > 0 };
+        if (exe is null || !File.Exists(exe))
+            return RestartResult(false, wasRunning, closeRequested, false, false, false, "could not locate application executable");
+        try
+        {
+            using var startedProcess = Process.Start(new ProcessStartInfo(exe, args ?? "") { UseShellExecute = true });
+            if (startedProcess is null)
+                return RestartResult(false, wasRunning, closeRequested, false, false, false, "application launch returned no process");
+        }
+        catch (Exception e) when (e is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return RestartResult(false, wasRunning, closeRequested, false, false, false, "application could not be started safely");
+        }
+        var settleDeadline = DateTime.UtcNow.Add(_restartSettle);
+        var responding = false;
+        do
+        {
+            responding = HasRespondingWindow(name);
+            if (!responding) await Task.Delay(100, ct);
+        } while (!responding && DateTime.UtcNow < settleDeadline);
+        return RestartResult(responding, wasRunning, closeRequested, !wasRunning, wasRunning, responding,
+            responding ? null : "application started but no responding main window appeared");
     }
 
-    private static string? AppPathFromRegistry(string exe) =>
-        Registry.GetValue($@"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{exe}", "", null) as string;
+    private static bool HasProcesses(string name)
+    {
+        var processes = Process.GetProcessesByName(name);
+        try { return processes.Length > 0; }
+        finally { foreach (var process in processes) process.Dispose(); }
+    }
+
+    private static bool HasRespondingWindow(string name)
+    {
+        var processes = Process.GetProcessesByName(name);
+        try
+        {
+            return processes.Any(process =>
+            {
+                try { return process.MainWindowHandle != IntPtr.Zero && process.Responding; }
+                catch (InvalidOperationException) { return false; }
+            });
+        }
+        finally { foreach (var process in processes) process.Dispose(); }
+    }
+
+    private static JsonObject RestartResult(bool ok, bool wasRunning, bool closeRequested, bool started, bool restarted,
+        bool responding, string? error)
+    {
+        var result = new JsonObject
+        {
+            ["ok"] = ok,
+            ["was_running"] = wasRunning,
+            ["close_requested"] = closeRequested,
+            ["started"] = started,
+            ["restarted"] = restarted,
+            ["responding"] = responding,
+            ["safe"] = ok,
+        };
+        if (error is not null) result["error"] = error;
+        return result;
+    }
+
+    private static string? AppPathFromRegistry(string exe)
+    {
+        var path = $@"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{exe}";
+        foreach (var hive in new[] { RegistryHive.CurrentUser, RegistryHive.LocalMachine })
+        foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
+        {
+            using var root = RegistryKey.OpenBaseKey(hive, view);
+            using var key = root.OpenSubKey(path);
+            if (key?.GetValue(null) is string value) return value;
+        }
+        return null;
+    }
 
     private static async Task<JsonObject> Broker(JsonObject req, CancellationToken ct)
     {
