@@ -122,7 +122,7 @@ def heartbeat(body: HeartbeatIn, dd=Depends(device_auth)):
     d.agent_version = body.agent_version[:40]
     d.facts = {k: str(v)[:200] for k, v in list(body.facts.items())[:30]}
     if body.capabilities:
-        d.capabilities = [c for c in body.capabilities if c in svc.DESKTOP_ACTIONS]
+        d.capabilities = [c for c in body.capabilities if c in svc.accepted_desktop_actions()]
     latest = "1.0.0"
     return {"ok": True, "server_time": int(__import__("time").time()), "update": {"latest_version": latest, "required": svc._ver(d.agent_version) < svc._ver(svc.MIN_AGENT_VERSION)}}
 
@@ -155,7 +155,7 @@ def local_consent(sid: uuid.UUID, body: LocalConsentIn, dd=Depends(device_auth))
     if s.run_id:
         run = db.get(AgentRun, s.run_id)
         if run:
-            agent_svc.resume(db, run, "device consent", ("device_consent", "consent", "approval"))
+            agent_svc.resume(db, run, "device consent", ("device_consent", "consent", "approval", "diagnostic_device_consent"))
     return {"ok": True}
 
 

@@ -37,8 +37,14 @@ PROTOCOL_VERSION = "1"
 MAX_SKEW = 120
 ENROLL_TTL_MIN = 15
 COMMAND_TTL_S = 300
-DESKTOP_ACTIONS = [a.id for a in ACTIONS.values() if a.channel == "desktop"]
+DESKTOP_ACTIONS = [a.id for a in ACTIONS.values() if a.channel == "desktop" and not a.computer_use]
+_TEST_DESKTOP_ACTIONS = [a.id for a in ACTIONS.values() if a.channel == "desktop"]
 MIN_AGENT_VERSION = "1.0.0"
+
+
+def accepted_desktop_actions() -> list[str]:
+    """Production MVP excludes screen-driving; tests retain coverage of the dormant implementation."""
+    return _TEST_DESKTOP_ACTIONS if get_settings().env == "test" else DESKTOP_ACTIONS
 
 
 @lru_cache
@@ -108,7 +114,7 @@ def enroll(db: Session, *, code: str, public_key_pem: str, hostname: str, os_nam
     if _ver(agent_version) < _ver(MIN_AGENT_VERSION):
         raise AppError(f"Agent version {agent_version} is too old; minimum {MIN_AGENT_VERSION}", code="agent_outdated")
     set_tenant(db, e.org_id)
-    caps = [c for c in capabilities if c in DESKTOP_ACTIONS]
+    caps = [c for c in capabilities if c in accepted_desktop_actions()]
     d = Device(org_id=e.org_id, customer_id=e.customer_id, owner_user_id=e.created_by, hostname=hostname[:255], os_name=os_name[:120],
                os_version=os_version[:120], agent_version=agent_version[:40], status="active", public_key_pem=public_key_pem,
                last_seen_at=utcnow(), capabilities=caps, last_counter=0)
@@ -178,6 +184,8 @@ def authenticate_device(db: Session, *, device_id: str, ts: str, nonce: str, cou
 
 # ---------------- commands ----------------
 def queue_command(db: Session, device: Device, *, action: str, params: dict, session: SupportSession | None, execution_id=None) -> DeviceCommand:
+    if ACTIONS.get(action) is None or (ACTIONS[action].computer_use and get_settings().env != "test"):
+        raise AppError("Windows MVP does not dispatch screen-control actions", code="unsupported_action")
     clean = validate_params(action, params)
     if action not in (device.capabilities or []):
         raise AppError(f"Device agent does not support {action}", code="unsupported_action")

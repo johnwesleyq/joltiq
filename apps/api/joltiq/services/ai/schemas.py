@@ -36,6 +36,11 @@ class Diagnosis(BaseModel):
     missing_information: list[str] = Field(default_factory=list)
 
 
+class CandidateSelection(BaseModel):
+    article_id: str | None = None
+    hypothesis: str = ""
+
+
 class Postcondition(BaseModel):
     type: str
     params: dict[str, Any] = Field(default_factory=dict)

@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import uuid
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 from urllib.parse import urlsplit
@@ -48,7 +49,7 @@ from ..models.enums import TERMINAL_RUN_STATES, ApprovalStatus
 from ..models.enums import RunState as R
 from ..models.enums import TicketStatus as TS
 from ..security.crypto import canonical_json, sha256_hex
-from . import approvals, audit, policy, research, sessions, verification
+from . import approvals, audit, devices, policy, research, sessions, verification
 from . import tickets as ticket_svc
 from .actions.registry import (
     ACTIONS,
@@ -361,10 +362,62 @@ def _procedures_for(db, hits: list[dict]) -> list[dict]:
             )
             continue
         if proc:
-            out.append({"article_id": str(art.id), "title": art.title, "steps": proc, "evidence_id": h["eid"],
+            out.append({"article_id": str(art.id), "title": art.title, "kind": body.get("kind"), "steps": proc, "evidence_id": h["eid"],
                         "hypothesis": body.get("hypothesis", art.title), "risks": body.get("risks", []),
                         "procedure": {"article_id": str(art.id), "version": art.version, "hash": art.procedure_hash}})
     return out
+
+
+def select_candidate_procedure(candidates: list[dict], selected_article_id: str | None) -> str | None:
+    """Accept only an immutable article ID already exposed by trusted retrieval."""
+    if selected_article_id and any(p.get("article_id") == selected_article_id for p in candidates):
+        return selected_article_id
+    return None
+
+
+@dataclass(frozen=True)
+class DiagnosticDecision:
+    allowed: bool
+    reasons: list[str]
+
+
+def evaluate_diagnostic_gate(procedure, command_results: list[dict]) -> DiagnosticDecision:
+    """Require literal device facts; absence and ambiguity always fail closed."""
+    if len(command_results) != 1 or not isinstance(command_results[0], dict):
+        return DiagnosticDecision(False, ["missing_diagnostic_result"])
+    r = command_results[0]
+    reasons: list[str] = []
+    windows, interactive = r.get("windows") or {}, r.get("interactive") or {}
+    outlook, addin, crash = r.get("outlook") or {}, r.get("addin") or {}, r.get("crash") or {}
+    if not r.get("ok", True) or not r.get("supported"):
+        reasons.extend(str(x) for x in (r.get("unsupported_reasons") or []) if x)
+    if not windows.get("supported"):
+        reasons.append("unsupported_windows")
+    if not outlook.get("classic_installed"):
+        reasons.append("outlook_absent")
+    if outlook.get("kind") != "classic" or outlook.get("new_installed"):
+        reasons.append("new_outlook")
+    if not addin.get("installed"):
+        reasons.append("addin_absent")
+    if addin.get("scope") != "HKCU" or addin.get("policy_override") or not addin.get("changeable"):
+        reasons.append("policy_controlled")
+    if not interactive.get("unlocked"):
+        reasons.append("locked")
+    if not interactive.get("same_user"):
+        reasons.append("user_mismatch")
+    if interactive.get("active_session_count") != 1:
+        reasons.append("multiple_users")
+    if not crash.get("log_readable"):
+        reasons.append("log_unreadable")
+    if not crash.get("log_enabled") or not crash.get("service_running") or not crash.get("window_trustworthy"):
+        reasons.append("log_unhealthy")
+    if not crash.get("matched"):
+        reasons.append("wrong_module")
+    # The device action itself was built from the canonical diagnostic's exact ProgID/module.
+    expected = procedure.diagnostics[0].expect
+    if expected.get("supported") is not True or expected.get("outlook.kind") != "classic":
+        reasons.append("procedure_expectation_invalid")
+    return DiagnosticDecision(not reasons, list(dict.fromkeys(reasons)))
 
 
 def h_search_internal(db, run):
@@ -472,7 +525,99 @@ def h_diagnose(db, run):
         _ctx_update(run, research_query=dx.research_query)
         transition(db, run, R.RESEARCHING_EXTERNAL, "diagnosis requested external research")
         return
+    desktop = [p for p in run.context.get("procedures", []) if p.get("kind") == "windows_outlook_pdf_crash"]
+    if desktop:
+        selected = _model(db, run, "candidate_selection", S.CandidateSelection,
+                          {"candidates": [{k: p.get(k) for k in ("article_id", "title", "hypothesis", "evidence_id")} for p in desktop]})
+        article_id = select_candidate_procedure(desktop, selected.article_id)
+        if article_id:
+            candidate = next(p for p in desktop if p["article_id"] == article_id)
+            article = db.get(KnowledgeArticle, uuid.UUID(article_id))
+            from .customer_messages import DIAGNOSTIC_DEVICE_CONSENT, DIAGNOSTIC_PORTAL_CONSENT
+            from .procedures import load_published_procedure
+
+            procedure = load_published_procedure(article)
+            t = _ticket(db, run)
+            if not t.device_id:
+                _escalate(db, run, "Approved Windows procedure matched, but no enrolled device is linked to this ticket")
+                return
+            s = sessions.start(
+                db, run.org_id, kind="desktop", owner_id=t.requester_id or run.started_by, ticket_id=t.id,
+                device_id=t.device_id, run_id=run.id,
+                request_details={"purpose": procedure.messages["diagnostic_consent"], "addin_name": procedure.display.addin_name,
+                                 "addin_progid": procedure.display.addin_progid, "procedure_hash": article.procedure_hash,
+                                 "read_only": True, "portal_message": DIAGNOSTIC_PORTAL_CONSENT,
+                                 "device_message": DIAGNOSTIC_DEVICE_CONSENT},
+            )
+            _ctx_update(run, candidate_procedure=candidate, diagnostic_session_id=str(s.id), candidate_hypothesis=selected.hypothesis)
+            transition(db, run, R.AWAITING_DIAGNOSTIC_CONSENT, "approved candidate selected; awaiting read-only diagnostic consent")
+            _say(db, run, DIAGNOSTIC_PORTAL_CONSENT, data={"session_id": str(s.id), "kind": "diagnostic_consent"})
+            _set_ticket(db, run, TS.AWAITING_APPROVAL, "waiting for diagnostic consent")
+            run.paused_for = "diagnostic_consent"
+            return
     transition(db, run, R.PLANNING, f"{len(hyps)} hypotheses")
+
+
+def queue_procedure_diagnostics(db, run, procedure, session: SupportSession) -> list[DeviceCommand]:
+    """Queue only the immutable read-only diagnostic actions in the published procedure."""
+    device = db.get(Device, session.device_id)
+    commands = []
+    for diagnostic in procedure.diagnostics:
+        if diagnostic.action != "outlook.pdf_crash.inspect" or ACTIONS[diagnostic.action].risk != "READ_ONLY":
+            raise ValueError("procedure contains a non-canonical diagnostic")
+        decision = policy.evaluate(db, run.org_id, diagnostic.action, diagnostic.params, session=session, device=device, for_execution=True)
+        if decision.effect != "allow":
+            raise ValueError("device policy refused canonical diagnostics")
+        commands.append(devices.queue_command(db, device, action=diagnostic.action, params=diagnostic.params, session=session))
+    return commands
+
+
+def h_awaiting_diagnostic_consent(db, run):
+    from .customer_messages import DIAGNOSTIC_DEVICE_CONSENT, DIAGNOSTIC_UNSUPPORTED
+    from .procedures import load_published_procedure
+
+    s = db.get(SupportSession, uuid.UUID(run.context["diagnostic_session_id"]))
+    if not s or s.state in ("terminated", "expired") or (s.consent or {}).get("device_local_declined"):
+        _say(db, run, DIAGNOSTIC_UNSUPPORTED)
+        _escalate(db, run, "Diagnostic consent was declined or expired; no changes were made")
+        return
+    if s.state != "active":
+        run.paused_for = "diagnostic_consent"
+        return
+    if not (s.consent or {}).get("device_local_consent"):
+        if not run.context.get("device_consent_message_sent"):
+            _say(db, run, DIAGNOSTIC_DEVICE_CONSENT, data={"session_id": str(s.id), "kind": "device_diagnostic_consent"})
+            _ctx_update(run, device_consent_message_sent=True)
+        run.paused_for = "diagnostic_device_consent"
+        return
+    article = db.get(KnowledgeArticle, uuid.UUID(run.context["candidate_procedure"]["article_id"]))
+    procedure = load_published_procedure(article)
+    commands = queue_procedure_diagnostics(db, run, procedure, s)
+    _ctx_update(run, procedure_diag_commands=[str(c.id) for c in commands])
+    transition(db, run, R.COLLECTING_DIAGNOSTICS, "collecting canonical Outlook diagnostic evidence")
+    run.paused_for = "procedure_diagnostics"
+    enqueue(db, "agent.timeout", {"run_id": str(run.id), "paused_for": "procedure_diagnostics"}, org_id=run.org_id, delay_seconds=180)
+
+
+def h_collecting_diagnostics(db, run):
+    from .customer_messages import DIAGNOSTIC_UNSUPPORTED
+    from .procedures import load_published_procedure
+
+    ids = [uuid.UUID(x) for x in run.context.get("procedure_diag_commands", [])]
+    commands = [db.get(DeviceCommand, x) for x in ids]
+    if not ids or any(c is None or c.status not in ("done", "failed", "expired") for c in commands):
+        run.paused_for = "procedure_diagnostics"
+        return
+    article = db.get(KnowledgeArticle, uuid.UUID(run.context["candidate_procedure"]["article_id"]))
+    procedure = load_published_procedure(article)
+    results = [c.result or {} for c in commands if c and c.status == "done"]
+    decision = evaluate_diagnostic_gate(procedure, results)
+    _ctx_update(run, diagnostic_decision={"allowed": decision.allowed, "reasons": decision.reasons}, diagnostic_results=results)
+    if not decision.allowed:
+        _say(db, run, DIAGNOSTIC_UNSUPPORTED)
+        _escalate(db, run, "Approved procedure did not pass diagnostic gate: " + ", ".join(decision.reasons))
+        return
+    transition(db, run, R.PLANNING, "canonical diagnostic gate passed")
 
 
 def _hosts_from_steps(steps: list[dict]) -> list[str]:
@@ -488,6 +633,21 @@ def _hosts_from_steps(steps: list[dict]) -> list[str]:
 def h_plan(db, run):
     t = _ticket(db, run)
     ctx = run.context
+    if ctx.get("candidate_procedure"):
+        if not (ctx.get("diagnostic_decision") or {}).get("allowed"):
+            _escalate(db, run, "Canonical remediation planning was blocked because the diagnostic gate did not pass")
+            return
+        article = db.get(KnowledgeArticle, uuid.UUID(ctx["candidate_procedure"]["article_id"]))
+        from .procedures import load_published_procedure
+
+        procedure = load_published_procedure(article)
+        session = db.get(SupportSession, uuid.UUID(ctx["diagnostic_session_id"]))
+        plan = build_canonical_plan(db, run, article, procedure, session)
+        transition(db, run, R.AWAITING_APPROVAL, f"canonical plan r{plan.revision}: {plan.summary}",
+                   {"plan_id": str(plan.id), "steps": len(procedure.procedure)})
+        _set_ticket(db, run, TS.AWAITING_APPROVAL, "waiting for exact-step approval")
+        run.paused_for = "approval"
+        return
     payload = {"subject": t.subject, "evidence": ctx.get("evidence", []), "hypotheses": ctx.get("hypotheses", []),
                "procedures": ctx.get("procedures", []), "observations": ctx.get("observations", []),
                "previously_failed_procedures": ctx.get("failed_procedures", []), "failures": ctx.get("failures", []),
@@ -596,6 +756,47 @@ def h_plan(db, run):
     if run.state == R.AWAITING_APPROVAL:
         _set_ticket(db, run, TS.AWAITING_APPROVAL, "waiting for approval/consent")
         run.paused_for = "approval"
+
+
+def build_canonical_plan(db, run, article: KnowledgeArticle, procedure, session: SupportSession) -> AgentPlan:
+    """Persist exact published remediation steps; no model-authored field can enter the plan."""
+    steps = [step.model_dump(mode="json") for step in procedure.procedure]
+    phash = sha256_hex(canonical_json(steps))
+    rev = len(db.execute(select(AgentPlan.id).where(AgentPlan.run_id == run.id)).all()) + 1
+    candidate = run.context["candidate_procedure"]
+    plan = AgentPlan(
+        org_id=run.org_id, run_id=run.id, revision=rev,
+        summary=f"Apply approved procedure: {article.title}", hypothesis=run.context.get("candidate_hypothesis") or article.title,
+        risks=candidate.get("risks", []), plan_hash=phash, status="proposed",
+        citations=[e for e in run.context.get("evidence", []) if e["id"] == candidate.get("evidence_id")],
+        procedure_article_id=article.id, procedure_version=article.version, procedure_hash=article.procedure_hash,
+    )
+    db.add(plan)
+    db.flush()
+    device = db.get(Device, session.device_id)
+    target = {"session_id": str(session.id), "device_id": str(device.id)}
+    for ordinal, step in enumerate(steps):
+        params = validate_params(step["action"], step["params"])
+        decision = policy.evaluate(db, run.org_id, step["action"], params, session=session, device=device)
+        if decision.effect == "deny":
+            raise ValueError(f"policy denied canonical action {step['action']}")
+        ps = PlanStep(
+            org_id=run.org_id, plan_id=plan.id, ordinal=ordinal, action=step["action"], target=target,
+            params=params, rationale=step["rationale"], risk=decision.risk, postconditions=step["postconditions"],
+        )
+        db.add(ps)
+        db.flush()
+        # Exact per-step approval is mandatory for this sensitive Windows MVP, even if broader policy would allow it.
+        spec = ACTIONS[ps.action]
+        approvals.request(
+            db, org_id=run.org_id, run_id=run.id, plan_id=plan.id, step=ps, plan_hash=phash,
+            ticket_id=run.ticket_id, session_id=session.id, reason=ps.rationale, effects=spec.effects,
+            approver_roles=["customer"], requested_for_user_id=_ticket(db, run).requester_id,
+        )
+    _ctx_update(run, current_plan_id=str(plan.id))
+    _say(db, run, f"The read-only checks passed. Please approve each exact step in the published procedure: {article.title}",
+         data={"plan_id": str(plan.id), "procedure_hash": article.procedure_hash}, ticket_comment=False)
+    return plan
 
 
 def _virtual_session(session, steps):
@@ -760,7 +961,9 @@ def h_retry(db, run):
 
 
 HANDLERS = {R.NEW: h_new, R.INTAKE: h_intake, R.COLLECTING_CONTEXT: h_collect, R.SEARCHING_INTERNAL: h_search_internal,
-            R.RESEARCHING_EXTERNAL: h_research, R.DIAGNOSING: h_diagnose, R.PLANNING: h_plan, R.AWAITING_APPROVAL: h_awaiting_approval,
+            R.RESEARCHING_EXTERNAL: h_research, R.DIAGNOSING: h_diagnose,
+            R.AWAITING_DIAGNOSTIC_CONSENT: h_awaiting_diagnostic_consent, R.COLLECTING_DIAGNOSTICS: h_collecting_diagnostics,
+            R.PLANNING: h_plan, R.AWAITING_APPROVAL: h_awaiting_approval,
             R.EXECUTING: h_execute, R.VERIFYING: h_verify, R.RETRYING: h_retry}
 
 
@@ -793,6 +996,10 @@ def _device_result(db: Session, payload: dict) -> None:
             resume(db, run, "verification read-back complete", ("verification",))
         return
     # Diagnostic results → observations
+    for run in db.execute(select(AgentRun).where(AgentRun.paused_for == "procedure_diagnostics")).scalars():
+        if str(cmd.id) in run.context.get("procedure_diag_commands", []):
+            resume(db, run, "procedure diagnostic result", ("procedure_diagnostics",))
+            return
     for run in db.execute(select(AgentRun).where(AgentRun.paused_for == "diagnostics")).scalars():
         ids = run.context.get("diag_commands", [])
         if str(cmd.id) in ids:
@@ -823,6 +1030,11 @@ def _timeout(db: Session, payload: dict) -> None:
         _ctx_update(run, observations=run.context.get("observations", []) + ["Some device diagnostics did not return in time"])
         transition(db, run, R.SEARCHING_INTERNAL, "diagnostics timed out")
         resume(db, run, "diagnostics timeout", ("diagnostics",))
+    elif payload["paused_for"] == "procedure_diagnostics":
+        from .customer_messages import DIAGNOSTIC_UNSUPPORTED
+
+        _say(db, run, DIAGNOSTIC_UNSUPPORTED)
+        _escalate(db, run, "Canonical device diagnostic did not return before the timeout; no changes were made")
 
 
 @handler("agent.post_resolution")

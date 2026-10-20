@@ -95,6 +95,13 @@ class LocalFixtureProvider:
                 "research_query": ctx.get("subject") if need_research else None,
                 "missing_information": [] if hyps else ["No matching internal or external evidence"]}
 
+    def _CandidateSelection(self, ctx, messages):  # noqa: N802
+        candidates = ctx.get("candidates", [])
+        if not candidates:
+            return {"article_id": None, "hypothesis": "No approved procedure matches"}
+        first = candidates[0]
+        return {"article_id": first["article_id"], "hypothesis": first.get("hypothesis", first.get("title", ""))}
+
     def _ProposedPlan(self, ctx, messages):  # noqa: N802
         procs = ctx.get("procedures", [])
         failed = set(ctx.get("previously_failed_procedures", []))

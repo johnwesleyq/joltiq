@@ -111,14 +111,21 @@ def test_desktop_fix_verified_via_companion_protocol(api_server, app, owner):
     t = customer.post("/api/v1/tickets", json={"subject": "Outlook crashes when opening PDF attachments",
                                                "description": "Outlook closes every time I open a PDF attachment.", "device_id": dev["device_id"]}).json()
     run_id = customer.post("/api/v1/agents/runs", json={"ticket_id": t["id"]}).json()["run_id"]
+    run = run_until(customer, run_id, lambda r: r["state"] == "AWAITING_DIAGNOSTIC_CONSENT")
+    assert run["plans"] == []  # no executable plan exists before exact device diagnosis
+    sess = customer.get("/api/v1/sessions", params={"ticket_id": t["id"]}).json()["items"][0]
+    assert sess["kind"] == "desktop" and sess["state"] == "pending_consent"
+    assert sess["request_details"]["addin_progid"] == "PdfPreview.Connect"
+    assert sess["request_details"]["read_only"] is True
+    assert customer.post(f"/api/v1/sessions/{sess['id']}/consent", json={"minutes": 30}).status_code == 200
+    proc = sim("run", URL, tmp, "45", background=True)
     run = run_until(customer, run_id, lambda r: r["state"] == "AWAITING_APPROVAL")
     assert [s["action"] for s in run["plans"][-1]["steps"]] == ["office.addin.set_load_behavior", "app.restart"]
-    sess = customer.get("/api/v1/sessions", params={"ticket_id": t["id"]}).json()["items"][0]
-    assert sess["kind"] == "desktop"
-    assert customer.post(f"/api/v1/sessions/{sess['id']}/consent", json={"minutes": 30}).status_code == 200
+    assert run["plans"][-1]["procedure"]["hash"] == sess["request_details"]["procedure_hash"]
+    assert any(o.get("task") == "candidate_selection" for o in run["model_calls"])
+    assert all(s["params"].get("addin_progid", "PdfPreview.Connect") == "PdfPreview.Connect" for s in run["plans"][-1]["steps"])
     for a in run["approvals"]:
         assert customer.post(f"/api/v1/approvals/{a['id']}/decision", json={"decision": "approve"}).status_code == 200
-    proc = sim("run", URL, tmp, "45", background=True)
     run = run_until(customer, run_id, lambda r: r["state"] in ("RESOLVED", "ESCALATED", "FAILED", "PARTIALLY_RESOLVED"), proc, timeout=45)
     proc.terminate()
     out = proc.communicate(timeout=10)[0]
@@ -135,12 +142,12 @@ def test_device_declines_consent_nothing_runs(api_server, app, owner):
     t = customer.post("/api/v1/tickets", json={"subject": "Outlook crashes when opening PDF attachments", "description": "crash on pdf",
                                                "device_id": dev["device_id"]}).json()
     run_id = customer.post("/api/v1/agents/runs", json={"ticket_id": t["id"]}).json()["run_id"]
-    run = run_until(customer, run_id, lambda r: r["state"] == "AWAITING_APPROVAL")
+    run = run_until(customer, run_id, lambda r: r["state"] == "AWAITING_DIAGNOSTIC_CONSENT")
+    assert run["plans"] == []
     sess = customer.get("/api/v1/sessions", params={"ticket_id": t["id"]}).json()["items"][0]
     customer.post(f"/api/v1/sessions/{sess['id']}/consent", json={})
-    for a in run["approvals"]:
-        customer.post(f"/api/v1/approvals/{a['id']}/decision", json={"decision": "approve"})
     out = sim("run", URL, tmp, "6", "--decline")
     assert "actions_executed=0" in out
     run = run_until(customer, run_id, lambda r: r["state"] == "ESCALATED")
+    assert run["plans"] == []
     assert customer.get(f"/api/v1/sessions/{sess['id']}").json()["state"] == "terminated"

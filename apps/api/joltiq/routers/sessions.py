@@ -117,7 +117,8 @@ def _resume_run(ctx: Ctx, s: SupportSession, reason: str) -> None:
     if s.run_id:
         run = ctx.db.get(AgentRun, s.run_id)
         if run:
-            agent_svc.resume(ctx.db, run, reason, ("consent", "approval", "user_auth", "human_control", "device_consent"))
+            agent_svc.resume(ctx.db, run, reason, ("consent", "approval", "user_auth", "human_control", "device_consent",
+                                                   "diagnostic_consent", "diagnostic_device_consent"))
 
 
 @router.get("/{sid}/frame")

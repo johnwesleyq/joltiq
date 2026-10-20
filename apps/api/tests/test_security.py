@@ -206,6 +206,167 @@ def test_outlook_inspection_accepts_only_exact_typed_parameters():
     assert ACTIONS["outlook.pdf_crash.inspect"].risk.value == "READ_ONLY"
 
 
+def test_desktop_candidate_selection_cannot_invent_or_modify_a_procedure():
+    from joltiq.services.agent import select_candidate_procedure
+
+    candidates = [{"article_id": "approved-1", "procedure": {"hash": "a" * 64}}]
+    assert select_candidate_procedure(candidates, "approved-1") == "approved-1"
+    assert select_candidate_procedure(candidates, "learned-fix") is None
+    assert select_candidate_procedure(candidates, None) is None
+
+    from joltiq.services.devices import DESKTOP_ACTIONS
+
+    assert "screen.capture" not in DESKTOP_ACTIONS
+    assert not any(action.startswith("input.") for action in DESKTOP_ACTIONS)
+
+
+def test_outlook_diagnostic_gate_requires_exact_trustworthy_evidence():
+    import copy
+
+    from test_procedures import outlook_body
+
+    from joltiq.services.agent import evaluate_diagnostic_gate
+    from joltiq.services.procedures import validate_executable_body
+
+    procedure = validate_executable_body(outlook_body())
+    good = {
+        "ok": True, "supported": True, "unsupported_reasons": [],
+        "windows": {"supported": True},
+        "interactive": {"supported": True, "unlocked": True, "same_user": True, "active_session_count": 1},
+        "outlook": {"kind": "classic", "classic_installed": True, "new_installed": False},
+        "addin": {"installed": True, "scope": "HKCU", "policy_override": False, "changeable": True},
+        "crash": {"log_readable": True, "log_enabled": True, "service_running": True,
+                  "window_trustworthy": True, "matched": True},
+    }
+    assert evaluate_diagnostic_gate(procedure, [good]).allowed
+
+    mutations = [
+        ("new_outlook", ("outlook", "new_installed"), True),
+        ("outlook_absent", ("outlook", "classic_installed"), False),
+        ("addin_absent", ("addin", "installed"), False),
+        ("wrong_module", ("crash", "matched"), False),
+        ("policy_controlled", ("addin", "policy_override"), True),
+        ("locked", ("interactive", "unlocked"), False),
+        ("user_mismatch", ("interactive", "same_user"), False),
+        ("multiple_users", ("interactive", "active_session_count"), 2),
+        ("log_unreadable", ("crash", "log_readable"), False),
+        ("log_unhealthy", ("crash", "window_trustworthy"), False),
+    ]
+    for expected_reason, path, value in mutations:
+        result = copy.deepcopy(good)
+        result[path[0]][path[1]] = value
+        decision = evaluate_diagnostic_gate(procedure, [result])
+        assert not decision.allowed and expected_reason in decision.reasons
+    missing = evaluate_diagnostic_gate(procedure, [])
+    assert not missing.allowed and missing.reasons == ["missing_diagnostic_result"]
+
+
+def test_canonical_windows_plan_is_copied_from_published_procedure_not_model(owner):
+    from sqlalchemy import select
+    from test_procedures import outlook_body
+
+    from joltiq.db import session_scope
+    from joltiq.models import (
+        AgentMessage,
+        AgentPlan,
+        AgentRun,
+        Approval,
+        Device,
+        DeviceCommand,
+        KnowledgeArticle,
+        PlanStep,
+        SupportSession,
+        Ticket,
+        utcnow,
+    )
+    from joltiq.services.agent import build_canonical_plan, h_collecting_diagnostics, h_plan
+    from joltiq.services.customer_messages import DIAGNOSTIC_UNSUPPORTED
+    from joltiq.services.procedures import procedure_hash, validate_executable_body
+
+    org_id = uuid.UUID(owner.org_id)
+    user_id = uuid.UUID(owner.me["user"]["id"])
+    definition = validate_executable_body(outlook_body())
+    with session_scope(org_id) as db:
+        article = KnowledgeArticle(org_id=org_id, title="Exact Outlook fix", status="published", executable=True,
+                                   body=outlook_body(), procedure_hash=procedure_hash(definition), version=7)
+        device = Device(org_id=org_id, owner_user_id=user_id, hostname="WIN11", status="active",
+                        capabilities=["outlook.pdf_crash.inspect", "office.addin.set_load_behavior", "app.restart"])
+        db.add_all([article, device])
+        db.flush()
+        ticket = Ticket(org_id=org_id, number=987654, subject="Outlook PDF crash", description="crashes", requester_id=user_id,
+                        status="AI_INVESTIGATING", device_id=device.id)
+        db.add(ticket)
+        db.flush()
+        run = AgentRun(org_id=org_id, ticket_id=ticket.id, state="PLANNING", correlation_id="canonical-plan-test",
+                       started_by=user_id,
+                       context={"candidate_procedure": {"article_id": str(article.id), "evidence_id": "E1", "risks": []},
+                                "candidate_hypothesis": "untrusted model text", "evidence": [{"id": "E1", "kind": "internal"}]})
+        db.add(run)
+        db.flush()
+        session = SupportSession(org_id=org_id, kind="desktop", state="active", owner_id=user_id, ticket_id=ticket.id,
+                                 device_id=device.id, run_id=run.id,
+                                 consent={"max_risk": "SENSITIVE", "device_local_consent": True})
+        db.add(session)
+        db.flush()
+        plan = build_canonical_plan(db, run, article, definition, session)
+        steps = db.execute(select(PlanStep).where(PlanStep.plan_id == plan.id).order_by(PlanStep.ordinal)).scalars().all()
+        approvals = db.execute(select(Approval).where(Approval.plan_id == plan.id)).scalars().all()
+
+        assert plan.procedure_hash == article.procedure_hash and plan.procedure_version == 7
+        assert [(s.action, s.params) for s in steps] == [(s.action, s.params) for s in definition.procedure]
+        assert len(approvals) == 2 and all(a.approver_roles == ["customer"] for a in approvals)
+        assert "untrusted model text" not in repr([(s.action, s.params, s.rationale) for s in steps])
+
+        blocked = AgentRun(
+            org_id=org_id, ticket_id=ticket.id, state="PLANNING", correlation_id="blocked-canonical-plan-test",
+            started_by=user_id,
+            context={
+                "candidate_procedure": {"article_id": str(article.id), "evidence_id": "E1", "risks": []},
+                "diagnostic_session_id": str(session.id),
+            },
+        )
+        db.add(blocked)
+        db.flush()
+        h_plan(db, blocked)
+        assert blocked.state == "ESCALATED"
+        assert db.execute(select(AgentPlan).where(AgentPlan.run_id == blocked.id)).scalars().all() == []
+
+        unsupported_ticket = Ticket(
+            org_id=org_id, number=987655, subject="Unsupported Outlook PDF crash", description="crashes",
+            requester_id=user_id, status="AI_INVESTIGATING", device_id=device.id,
+        )
+        db.add(unsupported_ticket)
+        db.flush()
+        unsupported_run = AgentRun(
+            org_id=org_id, ticket_id=unsupported_ticket.id, state="COLLECTING_DIAGNOSTICS",
+            correlation_id="unsupported-diagnostic-test", started_by=user_id,
+            context={"candidate_procedure": {"article_id": str(article.id), "evidence_id": "E1", "risks": []}},
+        )
+        db.add(unsupported_run)
+        db.flush()
+        failed_diagnostic = DeviceCommand(
+            org_id=org_id, device_id=device.id, session_id=session.id, action="outlook.pdf_crash.inspect",
+            params=definition.diagnostics[0].params, status="failed", expires_at=utcnow(),
+        )
+        db.add(failed_diagnostic)
+        db.flush()
+        unsupported_run.context = {
+            **unsupported_run.context,
+            "procedure_diag_commands": [str(failed_diagnostic.id)],
+        }
+        h_collecting_diagnostics(db, unsupported_run)
+        messages = db.execute(
+            select(AgentMessage.content).where(AgentMessage.run_id == unsupported_run.id)
+        ).scalars().all()
+        commands = db.execute(
+            select(DeviceCommand.action).where(DeviceCommand.id != failed_diagnostic.id, DeviceCommand.session_id == session.id)
+        ).scalars().all()
+        assert unsupported_run.state == "ESCALATED"
+        assert DIAGNOSTIC_UNSUPPORTED in messages
+        assert not any(action in {"office.addin.set_load_behavior", "app.restart"} for action in commands)
+        assert db.execute(select(AgentPlan).where(AgentPlan.run_id == unsupported_run.id)).scalars().all() == []
+
+
 def test_redaction_of_research_queries():
     from joltiq.security.redaction import redact_text
 

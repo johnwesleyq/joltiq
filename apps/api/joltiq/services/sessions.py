@@ -36,7 +36,7 @@ def get(db: Session, sid: uuid.UUID) -> SupportSession:
 
 
 def start(db: Session, org_id: uuid.UUID, *, kind: str, owner_id, ticket_id=None, device_id=None, allowed_domains: list[str] | None = None,
-          run_id=None) -> SupportSession:
+          run_id=None, request_details: dict | None = None) -> SupportSession:
     if kind not in ("chat", "browser", "desktop", "technician_assisted", "escalated"):
         raise AppError("invalid session kind", code="validation_error")
     if kind == "desktop":
@@ -49,7 +49,7 @@ def start(db: Session, org_id: uuid.UUID, *, kind: str, owner_id, ticket_id=None
             raise AppError("Browser sessions need at least one approved domain", code="domains_required")
         allowed_domains = doms
     s = SupportSession(org_id=org_id, kind=kind, state="pending_consent", owner_id=owner_id, ticket_id=ticket_id, device_id=device_id,
-                       allowed_domains=allowed_domains or [], run_id=run_id)
+                       allowed_domains=allowed_domains or [], run_id=run_id, request_details=request_details or {})
     db.add(s)
     db.flush()
     db.add(SessionParticipant(org_id=org_id, session_id=s.id, user_id=owner_id, role="customer"))

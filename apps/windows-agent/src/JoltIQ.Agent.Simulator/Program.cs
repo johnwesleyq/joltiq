@@ -57,7 +57,7 @@ sealed class SimulatedOs(bool brokenService) : IActionProvider
     private bool _outlookResponding;
 
     public IReadOnlyCollection<string> Capabilities { get; } = new[]
-        { "system.info", "process.list", "app.info", "disk.usage", "eventlog.query", "service.status", "service.restart", "app.restart",
+        { "system.info", "process.list", "app.info", "disk.usage", "eventlog.query", "outlook.pdf_crash.inspect", "service.status", "service.restart", "app.restart",
           "office.addin.set_load_behavior", "config.read", "network.diagnostics" };
 
     public IDictionary<string, string> Facts() => new Dictionary<string, string> { ["simulated"] = "true", ["os"] = "Windows 11 23H2 (simulated)" };
@@ -73,6 +73,17 @@ sealed class SimulatedOs(bool brokenService) : IActionProvider
             "eventlog.query" => new() { ["events"] = new JsonArray(new JsonObject {
                 ["provider"] = "Application Error", ["id"] = 1000, ["level"] = "Error",
                 ["message"] = "Faulting application OUTLOOK.EXE, faulting module PdfPreview.dll, exception code 0xc0000005" }) },
+            "outlook.pdf_crash.inspect" => new()
+            {
+                ["supported"] = true, ["unsupported_reasons"] = new JsonArray(),
+                ["windows"] = new JsonObject { ["supported"] = true, ["version"] = "Windows 11 simulated" },
+                ["interactive"] = new JsonObject { ["supported"] = true, ["unlocked"] = true, ["same_user"] = true, ["active_session_count"] = 1 },
+                ["outlook"] = new JsonObject { ["kind"] = "classic", ["classic_installed"] = true, ["new_installed"] = false },
+                ["addin"] = new JsonObject { ["installed"] = true, ["scope"] = "HKCU", ["registry_view"] = "64",
+                                               ["original_value"] = 3, ["original_kind"] = "DWord", ["policy_override"] = false, ["changeable"] = true },
+                ["crash"] = new JsonObject { ["log_readable"] = true, ["log_enabled"] = true, ["service_running"] = true,
+                                              ["window_trustworthy"] = true, ["matched"] = true, ["matching_event_count"] = 1 },
+            },
             "process.list" => new() { ["processes"] = new JsonArray(new JsonObject { ["name"] = "OUTLOOK.EXE", ["pid"] = 4242, ["responding"] = _outlookResponding }) },
             "service.status" => new() { ["name"] = S("name"), ["status"] = _services.GetValueOrDefault(S("name"), "NotFound") },
             "service.restart" => Restart(S("name")),
