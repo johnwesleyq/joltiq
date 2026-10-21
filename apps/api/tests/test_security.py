@@ -893,3 +893,62 @@ def test_production_refuses_dev_secrets(monkeypatch):
     s = Settings(env="production")
     with pytest.raises(RuntimeError):
         s.assert_production_safe()
+
+
+def _runtime_browser_procedure():
+    return {
+        "procedure_schema": 3,
+        "kind": "browser",
+        "procedure": [
+            {
+                "action": "browser.navigate",
+                "params": {"url": "https://fielddesk.test/cases/123/evidence"},
+                "rationale": "Open the approved case evidence page",
+                "postconditions": [],
+            },
+            {
+                "action": "browser.upload",
+                "params": {
+                    "selector": "testid=evidence-file",
+                    "attachment_binding": "customer_selected_ticket_attachment",
+                },
+                "rationale": "Upload the file the customer selected on this ticket",
+                "postconditions": [{"type": "browser_readback", "params": {"selector": "testid=evidence-receipt"}}],
+            },
+        ],
+    }
+
+
+def test_typed_browser_procedure_materializes_only_customer_selected_attachment():
+    """Catches an AI-selected/default attachment or a binding omitted from the approved procedure."""
+    from joltiq.services.browser_uploads import materialize_selected_attachment
+    from joltiq.services.procedures import publication_hash
+
+    body = _runtime_browser_procedure()
+    assert len(publication_hash(body)) == 64
+    selected_id = "12345678-1234-4234-8234-123456789abc"
+
+    steps = materialize_selected_attachment(body, selected_id)
+
+    assert steps[1]["params"] == {"selector": "testid=evidence-file", "attachment_id": selected_id}
+    assert body["procedure"][1]["params"] == {
+        "selector": "testid=evidence-file",
+        "attachment_binding": "customer_selected_ticket_attachment",
+    }
+
+
+def test_typed_browser_procedure_refuses_missing_selection_and_hard_coded_attachment():
+    """Catches silent newest/only-file fallback and publish-time hard-coded file authority."""
+    from joltiq.services.browser_uploads import BrowserUploadRejected, materialize_selected_attachment
+    from joltiq.services.procedures import publication_hash
+
+    body = _runtime_browser_procedure()
+    with pytest.raises(BrowserUploadRejected, match="customer-selected attachment is required"):
+        materialize_selected_attachment(body, None)
+
+    body["procedure"][1]["params"] = {
+        "selector": "testid=evidence-file",
+        "attachment_id": "12345678-1234-4234-8234-123456789abc",
+    }
+    with pytest.raises(ValueError, match="attachment_binding"):
+        publication_hash(body)

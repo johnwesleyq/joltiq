@@ -119,6 +119,47 @@ class ProcedureDefinition(StrictModel):
         return self
 
 
+class BrowserRemediationStep(StrictModel):
+    action: str
+    params: dict[str, Any]
+    rationale: str = Field(min_length=1, max_length=2000)
+    postconditions: list[Postcondition]
+
+    @model_validator(mode="after")
+    def validate_action(self):
+        spec = ACTIONS.get(self.action)
+        if not spec or spec.channel != "browser" or spec.computer_use:
+            raise ValueError("unsupported executable browser action")
+        if self.action == "browser.upload":
+            allowed = {"selector", "attachment_binding"}
+            if set(self.params) != allowed:
+                raise ValueError("browser.upload requires selector and attachment_binding")
+            selector = self.params.get("selector")
+            if not isinstance(selector, str) or not selector or len(selector) > 300:
+                raise ValueError("browser.upload selector is invalid")
+            if self.params.get("attachment_binding") != "customer_selected_ticket_attachment":
+                raise ValueError("browser.upload attachment_binding is invalid")
+        else:
+            try:
+                self.params = validate_params(self.action, self.params)
+            except ActionValidationError as exc:
+                raise ValueError(str(exc)) from exc
+        return self
+
+
+class BrowserProcedureDefinition(StrictModel):
+    procedure_schema: Literal[3]
+    kind: Literal["browser"]
+    procedure: list[BrowserRemediationStep] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def require_one_runtime_upload(self):
+        uploads = [step for step in self.procedure if step.action == "browser.upload"]
+        if len(uploads) != 1:
+            raise ValueError("typed browser procedure requires exactly one browser.upload step")
+        return self
+
+
 def validate_executable_body(body: dict) -> ProcedureDefinition:
     if not isinstance(body, dict):
         raise ValueError("procedure body must be an object")
@@ -126,6 +167,13 @@ def validate_executable_body(body: dict) -> ProcedureDefinition:
     # outside the executable contract and therefore outside its fingerprint.
     contract = {name: body[name] for name in ProcedureDefinition.model_fields if name in body}
     return ProcedureDefinition.model_validate(contract)
+
+
+def validate_browser_executable_body(body: dict) -> BrowserProcedureDefinition:
+    if not isinstance(body, dict):
+        raise ValueError("procedure body must be an object")
+    contract = {name: body[name] for name in BrowserProcedureDefinition.model_fields if name in body}
+    return BrowserProcedureDefinition.model_validate(contract)
 
 
 def canonical_payload(definition: ProcedureDefinition) -> dict:
@@ -174,6 +222,9 @@ def _legacy_browser_payload(body: dict) -> dict:
 
 def publication_hash(body: dict) -> str:
     """Fingerprint either the typed desktop contract or legacy browser contract."""
+    if isinstance(body, dict) and body.get("procedure_schema") == 3:
+        definition = validate_browser_executable_body(body)
+        return sha256_hex(canonical_json(definition.model_dump(mode="json", exclude_none=True)))
     if isinstance(body, dict) and body.get("procedure_schema") == 2:
         return procedure_hash(validate_executable_body(body))
     return sha256_hex(canonical_json(_legacy_browser_payload(body)))

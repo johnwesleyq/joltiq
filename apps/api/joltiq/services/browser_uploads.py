@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from ..models import AgentRun, SupportSession, TicketAttachment
 from . import storage
+from .procedures import validate_browser_executable_body
 
 
 class BrowserUploadRejected(ValueError):
@@ -24,6 +25,25 @@ class BrowserUpload:
     size: int
     sha256: str
     data: bytes
+
+
+def materialize_selected_attachment(body: dict, attachment_id: str | None) -> list[dict]:
+    """Resolve the sole approved runtime binding without mutating the published procedure."""
+    if not attachment_id:
+        raise BrowserUploadRejected("customer-selected attachment is required")
+    try:
+        selected_id = str(uuid.UUID(attachment_id))
+    except (TypeError, ValueError) as exc:
+        raise BrowserUploadRejected("customer-selected attachment is invalid") from exc
+    definition = validate_browser_executable_body(body)
+    steps = [step.model_dump(mode="json") for step in definition.procedure]
+    for step in steps:
+        if step["action"] == "browser.upload":
+            step["params"] = {
+                "selector": step["params"]["selector"],
+                "attachment_id": selected_id,
+            }
+    return steps
 
 
 def load_for_execution(db: Session, run: AgentRun, session: SupportSession, attachment_id: str) -> BrowserUpload:
