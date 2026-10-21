@@ -10,10 +10,12 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 
 import httpx
 import pytest
 from conftest import invite_and_join, publish_executable
+from sqlalchemy import select
 
 pytestmark = [pytest.mark.mocked]
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -126,10 +128,25 @@ def test_desktop_fix_verified_via_companion_protocol(api_server, app, owner):
     assert all(s["params"].get("addin_progid", "PdfPreview.Connect") == "PdfPreview.Connect" for s in run["plans"][-1]["steps"])
     for a in run["approvals"]:
         assert customer.post(f"/api/v1/approvals/{a['id']}/decision", json={"decision": "approve"}).status_code == 200
-    run = run_until(customer, run_id, lambda r: r["state"] in ("RESOLVED", "ESCALATED", "FAILED", "PARTIALLY_RESOLVED"), proc, timeout=45)
+    run = run_until(customer, run_id, lambda r: r["state"] in (
+        "AWAITING_SYMPTOM_CHECK", "ESCALATED", "FAILED", "PARTIALLY_RESOLVED",
+    ), proc, timeout=45)
+    assert run["state"] == "AWAITING_SYMPTOM_CHECK", (run["transitions"][-4:], proc.stdout.read()[-1500:] if proc.poll() is not None else "")
+    assert run["outcome_stage"] == "FIX_APPLIED_VERIFIED"
+    assert customer.get(f"/api/v1/tickets/{t['id']}").json()["resolution_verified"] is not True
+    assert customer.post(f"/api/v1/agents/runs/{run_id}/symptom-check", json={"result": "pdf_opened"}).status_code == 200
+    from joltiq.db import session_scope
+    from joltiq.models import Job, utcnow
+
+    with session_scope(uuid.UUID(customer.org_id)) as db:
+        observation = db.execute(select(Job).where(
+            Job.kind == "agent.symptom_observation", Job.payload["run_id"].astext == run_id,
+        )).scalar_one()
+        observation.run_after = utcnow()
+    run = run_until(customer, run_id, lambda r: r["state"] in ("RESOLVED", "ESCALATED", "FAILED"), proc, timeout=45)
     proc.terminate()
     out = proc.communicate(timeout=10)[0]
-    assert run["state"] == "RESOLVED", (run["transitions"][-4:], out[-1500:])
+    assert run["state"] == "RESOLVED" and run["outcome_stage"] == "RESOLVED_VERIFIED", (run["transitions"][-4:], out[-1500:])
     checks = {d["type"]: d for d in run["verifications"][-1]["details"]}
     assert checks["device_config_equals"]["status"] == "VERIFIED" and checks["device_process_responding"]["status"] == "VERIFIED"
     assert customer.get(f"/api/v1/tickets/{t['id']}").json()["resolution_verified"] is True
@@ -195,3 +212,95 @@ def test_rollback_outcomes_never_resolve_the_original_ticket(
         assert run.context["partial_application"]["rollback_status"] == expected_status
         assert ticket.status == "ESCALATED" and ticket.resolution_verified is not True
         assert any(message_fragment in message for message in messages)
+
+
+@pytest.mark.parametrize(
+    ("observation_status", "expected_state", "expected_stage", "verified"),
+    [
+        ("VERIFIED", "RESOLVED", "RESOLVED_VERIFIED", True),
+        ("FAILED", "ESCALATED", "VERIFICATION_FAILED", False),
+        ("UNKNOWN", "ESCALATED", "VERIFICATION_FAILED", False),
+    ],
+)
+def test_structured_pdf_open_requires_post_attempt_observation(
+    owner, observation_status, expected_state, expected_stage, verified,
+):
+    """Catches resolving from customer confirmation alone or treating UNKNOWN log evidence as success."""
+    import uuid
+
+    from joltiq.db import session_scope
+    from joltiq.models import AgentRun, Ticket, VerificationRun
+    from joltiq.services.agent import _symptom_observation, record_symptom_response
+
+    org_id = uuid.UUID(owner.org_id)
+    user_id = uuid.UUID(owner.me["user"]["id"])
+    with session_scope(org_id) as db:
+        ticket = Ticket(org_id=org_id, number=882000 + len(observation_status), subject="Outlook PDF crash",
+                        description="crashes", requester_id=user_id, status="AWAITING_CUSTOMER")
+        db.add(ticket)
+        db.flush()
+        run = AgentRun(
+            org_id=org_id, ticket_id=ticket.id, state="AWAITING_SYMPTOM_CHECK", correlation_id=uuid.uuid4().hex,
+            started_by=user_id, outcome_stage="FIX_APPLIED_VERIFIED", paused_for="symptom_observation",
+            context={"symptom_response": {"result": "pdf_opened", "at": "2026-10-20T12:00:00+00:00"}},
+        )
+        db.add(run)
+        db.flush()
+        verification_run = VerificationRun(
+            org_id=org_id, run_id=run.id, status=observation_status, postconditions=[], pre_state={}, post_state={},
+            details=[{"type": "device_outlook_no_matching_crash_since", "status": observation_status}],
+        )
+        db.add(verification_run)
+        db.flush()
+        run.context = {**run.context, "symptom_verification_id": str(verification_run.id)}
+
+        _symptom_observation(db, {"run_id": str(run.id)})
+
+        assert run.state == expected_state
+        assert run.outcome_stage == expected_stage
+        assert ticket.resolution_verified is verified
+        assert ticket.status == ("RESOLVED" if verified else "ESCALATED")
+        assert record_symptom_response(db, run, "pdf_opened", user_id)["idempotent"] is True
+
+
+def test_symptom_reminder_is_once_and_timeout_escalates(owner):
+    """Catches duplicate reminders or leaving a deferred symptom check open forever."""
+    import uuid
+
+    from sqlalchemy import select
+
+    from joltiq.db import session_scope
+    from joltiq.models import AgentMessage, AgentRun, SupportSession, Ticket
+    from joltiq.services import sessions
+    from joltiq.services.agent import _symptom_escalation, _symptom_reminder
+    from joltiq.services.customer_messages import SYMPTOM_REMINDER
+
+    org_id = uuid.UUID(owner.org_id)
+    user_id = uuid.UUID(owner.me["user"]["id"])
+    with session_scope(org_id) as db:
+        ticket = Ticket(org_id=org_id, number=883001, subject="Outlook PDF crash", description="crashes",
+                        requester_id=user_id, status="AWAITING_CUSTOMER")
+        db.add(ticket)
+        db.flush()
+        run = AgentRun(org_id=org_id, ticket_id=ticket.id, state="AWAITING_SYMPTOM_CHECK",
+                       correlation_id=uuid.uuid4().hex, started_by=user_id, outcome_stage="FIX_APPLIED_VERIFIED",
+                       paused_for="symptom_check", context={"symptom_response": None, "symptom_reminder_sent": False})
+        db.add(run)
+        db.flush()
+        session = SupportSession(org_id=org_id, kind="desktop", state="active", owner_id=user_id,
+                                 ticket_id=ticket.id, run_id=run.id, consent={"device_local_consent": True})
+        db.add(session)
+        db.flush()
+        sessions.acquire_lease(db, session, "ai", reason="symptom observation")
+
+        _symptom_reminder(db, {"run_id": str(run.id)})
+        _symptom_reminder(db, {"run_id": str(run.id)})
+        messages = db.execute(select(AgentMessage.content).where(AgentMessage.run_id == run.id)).scalars().all()
+        assert messages.count(SYMPTOM_REMINDER) == 1
+        assert sessions.active_lease(db, session) is None
+        assert run.state == "AWAITING_SYMPTOM_CHECK" and ticket.status == "AWAITING_CUSTOMER"
+
+        _symptom_escalation(db, {"run_id": str(run.id)})
+        assert run.state == "ESCALATED" and run.outcome_stage == "FIX_APPLIED_VERIFIED"
+        assert run.outcome_summary == "verification_timeout"
+        assert ticket.status == "ESCALATED" and ticket.resolution_verified is not True

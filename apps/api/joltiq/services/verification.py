@@ -41,6 +41,10 @@ DEVICE_CHECKS = {
     "device_process_responding": ("process.list", lambda p: {"name_filter": p["process"]}),
     "device_config_equals": ("config.read", lambda p: _addin_key(p)),
     "device_addin_restore_matches": ("office.addin.verify_restored", lambda p: {"source_command_id": p["source_command_id"]}),
+    "device_outlook_no_matching_crash_since": ("outlook.pdf_crash.inspect", lambda p: {
+        "addin_progid": p["addin_progid"], "faulting_module": p["faulting_module"],
+        "lookback_hours": p["lookback_hours"], "since": p["since"],
+    }),
 }
 SUPPORTED = {"browser_readback", "http_ok", "ticket_comment_exists", "ticket_field_equals", *DEVICE_CHECKS}
 
@@ -200,6 +204,15 @@ def evaluate_device_result(t: str, params: dict, result: dict) -> tuple[str, str
     if t == "device_addin_restore_matches":
         ok = r.get("matches_local_journal") is True
         return (V.VERIFIED if ok else V.FAILED), f"live setting matches local pre-state={ok}"
+    if t == "device_outlook_no_matching_crash_since":
+        crash = r.get("crash") or {}
+        healthy = all(crash.get(key) is True for key in (
+            "log_readable", "log_enabled", "service_running", "window_trustworthy",
+        ))
+        if not healthy:
+            return V.UNKNOWN, "Application crash log health/window is not trustworthy"
+        matched = crash.get("matched") is True or int(crash.get("matching_event_count") or 0) > 0
+        return (V.FAILED if matched else V.VERIFIED), f"matching post-attempt Outlook crash={matched}"
     return V.UNKNOWN, "unknown check"
 
 

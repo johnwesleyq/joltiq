@@ -73,17 +73,7 @@ sealed class SimulatedOs(bool brokenService) : IActionProvider
             "eventlog.query" => new() { ["events"] = new JsonArray(new JsonObject {
                 ["provider"] = "Application Error", ["id"] = 1000, ["level"] = "Error",
                 ["message"] = "Faulting application OUTLOOK.EXE, faulting module PdfPreview.dll, exception code 0xc0000005" }) },
-            "outlook.pdf_crash.inspect" => new()
-            {
-                ["supported"] = true, ["unsupported_reasons"] = new JsonArray(),
-                ["windows"] = new JsonObject { ["supported"] = true, ["version"] = "Windows 11 simulated" },
-                ["interactive"] = new JsonObject { ["supported"] = true, ["unlocked"] = true, ["same_user"] = true, ["active_session_count"] = 1 },
-                ["outlook"] = new JsonObject { ["kind"] = "classic", ["classic_installed"] = true, ["new_installed"] = false },
-                ["addin"] = new JsonObject { ["installed"] = true, ["scope"] = "HKCU", ["registry_view"] = "64",
-                                               ["original_value"] = 3, ["original_kind"] = "DWord", ["policy_override"] = false, ["changeable"] = true },
-                ["crash"] = new JsonObject { ["log_readable"] = true, ["log_enabled"] = true, ["service_running"] = true,
-                                              ["window_trustworthy"] = true, ["matched"] = true, ["matching_event_count"] = 1 },
-            },
+            "outlook.pdf_crash.inspect" => InspectOutlook(),
             "process.list" => new() { ["processes"] = new JsonArray(new JsonObject { ["name"] = "OUTLOOK.EXE", ["pid"] = 4242,
                                                                                        ["main_window"] = _outlookResponding, ["responding"] = _outlookResponding }) },
             "service.status" => new() { ["name"] = S("name"), ["status"] = _services.GetValueOrDefault(S("name"), "NotFound") },
@@ -103,6 +93,24 @@ sealed class SimulatedOs(bool brokenService) : IActionProvider
     {
         _services[name] = brokenService ? "Stopped" : "Running";
         return new() { ["requested"] = name };
+    }
+
+    private JsonObject InspectOutlook()
+    {
+        var crashMatched = _addins.GetValueOrDefault("PdfPreview.Connect") == 3;
+        return new()
+        {
+            ["supported"] = crashMatched, ["unsupported_reasons"] = crashMatched ? new JsonArray() : new JsonArray("matching_crash_not_found"),
+            ["windows"] = new JsonObject { ["supported"] = true, ["version"] = "Windows 11 simulated" },
+            ["interactive"] = new JsonObject { ["supported"] = true, ["unlocked"] = true, ["same_user"] = true, ["active_session_count"] = 1 },
+            ["outlook"] = new JsonObject { ["kind"] = "classic", ["classic_installed"] = true, ["new_installed"] = false },
+            ["addin"] = new JsonObject { ["installed"] = true, ["scope"] = "HKCU", ["registry_view"] = "64",
+                                           ["original_value"] = _addins["PdfPreview.Connect"], ["original_kind"] = "DWord",
+                                           ["policy_override"] = false, ["changeable"] = true },
+            ["crash"] = new JsonObject { ["log_readable"] = true, ["log_enabled"] = true, ["service_running"] = true,
+                                          ["window_trustworthy"] = true, ["matched"] = crashMatched,
+                                          ["matching_event_count"] = crashMatched ? 1 : 0 },
+        };
     }
 
     private JsonObject SetAddin(string id, bool enabled)

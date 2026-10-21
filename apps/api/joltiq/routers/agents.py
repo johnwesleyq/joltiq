@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from typing import Literal
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
@@ -16,6 +17,7 @@ from ..models import (
     ResearchFinding,
     ResearchQuery,
     ResearchSource,
+    SupportSession,
     Ticket,
     VerificationEvidence,
     VerificationRun,
@@ -121,6 +123,25 @@ def start(body: StartIn, ctx: Ctx = Depends(perm("agents.run"))):
     t = ticket_for(ctx, body.ticket_id)
     run = svc.start_run(ctx.db, ctx.org_id, ticket=t, started_by=ctx.p.user_id)
     return {"run_id": str(run.id), "state": run.state}
+
+
+class SymptomCheckIn(BaseModel):
+    result: Literal["pdf_opened", "still_crashes", "cannot_test"]
+
+
+@router.post("/agents/runs/{run_id}/symptom-check")
+def symptom_check(run_id: uuid.UUID, body: SymptomCheckIn, ctx: Ctx = Depends(get_ctx)):
+    run = _run_for(ctx, run_id)
+    ticket = ctx.db.get(Ticket, run.ticket_id) if run.ticket_id else None
+    session = ctx.db.execute(select(SupportSession).where(
+        SupportSession.run_id == run.id, SupportSession.kind == "desktop",
+    )).scalars().first()
+    owns_ticket = bool(ticket and (
+        ticket.requester_id == ctx.p.user_id or (ctx.p.customer_id and ticket.customer_id == ctx.p.customer_id)
+    ))
+    if not ctx.p.is_customer or not owns_ticket or not session or session.owner_id != ctx.p.user_id:
+        raise Forbidden("Only the customer who approved this desktop session can submit the symptom check")
+    return svc.record_symptom_response(ctx.db, run, body.result, ctx.p.user_id)
 
 
 @router.post("/agents/runs/{run_id}/cancel")

@@ -43,6 +43,15 @@ def enqueue(db: Session, kind: str, payload: dict[str, Any], *, org_id: uuid.UUI
     db.execute(stmt)
 
 
+def cancel_queued(db: Session, *dedupe_keys: str) -> None:
+    """Mark still-queued idempotent jobs done when their workflow has reached a terminal decision."""
+    if dedupe_keys:
+        db.execute(
+            text("update jobs set status='done', updated_at=now() where status='queued' and dedupe_key = any(:keys)"),
+            {"keys": list(dedupe_keys)},
+        )
+
+
 def claim(db: Session, worker_id: str, kinds: list[str] | None = None, lease_seconds: int = 300) -> Job | None:
     cond = "(status = 'queued' and run_after <= now()) or (status = 'running' and locked_until < now())"
     params: dict[str, Any] = {"w": worker_id, "lease": lease_seconds}

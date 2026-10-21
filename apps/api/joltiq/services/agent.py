@@ -26,7 +26,7 @@ from urllib.parse import urlsplit
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from ..core.errors import AppError, EntitlementExceeded, Unavailable
+from ..core.errors import AppError, Conflict, EntitlementExceeded, Unavailable
 from ..models import (
     ActionExecution,
     AgentMessage,
@@ -62,7 +62,7 @@ from .ai import router as ai
 from .ai import schemas as S
 from .ai.fixture import MARK
 from .executor import completed_state_changes, execute_step
-from .jobs import enqueue, handler
+from .jobs import cancel_queued, enqueue, handler
 from .knowledge import service as kb
 from .realtime import publish
 
@@ -1139,6 +1139,72 @@ def _execution_failed(db, run, st: PlanStep, why: str) -> None:
         _escalate(db, run, f"Step {st.action} failed after {run.retries} retries: {why[:200]}")
 
 
+def _symptom_job_key(run: AgentRun, suffix: str) -> str:
+    return f"agent-run:{run.id}:symptom:{suffix}"
+
+
+def _cancel_symptom_jobs(db: Session, run: AgentRun) -> None:
+    cancel_queued(db, *(_symptom_job_key(run, suffix) for suffix in ("observation", "reminder", "escalation")))
+
+
+def _is_outlook_pdf_plan(db: Session, plan: AgentPlan) -> bool:
+    article = db.get(KnowledgeArticle, plan.procedure_article_id) if plan.procedure_article_id else None
+    return bool(article and (article.body or {}).get("kind") == "windows_outlook_pdf_crash")
+
+
+def begin_symptom_check(db: Session, run: AgentRun, plan: AgentPlan, vr: VerificationRun) -> None:
+    """Record a verified applied fix without claiming that the customer's original symptom is resolved."""
+    from .customer_messages import SYMPTOM_TEST
+
+    run.outcome_stage = OutcomeStage.FIX_APPLIED_VERIFIED
+    run.outcome_summary = "The approved fix was applied and independently verified; symptom confirmation is pending"
+    _ctx_update(run, fix_verification_id=str(vr.id), symptom_response=None, symptom_verification_id=None,
+                symptom_reminder_sent=False)
+    transition(db, run, R.AWAITING_SYMPTOM_CHECK, "fix applied and verified; awaiting structured symptom check",
+               {"verification_id": str(vr.id)})
+    run.paused_for = "symptom_check"
+    _say(db, run, SYMPTOM_TEST, data={"kind": "symptom_check", "choices": ["pdf_opened", "still_crashes", "cannot_test"]})
+    _set_ticket(db, run, TS.AWAITING_CUSTOMER, "fix applied; waiting for symptom confirmation", verified=False)
+    enqueue(db, "agent.symptom_reminder", {"run_id": str(run.id)}, org_id=run.org_id, delay_seconds=600,
+            dedupe_key=_symptom_job_key(run, "reminder"))
+    enqueue(db, "agent.symptom_escalation", {"run_id": str(run.id)}, org_id=run.org_id, delay_seconds=86400,
+            dedupe_key=_symptom_job_key(run, "escalation"))
+
+
+def record_symptom_response(db: Session, run: AgentRun, result: str, user_id) -> dict:
+    existing = (run.context or {}).get("symptom_response")
+    if existing:
+        if existing.get("result") == result:
+            return {"result": result, "outcome_stage": run.outcome_stage, "idempotent": True}
+        raise Conflict("A different symptom result was already recorded", code="symptom_check_conflict")
+    if run.state != R.AWAITING_SYMPTOM_CHECK or run.outcome_stage != OutcomeStage.FIX_APPLIED_VERIFIED:
+        raise Conflict("This run is not awaiting a symptom check", code="symptom_check_not_pending")
+    now = utcnow()
+    response = {"result": result, "at": now.isoformat(), "user_id": str(user_id)}
+    _ctx_update(run, symptom_response=response)
+    audit.record(db, org_id=run.org_id, actor_kind="user", actor_id=user_id, action="symptom.response_recorded",
+                 resource_type="agent_run", resource_id=run.id, data={"result": result, "at": response["at"]})
+    if result == "still_crashes":
+        from .customer_messages import SYMPTOM_PERSISTS
+
+        run.outcome_stage = OutcomeStage.VERIFICATION_FAILED
+        _cancel_symptom_jobs(db, run)
+        _say(db, run, SYMPTOM_PERSISTS, data={"symptom_result": result})
+        _escalate(db, run, "Customer reported that Outlook still closes after the approved fix")
+    elif result == "cannot_test":
+        from .customer_messages import FIX_APPLIED_TEST_DEFERRED
+
+        run.paused_for = "symptom_check"
+        _say(db, run, FIX_APPLIED_TEST_DEFERRED, data={"symptom_result": result})
+        _set_ticket(db, run, TS.AWAITING_CUSTOMER, "fix verified; symptom test deferred", verified=False)
+        _release_ai_control(db, run)
+    else:
+        run.paused_for = "symptom_observation"
+        enqueue(db, "agent.symptom_observation", {"run_id": str(run.id)}, org_id=run.org_id, delay_seconds=60,
+                dedupe_key=_symptom_job_key(run, "observation"))
+    return {"result": result, "outcome_stage": run.outcome_stage, "idempotent": False}
+
+
 def h_verify(db, run):
     plan = db.get(AgentPlan, uuid.UUID(run.context["current_plan_id"]))
     vr_id = run.context.get("verification_id")
@@ -1175,6 +1241,9 @@ def h_verify(db, run):
     status = vr.status
     plan.status = "done"
     if status == "VERIFIED":
+        if _is_outlook_pdf_plan(db, plan):
+            begin_symptom_check(db, run, plan, vr)
+            return
         analysis = _model(db, run, "verification_analysis", S.VerificationAnalysis, {"status": vr.status, "details": vr.details})
         transition(db, run, R.RESOLVED, "independent verification passed", {"verification_id": str(vr.id)})
         run.outcome_summary = analysis.explanation
@@ -1228,6 +1297,99 @@ HANDLERS = {R.NEW: h_new, R.INTAKE: h_intake, R.COLLECTING_CONTEXT: h_collect, R
 
 
 # ---------------- event handlers ----------------
+@handler("agent.symptom_observation")
+def _symptom_observation(db: Session, payload: dict) -> None:
+    from .customer_messages import SYMPTOM_PERSISTS, SYMPTOM_RESOLVED, SYMPTOM_UNKNOWN
+    from .procedures import load_published_procedure
+
+    run = db.get(AgentRun, uuid.UUID(payload["run_id"]))
+    if not run or run.state != R.AWAITING_SYMPTOM_CHECK:
+        return
+    response = (run.context or {}).get("symptom_response") or {}
+    if response.get("result") != "pdf_opened":
+        return
+    vr_id = run.context.get("symptom_verification_id")
+    vr = db.get(VerificationRun, uuid.UUID(vr_id)) if vr_id else None
+    if vr is None:
+        plan = db.get(AgentPlan, uuid.UUID(run.context["current_plan_id"]))
+        article = db.get(KnowledgeArticle, plan.procedure_article_id) if plan and plan.procedure_article_id else None
+        session = db.execute(select(SupportSession).where(
+            SupportSession.run_id == run.id, SupportSession.kind == "desktop",
+        )).scalars().first()
+        device = db.get(Device, session.device_id) if session and session.device_id else None
+        execution = db.execute(select(ActionExecution).where(
+            ActionExecution.run_id == run.id, ActionExecution.status == "succeeded",
+        ).order_by(ActionExecution.created_at.desc())).scalars().first()
+        if article is None or session is None or device is None or execution is None:
+            run.outcome_stage = OutcomeStage.VERIFICATION_FAILED
+            _say(db, run, SYMPTOM_UNKNOWN)
+            _cancel_symptom_jobs(db, run)
+            _escalate(db, run, "Post-attempt Outlook crash observation could not be started")
+            return
+        procedure = load_published_procedure(article)
+        diagnostic = procedure.diagnostics[0]
+        params = {**diagnostic.params, "since": response["at"]}
+        postcondition = {"type": "device_outlook_no_matching_crash_since", "params": params}
+        vr = verification.start(db, execution, [postcondition], {}, session, device)
+        _ctx_update(run, symptom_verification_id=str(vr.id))
+        if verification.is_pending(vr):
+            run.paused_for = "symptom_observation"
+            enqueue(db, "agent.timeout", {"run_id": str(run.id), "paused_for": "symptom_observation"},
+                    org_id=run.org_id, delay_seconds=150)
+            return
+    if verification.is_pending(vr):
+        run.paused_for = "symptom_observation"
+        return
+    run.paused_for = None
+    _cancel_symptom_jobs(db, run)
+    if vr.status == "VERIFIED":
+        run.outcome_stage = OutcomeStage.RESOLVED_VERIFIED
+        transition(db, run, R.RESOLVED, "customer PDF attempt plus healthy 60-second crash observation passed",
+                   {"verification_id": str(vr.id)})
+        run.outcome_summary = "RESOLVED_VERIFIED"
+        _say(db, run, SYMPTOM_RESOLVED, data={"symptom_result": "pdf_opened", "verification_id": str(vr.id)})
+        _set_ticket(db, run, TS.RESOLVED, "original PDF symptom resolved and verified", verified=True)
+        _release_ai_control(db, run)
+        enqueue(db, "agent.post_resolution", {"run_id": str(run.id)}, org_id=run.org_id)
+        return
+    run.outcome_stage = OutcomeStage.VERIFICATION_FAILED
+    if vr.status == "FAILED":
+        _say(db, run, SYMPTOM_PERSISTS, data={"verification_id": str(vr.id)})
+        _escalate(db, run, "A matching Outlook crash occurred after the customer's PDF attempt")
+    else:
+        _say(db, run, SYMPTOM_UNKNOWN, data={"verification_id": str(vr.id)})
+        _escalate(db, run, "Post-attempt Outlook crash observation was UNKNOWN; resolution was not claimed")
+
+
+@handler("agent.symptom_reminder")
+def _symptom_reminder(db: Session, payload: dict) -> None:
+    from .customer_messages import SYMPTOM_REMINDER
+
+    run = db.get(AgentRun, uuid.UUID(payload["run_id"]))
+    if not run or run.state != R.AWAITING_SYMPTOM_CHECK or run.outcome_stage != OutcomeStage.FIX_APPLIED_VERIFIED:
+        return
+    response = (run.context or {}).get("symptom_response") or {}
+    if response.get("result") not in (None, "cannot_test") or run.context.get("symptom_reminder_sent"):
+        return
+    _ctx_update(run, symptom_reminder_sent=True)
+    _say(db, run, SYMPTOM_REMINDER, data={"kind": "symptom_reminder"})
+    _release_ai_control(db, run)
+
+
+@handler("agent.symptom_escalation")
+def _symptom_escalation(db: Session, payload: dict) -> None:
+    from .customer_messages import SYMPTOM_TIMEOUT
+
+    run = db.get(AgentRun, uuid.UUID(payload["run_id"]))
+    if not run or run.state != R.AWAITING_SYMPTOM_CHECK or run.outcome_stage != OutcomeStage.FIX_APPLIED_VERIFIED:
+        return
+    response = (run.context or {}).get("symptom_response") or {}
+    if response.get("result") == "pdf_opened":
+        return
+    _say(db, run, SYMPTOM_TIMEOUT, data={"kind": "verification_timeout"})
+    _escalate(db, run, "verification_timeout")
+
+
 @handler("agent.device_result")
 def _device_result(db: Session, payload: dict) -> None:
     cmd = db.get(DeviceCommand, uuid.UUID(payload["command_id"]))
@@ -1253,7 +1415,12 @@ def _device_result(db: Session, payload: dict) -> None:
     if vr and vr.run_id and not verification.is_pending(vr):
         run = db.get(AgentRun, vr.run_id)
         if run:
-            resume(db, run, "verification read-back complete", ("verification",))
+            if run.context.get("symptom_verification_id") == str(vr.id):
+                run.paused_for = None
+                enqueue(db, "agent.symptom_observation", {"run_id": str(run.id)}, org_id=run.org_id,
+                        dedupe_key=f"{_symptom_job_key(run, 'observation')}:complete")
+            else:
+                resume(db, run, "verification read-back complete", ("verification",))
         return
     # Diagnostic results → observations
     for run in db.execute(select(AgentRun).where(AgentRun.paused_for == "procedure_diagnostics")).scalars():
@@ -1281,6 +1448,14 @@ def _timeout(db: Session, payload: dict) -> None:
         if vr is not None:
             verification.expire_pending(db, vr)
         resume(db, run, "verification timed out", ("verification",))
+    elif payload["paused_for"] == "symptom_observation":
+        vr_id = run.context.get("symptom_verification_id")
+        vr = db.get(VerificationRun, uuid.UUID(vr_id)) if vr_id else None
+        if vr is not None:
+            verification.expire_pending(db, vr)
+        run.paused_for = None
+        enqueue(db, "agent.symptom_observation", {"run_id": str(run.id)}, org_id=run.org_id,
+                dedupe_key=f"{_symptom_job_key(run, 'observation')}:timeout")
     elif payload["paused_for"] == "device_result":
         ex = db.execute(select(ActionExecution).where(ActionExecution.step_id == uuid.UUID(payload["step_id"]))).scalars().first()
         if ex and ex.status in ("running", "pending"):

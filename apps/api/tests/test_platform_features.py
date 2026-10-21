@@ -463,6 +463,225 @@ def test_windows_procedure_identity_and_outcome_fields_round_trip(app, owner):
     assert all(review["mfa_passed"] is True and review["auth_session_id"] for review in article_json["reviews"])
 
 
+@pytest.mark.parametrize(
+    ("crash", "expected"),
+    [
+        ({"log_readable": True, "log_enabled": True, "service_running": True,
+          "window_trustworthy": True, "matched": False, "matching_event_count": 0}, "VERIFIED"),
+        ({"log_readable": True, "log_enabled": True, "service_running": True,
+          "window_trustworthy": True, "matched": True, "matching_event_count": 1}, "FAILED"),
+        ({"log_readable": False, "log_enabled": True, "service_running": True,
+          "window_trustworthy": False, "matched": False, "matching_event_count": 0}, "UNKNOWN"),
+        ({"log_readable": True, "log_enabled": False, "service_running": True,
+          "window_trustworthy": False, "matched": False, "matching_event_count": 0}, "UNKNOWN"),
+        ({"log_readable": True, "log_enabled": True, "service_running": True,
+          "window_trustworthy": False, "matched": False, "matching_event_count": 0}, "UNKNOWN"),
+        ({}, "UNKNOWN"),
+    ],
+)
+def test_post_attempt_crash_observation_requires_healthy_trustworthy_logging(crash, expected):
+    """Catches treating a quiet but unhealthy/stale Application log as proof that the PDF crash is gone."""
+    from joltiq.services.verification import evaluate_device_result
+
+    status, _ = evaluate_device_result(
+        "device_outlook_no_matching_crash_since",
+        {"addin_progid": "PdfPreview.Connect", "faulting_module": "PdfPreview.dll",
+         "lookback_hours": 24, "since": "2026-10-20T12:00:00Z"},
+        {"crash": crash},
+    )
+    assert status == expected
+
+
+def test_fix_verification_waits_for_structured_symptom_response(app, owner):
+    """Catches closing the ticket after config/process checks or accepting free-form chat as symptom evidence."""
+    from sqlalchemy import select
+    from test_procedures import outlook_body
+
+    from joltiq.db import session_scope
+    from joltiq.models import (
+        ActionExecution,
+        AgentPlan,
+        AgentRun,
+        Device,
+        Job,
+        KnowledgeArticle,
+        PlanStep,
+        SupportSession,
+        Ticket,
+        VerificationRun,
+        utcnow,
+    )
+    from joltiq.services import agent
+    from joltiq.services.procedures import procedure_hash, validate_executable_body
+
+    account = owner.post("/api/v1/customers", json={"name": "Symptom Check Customer"}).json()
+    customer = invite_and_join(app, owner, "customer", account["id"])
+    org_id = uuid.UUID(owner.org_id)
+    customer_id = uuid.UUID(customer.me["user"]["id"])
+    definition = validate_executable_body(outlook_body())
+    with session_scope(org_id) as db:
+        article = KnowledgeArticle(org_id=org_id, title="Outlook PDF fix", status="published", executable=True,
+                                   body=outlook_body(), procedure_hash=procedure_hash(definition), version=3)
+        device = Device(org_id=org_id, owner_user_id=customer_id, hostname="WIN11", status="active", last_seen_at=utcnow(),
+                        capabilities=["outlook.pdf_crash.inspect"])
+        db.add_all([article, device])
+        db.flush()
+        ticket = Ticket(org_id=org_id, number=881001, subject="Outlook PDF crash", description="crashes",
+                        requester_id=customer_id, customer_id=uuid.UUID(account["id"]), status="IN_PROGRESS", device_id=device.id)
+        db.add(ticket)
+        db.flush()
+        run = AgentRun(org_id=org_id, ticket_id=ticket.id, state="VERIFYING", correlation_id="symptom-stage-test",
+                       started_by=customer_id, context={"diagnostic_results": [{"crash": {
+                           "log_readable": True, "log_enabled": True, "service_running": True, "window_trustworthy": True,
+                       }}]})
+        db.add(run)
+        db.flush()
+        session = SupportSession(org_id=org_id, kind="desktop", state="active", owner_id=customer_id, ticket_id=ticket.id,
+                                 device_id=device.id, run_id=run.id,
+                                 consent={"max_risk": "SENSITIVE", "device_local_consent": True})
+        db.add(session)
+        db.flush()
+        plan = AgentPlan(org_id=org_id, run_id=run.id, revision=1, summary="Approved Outlook fix",
+                         plan_hash="c" * 64, status="executing", procedure_article_id=article.id,
+                         procedure_version=article.version, procedure_hash=article.procedure_hash)
+        db.add(plan)
+        db.flush()
+        step = PlanStep(org_id=org_id, plan_id=plan.id, ordinal=0, action="app.restart",
+                        target={"session_id": str(session.id), "device_id": str(device.id)},
+                        params={"process": "outlook.exe"}, rationale="Restart safely", risk="SENSITIVE",
+                        postconditions=[{"type": "device_process_responding", "params": {"process": "outlook.exe"}}], status="done")
+        db.add(step)
+        db.flush()
+        execution = ActionExecution(org_id=org_id, run_id=run.id, step_id=step.id, session_id=session.id,
+                                    action=step.action, target=step.target, params=step.params, risk="SENSITIVE",
+                                    policy_decision={}, status="succeeded", idempotency_key="symptom-stage-execution",
+                                    result={"device": {"ok": True}})
+        db.add(execution)
+        db.flush()
+        verification_run = VerificationRun(
+            org_id=org_id, execution_id=execution.id, run_id=run.id, status="VERIFIED", pre_state={}, post_state={},
+            postconditions=step.postconditions, details=[
+                {"type": "device_config_equals", "status": "VERIFIED", "observed": "LoadBehavior=2"},
+                {"type": "device_process_responding", "status": "VERIFIED", "observed": "responding"},
+            ],
+        )
+        db.add(verification_run)
+        db.flush()
+        run.context = {**run.context, "current_plan_id": str(plan.id), "verification_id": str(verification_run.id)}
+
+        agent.h_verify(db, run)
+        run_id, ticket_id = run.id, ticket.id
+        assert run.state == "AWAITING_SYMPTOM_CHECK"
+        assert run.outcome_stage == "FIX_APPLIED_VERIFIED"
+        assert run.paused_for == "symptom_check"
+        assert ticket.status == "AWAITING_CUSTOMER" and ticket.resolution_verified is not True
+        jobs = db.execute(select(Job).where(Job.org_id == org_id, Job.kind.in_([
+            "agent.symptom_reminder", "agent.symptom_escalation",
+        ]))).scalars().all()
+        assert sorted(job.kind for job in jobs) == ["agent.symptom_escalation", "agent.symptom_reminder"]
+        assert len({job.dedupe_key for job in jobs}) == 2
+
+        agent.customer_message(db, run, "The PDF opens now", customer_id)
+        assert run.context["symptom_response"] is None
+        assert run.state == "AWAITING_SYMPTOM_CHECK"
+
+    assert owner.post(f"/api/v1/agents/runs/{run_id}/symptom-check", json={"result": "pdf_opened"}).status_code == 403
+    first = customer.post(f"/api/v1/agents/runs/{run_id}/symptom-check", json={"result": "cannot_test"})
+    assert first.status_code == 200, first.text
+    assert first.json()["outcome_stage"] == "FIX_APPLIED_VERIFIED"
+    duplicate = customer.post(f"/api/v1/agents/runs/{run_id}/symptom-check", json={"result": "cannot_test"})
+    assert duplicate.status_code == 200 and duplicate.json()["idempotent"] is True
+    assert customer.post(f"/api/v1/agents/runs/{run_id}/symptom-check", json={"result": "pdf_opened"}).status_code == 409
+    assert customer.get(f"/api/v1/tickets/{ticket_id}").json()["status"] == "AWAITING_CUSTOMER"
+
+
+def test_pdf_open_observation_uses_bound_module_and_attempt_timestamp(owner):
+    """Catches observing an AI-selected module, a pre-attempt window, or resolving before the 60-second read-back."""
+    from datetime import datetime
+
+    from sqlalchemy import select
+    from test_procedures import outlook_body
+
+    from joltiq.db import session_scope
+    from joltiq.models import (
+        ActionExecution,
+        AgentPlan,
+        AgentRun,
+        Device,
+        DeviceCommand,
+        Job,
+        KnowledgeArticle,
+        PlanStep,
+        SupportSession,
+        Ticket,
+        utcnow,
+    )
+    from joltiq.services.agent import _symptom_observation, record_symptom_response
+    from joltiq.services.procedures import procedure_hash, validate_executable_body
+
+    org_id = uuid.UUID(owner.org_id)
+    user_id = uuid.UUID(owner.me["user"]["id"])
+    body = outlook_body()
+    definition = validate_executable_body(body)
+    with session_scope(org_id) as db:
+        article = KnowledgeArticle(org_id=org_id, title="Bound Outlook fix", status="published", executable=True,
+                                   body=body, procedure_hash=procedure_hash(definition), version=2)
+        device = Device(org_id=org_id, owner_user_id=user_id, hostname="WIN11", status="active", last_seen_at=utcnow(),
+                        capabilities=["outlook.pdf_crash.inspect"])
+        db.add_all([article, device])
+        db.flush()
+        ticket = Ticket(org_id=org_id, number=881002, subject="Outlook PDF crash", description="crashes",
+                        requester_id=user_id, status="AWAITING_CUSTOMER", device_id=device.id)
+        db.add(ticket)
+        db.flush()
+        run = AgentRun(org_id=org_id, ticket_id=ticket.id, state="AWAITING_SYMPTOM_CHECK",
+                       correlation_id="bound-observation-test", started_by=user_id, outcome_stage="FIX_APPLIED_VERIFIED",
+                       paused_for="symptom_check", context={})
+        db.add(run)
+        db.flush()
+        session = SupportSession(org_id=org_id, kind="desktop", state="active", owner_id=user_id, ticket_id=ticket.id,
+                                 device_id=device.id, run_id=run.id,
+                                 consent={"max_risk": "SENSITIVE", "device_local_consent": True})
+        db.add(session)
+        db.flush()
+        plan = AgentPlan(org_id=org_id, run_id=run.id, revision=1, summary="Approved Outlook fix", plan_hash="d" * 64,
+                         status="done", procedure_article_id=article.id, procedure_version=2,
+                         procedure_hash=article.procedure_hash)
+        db.add(plan)
+        db.flush()
+        step = PlanStep(org_id=org_id, plan_id=plan.id, ordinal=0, action="app.restart",
+                        target={"session_id": str(session.id), "device_id": str(device.id)},
+                        params={"process": "outlook.exe"}, rationale="Restart safely", risk="SENSITIVE",
+                        postconditions=[], status="done")
+        db.add(step)
+        db.flush()
+        execution = ActionExecution(org_id=org_id, run_id=run.id, step_id=step.id, session_id=session.id,
+                                    action=step.action, target=step.target, params=step.params, risk="SENSITIVE",
+                                    policy_decision={}, status="succeeded", idempotency_key="bound-observation-execution",
+                                    result={"device": {"ok": True}})
+        db.add(execution)
+        db.flush()
+        run.context = {**run.context, "current_plan_id": str(plan.id)}
+
+        response = record_symptom_response(db, run, "pdf_opened", user_id)
+        attempt_at = run.context["symptom_response"]["at"]
+        observation_job = db.execute(select(Job).where(
+            Job.org_id == org_id, Job.kind == "agent.symptom_observation",
+        )).scalar_one()
+        assert response["idempotent"] is False
+        assert 55 <= (observation_job.run_after - datetime.fromisoformat(attempt_at)).total_seconds() <= 65
+
+        _symptom_observation(db, {"run_id": str(run.id)})
+        command = db.execute(select(DeviceCommand).where(
+            DeviceCommand.device_id == device.id, DeviceCommand.action == "outlook.pdf_crash.inspect",
+        )).scalar_one()
+        assert command.params == {
+            "addin_progid": "PdfPreview.Connect", "faulting_module": "PdfPreview.dll",
+            "lookback_hours": 24, "since": attempt_at,
+        }
+        assert run.state == "AWAITING_SYMPTOM_CHECK" and run.paused_for == "symptom_observation"
+
+
 def test_executable_procedure_requires_distinct_mfa_admins_and_same_hash(app, owner):
     """Catches self-publication, non-MFA publication, or publishing content changed after approval."""
     from conftest import invite_and_join

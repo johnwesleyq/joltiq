@@ -30,3 +30,25 @@ ROLLBACK_RESTORED_PENDING_RESTART = (
     "The original add-in setting was restored and verified. Outlook could not be safely restarted, so the restored "
     "setting will take effect the next time Outlook starts."
 )
+SYMPTOM_TEST = "Please open the same PDF attachment now. What happened?"
+FIX_APPLIED_TEST_DEFERRED = (
+    "The approved fix was applied and checked, but the original problem has not been confirmed resolved. "
+    "The ticket will remain open."
+)
+SYMPTOM_REMINDER = (
+    "The approved fix is still applied. Please try the same PDF attachment when you can. If we do not hear back, "
+    "a support person will review the open ticket."
+)
+SYMPTOM_TIMEOUT = (
+    "The fix remains applied, but JoltIQ could not confirm the original problem was resolved. A support person will "
+    "review the ticket."
+)
+SYMPTOM_RESOLVED = "The PDF opened without a new Outlook crash. JoltIQ verified the fix and resolved the ticket."
+SYMPTOM_PERSISTS = (
+    "Outlook still appears to crash when opening the PDF. JoltIQ will not try another change automatically. "
+    "A support person will review it."
+)
+SYMPTOM_UNKNOWN = (
+    "The PDF test was reported, but JoltIQ could not verify the Windows crash log reliably. A support person will "
+    "review the open ticket."
+)
