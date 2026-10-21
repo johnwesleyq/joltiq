@@ -1,0 +1,89 @@
+name: Windows signed release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: SemVer package version, for example 1.0.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  signed-windows-release:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    environment: windows-signing
+    defaults:
+      run:
+        working-directory: apps/windows-agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Validate release gates
+        shell: pwsh
+        run: ./scripts/tests/BuildGate.Tests.ps1
+      - name: Import protected signing certificate
+        id: certificate
+        shell: pwsh
+        env:
+          SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
+          SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+        run: |
+          if (-not $env:SIGNING_CERTIFICATE_BASE64 -or -not $env:SIGNING_CERTIFICATE_PASSWORD) { throw "Protected signing secrets are unavailable." }
+          $pfx = Join-Path $env:RUNNER_TEMP "joltiq-signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGNING_CERTIFICATE_BASE64))
+          $password = ConvertTo-SecureString $env:SIGNING_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password -Exportable:$false
+          if (-not $certificate -or -not $certificate.HasPrivateKey) { throw "Signing certificate import failed or has no private key." }
+          "thumbprint=$($certificate.Thumbprint)" >> $env:GITHUB_OUTPUT
+          "pfx=$pfx" >> $env:GITHUB_OUTPUT
+      - name: Build, test, sign, timestamp, and verify release
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          SIGNING_CERTIFICATE_THUMBPRINT: ${{ steps.certificate.outputs.thumbprint }}
+        run: ./scripts/build.ps1 -Version $env:RELEASE_VERSION -Distribution External -Sign -CertThumbprint $env:SIGNING_CERTIFICATE_THUMBPRINT
+      - name: Re-verify all release signatures and checksum
+        shell: pwsh
+        run: |
+          Import-Module ./scripts/BuildGate.psm1 -Force
+          Assert-JoltIqAuthenticodeFile -Path ./artifacts/publish/tray/JoltIQCompanion.exe -RequireTimestamp
+          Assert-JoltIqAuthenticodeFile -Path ./artifacts/publish/broker/JoltIQBroker.exe -RequireTimestamp
+          $msi = @(Get-ChildItem ./artifacts -Filter *.msi)
+          if ($msi.Count -ne 1) { throw "Expected exactly one release MSI; found $($msi.Count)." }
+          Assert-JoltIqAuthenticodeFile -Path $msi[0].FullName -RequireTimestamp
+          Assert-JoltIqChecksum -Artifact $msi[0].FullName -Manifest ./artifacts/SHA256SUMS.txt
+          $manifest = Get-Content ./artifacts/build-manifest.json -Raw | ConvertFrom-Json
+          if ($manifest.distribution -ne 'External' -or $manifest.signed -ne $true -or $manifest.timestamped -ne $true) { throw "Release manifest is not externally releasable." }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: joltiq-companion-signed-${{ inputs.version }}
+          path: |
+            apps/windows-agent/artifacts/*.msi
+            apps/windows-agent/artifacts/SHA256SUMS.txt
+            apps/windows-agent/artifacts/build-manifest.json
+            apps/windows-agent/artifacts/publish/tray/JoltIQCompanion.exe
+            apps/windows-agent/artifacts/publish/broker/JoltIQBroker.exe
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: windows-release-failure-${{ github.run_id }}
+          path: apps/windows-agent/artifacts/logs/**
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Remove signing material
+        if: always()
+        shell: pwsh
+        env:
+          SIGNING_CERTIFICATE_THUMBPRINT: ${{ steps.certificate.outputs.thumbprint }}
+          SIGNING_CERTIFICATE_PATH: ${{ steps.certificate.outputs.pfx }}
+        run: |
+          if ($env:SIGNING_CERTIFICATE_THUMBPRINT) { Remove-Item "Cert:\CurrentUser\My\$env:SIGNING_CERTIFICATE_THUMBPRINT" -Force -ErrorAction SilentlyContinue }
+          if ($env:SIGNING_CERTIFICATE_PATH) { Remove-Item -LiteralPath $env:SIGNING_CERTIFICATE_PATH -Force -ErrorAction SilentlyContinue }

@@ -2,7 +2,8 @@
   <PropertyGroup>
     <OutputName>JoltIQCompanion-$(ProductVersion)-x64</OutputName>
     <ProductVersion Condition="'$(ProductVersion)'==''">1.0.0</ProductVersion>
-    <DefineConstants>ProductVersion=$(ProductVersion);PublishDir=$(PublishDir)</DefineConstants>
+    <Distribution Condition="'$(Distribution)'==''">Internal</Distribution>
+    <DefineConstants>ProductVersion=$(ProductVersion);PublishDir=$(PublishDir);Distribution=$(Distribution)</DefineConstants>
     <Platform>x64</Platform>
   </PropertyGroup>
   <ItemGroup>

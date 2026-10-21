@@ -7,7 +7,14 @@
            UpgradeCode="5B7C1E0A-6F3D-4C1B-9B2E-7A1D2C3E4F50" Scope="perMachine" Compressed="yes">
     <MajorUpgrade DowngradeErrorMessage="A newer version of JoltIQ Companion is already installed." />
     <MediaTemplate EmbedCab="yes" />
-    <Launch Condition="Installed OR VersionNT64 &gt;= 603" Message="JoltIQ Companion requires 64-bit Windows 10 or later." />
+    <Launch Condition="Installed OR VersionNT64 &gt;= 1000" Message="JoltIQ Companion requires 64-bit Windows 10 or later." />
+    <?if $(var.Distribution) = Internal ?>
+      <Property Id="ARPCOMMENTS" Value="Internal engineering build — unsigned output is not approved for customer deployment." />
+      <Property Id="JOLTIQ_BUILD_CLASSIFICATION" Value="INTERNAL_ONLY" />
+    <?else?>
+      <Property Id="ARPCOMMENTS" Value="Externally releasable build — Authenticode verification is enforced by the release pipeline." />
+      <Property Id="JOLTIQ_BUILD_CLASSIFICATION" Value="EXTERNAL_SIGNED" />
+    <?endif?>
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="JoltIQ Companion">

@@ -40,14 +40,47 @@ jobs:
       - run: npm audit --omit=dev --audit-level=high
   windows-agent:
     runs-on: windows-latest
+    timeout-minutes: 35
     defaults: { run: { working-directory: apps/windows-agent } }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with: { dotnet-version: "8.0.x" }
-      - run: dotnet run --project tests/JoltIQ.Agent.Core.SelfTest -c Release
-      - run: dotnet test tests/JoltIQ.Agent.Tests -c Release
       - shell: pwsh
-        run: ./scripts/build.ps1 -Version 0.0.${{ github.run_number }} -SkipTests
+        run: ./scripts/tests/BuildGate.Tests.ps1
+      - name: Build previous internal package for upgrade and rollback checks
+        shell: pwsh
+        run: ./scripts/build.ps1 -Version 0.0.1 -Distribution Internal -SkipTests -OutputDirectory ./artifacts-previous
+      - name: Build, test, validate harness, and package internal-only MSI
+        shell: pwsh
+        run: ./scripts/build.ps1 -Version 0.0.2 -Distribution Internal
+      - name: Install, launch, repair, upgrade, rollback-check, and uninstall
+        shell: pwsh
+        run: |
+          $current = @(Get-ChildItem ./artifacts -Filter *.msi)
+          $previous = @(Get-ChildItem ./artifacts-previous -Filter *.msi)
+          if ($current.Count -ne 1 -or $previous.Count -ne 1) { throw "Lifecycle test requires exactly one current and previous MSI." }
+          ./scripts/test-on-windows.ps1 -InstallerLifecycle -Msi $current[0].FullName -PreviousMsi $previous[0].FullName -LifecycleEvidencePath ./artifacts/installer-lifecycle.json
       - uses: actions/upload-artifact@v4
-        with: { name: joltiq-companion-unsigned, path: apps/windows-agent/artifacts/*.msi }
+        if: always()
+        with:
+          name: windows-agent-diagnostics-${{ github.run_id }}
+          path: |
+            apps/windows-agent/artifacts/logs/**
+            apps/windows-agent/artifacts/*.trx
+            apps/windows-agent/artifacts/installer-lifecycle.json
+            apps/windows-agent/artifacts-previous/logs/**
+          if-no-files-found: warn
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: joltiq-companion-INTERNAL-ONLY-${{ github.run_number }}
+          path: |
+            apps/windows-agent/artifacts/*.msi
+            apps/windows-agent/artifacts/SHA256SUMS.txt
+            apps/windows-agent/artifacts/build-manifest.json
+            apps/windows-agent/artifacts/INTERNAL-ONLY.txt
+            apps/windows-agent/artifacts/installer-lifecycle.json
+          if-no-files-found: error
+          retention-days: 7
