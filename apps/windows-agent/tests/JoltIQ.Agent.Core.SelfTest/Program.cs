@@ -214,6 +214,26 @@ await TA("runtime sends the durable outbox before polling and never re-executes 
     Assert(harness.AcceptedResults.Count == 2, "completed duplicate did not resend its cached result");
 });
 
+await TA("runtime refuses a duplicate command id whose signed parameters changed", async () =>
+{
+    using var harness = new RuntimeHarness();
+    var provider = new CountingProvider();
+    var runtime = new AgentRuntime(harness.Client, provider, new AcceptingUi(), new InMemoryCommandJournal());
+    harness.EnqueuePoll(
+        harness.SessionBegin("conflict-session"),
+        harness.Action("conflict-command", "conflict-session", "system.info", new JsonObject { ["detail"] = "basic" }));
+    await runtime.PollOnceAsync(default);
+
+    harness.EnqueuePoll(
+        harness.Action("conflict-command", "conflict-session", "system.info", new JsonObject { ["detail"] = "full" }));
+    await runtime.PollOnceAsync(default);
+
+    Assert(provider.CallCount == 1, "conflicting duplicate executed again");
+    Assert(harness.AcceptedResults.Count == 1, "cached success was reported for a different signed payload");
+    Assert(runtime.Log.Any(x => x.Level == "critical" && x.Message.Contains("conflicting duplicate command")),
+        "conflicting duplicate was not recorded as a security event");
+});
+
 await TA("runtime passes exact signed consent copy to the native UI", async () =>
 {
     using var harness = new RuntimeHarness();

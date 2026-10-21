@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -225,7 +226,8 @@ public sealed class AgentRuntime
             "",
             b.TryGetProperty("procedure_hash", out var procedureHash) && procedureHash.ValueKind == JsonValueKind.String
                 ? procedureHash.GetString()
-                : null);
+                : null,
+            HashParameters(p));
         if (!_journal.MarkRunning(executionContext, action))
         {
             L("critical", $"command {cid} could not enter the durable running state; it was not executed");
@@ -308,8 +310,12 @@ public sealed class AgentRuntime
             ? hash.GetString()
             : null;
         return entry.DeviceId == envelope.GetProperty("device_id").GetString() && entry.SessionId == (sessionId ?? "") &&
-               entry.Action == envelope.GetProperty("action").GetString() && entry.ProcedureHash == procedureHash;
+               entry.Action == envelope.GetProperty("action").GetString() && entry.ProcedureHash == procedureHash &&
+               entry.ParametersHash is not null && entry.ParametersHash == HashParameters(envelope.GetProperty("params"));
     }
+
+    private static string HashParameters(JsonElement parameters) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(parameters.GetRawText()))).ToLowerInvariant();
 
     private static string Describe(string action, JsonElement p) => action switch
     {

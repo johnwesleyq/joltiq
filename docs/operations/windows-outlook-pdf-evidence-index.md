@@ -24,12 +24,12 @@ This index deliberately separates implementation from execution evidence. A sour
 
 | Check | Result |
 |---|---|
-| API full suite | **152 passed, 2 skipped, 0 failed** in 55.23 s. The two skipped tests spawn the .NET simulator, and native `dotnet` is unavailable on this Mac. The plan's literal `.venv/bin/pytest` first failed because the editable package was not on this worktree venv's import path; the corrected invocation used `PYTHONPATH=.` and the test database proxy. |
+| API full suite | **152 passed, 2 skipped, 0 failed** in 64.68 s on the final post-review run. The two skipped tests spawn the .NET simulator, and native `dotnet` is unavailable on this Mac. The plan's literal `.venv/bin/pytest` first failed because the editable package was not on this worktree venv's import path; the corrected invocation used `PYTHONPATH=.` and an isolated test database through the local proxy. |
 | API lint | `ruff check joltiq tests` — passed. |
 | API types | `mypy joltiq` — passed after correcting branch-introduced type errors. |
 | Python dependency audit | **BLOCKED FOR RELEASE:** `certifi 2026.7.22`, `PYSEC-2026-4320`; fixed version reported by `pip-audit`: `2026.10.19`. |
 | Web | `npm run typecheck`, `npm run build`, and `npm audit --omit=dev --audit-level=high` — passed; audit reported zero vulnerabilities. |
-| Companion Core | .NET 8 SDK container: **19 passed, 0 failed**. |
+| Companion Core | .NET 8 SDK container: **20 passed, 0 failed**. The final security self-review added coverage proving a reused command ID with altered signed parameters is refused instead of receiving cached success. |
 | Acceptance harness contract | .NET 8 SDK container: catalog, complete synthetic bundle, missing-evidence rejection, and secret-evidence rejection all passed. This validates the harness, not Windows behavior. |
 | Windows build and xUnit | Not run: this is macOS and no Windows runner evidence is available. |
 | Windows acceptance | Not run: requires authorized disposable Windows 10/11 VMs and licensed classic Outlook for the real-Outlook case. |
@@ -67,7 +67,7 @@ Every accepted run must provide the 14 evidence classes required by the catalog.
 | Policy precedence and user identity | HKCU/HKLM policy, interactive session count, screen state, enrolled SID, and just-before-write SID checks exist. | Real Windows 10/11 execution evidence. |
 | Tray/SYSTEM separation | User-scoped mutation is routed to the interactive tray; broker allowlist excludes this registry write. | Service/tray process evidence on Windows. |
 | Local rollback authority | Restore accepts only `source_command_id` and reads the DPAPI-protected local journal; server-supplied prior values are rejected. | DPAPI/runtime evidence on Windows. |
-| Journal, outbox, duplicates, and late results | Core self-test and API protocol tests cover persistence, restart recovery, exact-once reporting, duplicates, expiry, and terminal late-result reconciliation. | Power-loss/offline acceptance cases on Windows. |
+| Journal, outbox, duplicates, and late results | Core self-test and API protocol tests cover persistence, restart recovery, exact-parameter duplicate matching, expiry, and terminal late-result reconciliation. | Power-loss/offline acceptance cases on Windows. |
 | Event-log health and symptom resolution | Unreadable, disabled, stale, or untrustworthy logging returns `UNKNOWN`; symptom resolution is separate from fix verification. | Real Event Log and Outlook crash observation evidence. |
 | STOP races | Core tests cover queued and in-progress cancellation with monotonic evidence. | Measured stop timing for all three Windows acceptance race cases. |
 | Session identity and signed customer copy | Command/session/device/procedure identity is bound into signed envelopes and exact native copy is passed to the tray. | Windows UI screenshots and signature evidence. |

@@ -28,7 +28,7 @@ Status legend: **IT** = IMPLEMENTED_AND_TESTED · **INT** = IMPLEMENTED_NOT_TEST
 | Live viewer, take control, hand back, emergency stop, single control lease (DB-enforced) | IT | `test_e2e_browser.py`, `test_security.py` |
 | Policy engine (5 risk levels, tenant rules, consent scope) + approvals (step-hash bound, HMAC, single-use, expiry, supersede) | IT | `test_security.py`, `test_platform_features.py::test_policy…` |
 | Independent verifier (browser read-back, device read-back, DB re-fetch, HTTP) | IT | Browser: VERIFIED + FAILED (app "saves" without persisting) both caught |
-| Windows companion protocol (enroll, signed requests, nonce/counter replay protection, signed envelopes, revocation, durable journal/outbox) | IT (portable) / **INT (Windows)** | API protocol tests plus .NET Core self-test **19/19**. Native Windows runtime evidence is still absent. |
+| Windows companion protocol (enroll, signed requests, nonce/counter replay protection, signed envelopes, revocation, durable journal/outbox) | IT (portable) / **INT (Windows)** | API protocol tests plus .NET Core self-test **20/20**. Native Windows runtime evidence is still absent. |
 | Outlook PDF diagnosis, exact published plan, per-step approval, HKCU mutation, safe restart, rollback, and symptom verification | **INT / B** | Implemented with portable/server tests. `IMPLEMENTED_NOT_TESTED` on Windows; `BLOCKED_EXTERNAL_DEPENDENCY` for the required Windows VM matrix. |
 | Windows OS providers, DPAPI journal, tray consent/banner/STOP, and tray/SYSTEM separation | **INT / B** | Source and Windows-only xUnit tests exist. They have not run on Windows 10/11. |
 | Windows installer (WiX v5), lifecycle, signing, repair/upgrade/uninstall | **INT / B** | Build/release workflows and checks exist but have not run on `windows-latest`; no MSI artifact exists here and nothing is signed. Any local output is unsigned internal-only. |
@@ -61,9 +61,9 @@ Status legend: **IT** = IMPLEMENTED_AND_TESTED · **INT** = IMPLEMENTED_NOT_TEST
 
 | Command | Result |
 |---|---|
-| `cd apps/api && PYTHONPATH=. .venv/bin/pytest` | **152 passed, 2 skipped, 0 failed** in 55.23 s. The two simulator-spawning tests skipped because native `dotnet` is unavailable on this Mac. |
+| `cd apps/api && PYTHONPATH=. .venv/bin/pytest` | **152 passed, 2 skipped, 0 failed** in 64.68 s on the final post-review run. The two simulator-spawning tests skipped because native `dotnet` is unavailable on this Mac. |
 | `ruff check joltiq tests` / `mypy joltiq` | Passed; mypy reports no issues in 80 source files. |
-| .NET 8 container: `dotnet run --project apps/windows-agent/tests/JoltIQ.Agent.Core.SelfTest -c Release` | **19 passed**, 0 failed. |
+| .NET 8 container: `dotnet run --project apps/windows-agent/tests/JoltIQ.Agent.Core.SelfTest -c Release` | **20 passed**, 0 failed. The final security self-review added a fail-closed test for a reused command ID with altered signed parameters. |
 | .NET 8 container: Outlook fixture `validate-harness` | Four contract checks passed: complete catalog, valid synthetic bundle, missing evidence rejected, secret-bearing evidence rejected. This is not Windows acceptance. |
 | `dotnet build/test` Windows / Tray / Broker / Windows xUnit / WiX | **BLOCKED_EXTERNAL_DEPENDENCY**: not run on Windows. |
 | `apps/web: npm run typecheck && npm run build` | Passed; Next.js generated all 35 routes. |
