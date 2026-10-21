@@ -154,6 +154,7 @@ def escalate(run_id: uuid.UUID, body: EscalateIn, ctx: Ctx = Depends(get_ctx)):
 # ---------------- Approvals ----------------
 def ser_approval(a: Approval) -> dict:
     return {"id": str(a.id), "status": a.status, "risk": a.risk, "action": a.action, "target": a.target, "params": a.params,
+            "plan_id": str(a.plan_id) if a.plan_id else None, "step_id": str(a.step_id) if a.step_id else None,
             "reason": a.reason, "effects": a.effects, "approver_roles": a.approver_roles, "run_id": str(a.run_id) if a.run_id else None,
             "ticket_id": str(a.ticket_id) if a.ticket_id else None, "session_id": str(a.session_id) if a.session_id else None,
             "expires_at": a.expires_at.isoformat(), "decided_at": a.decided_at.isoformat() if a.decided_at else None,

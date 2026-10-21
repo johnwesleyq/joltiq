@@ -151,3 +151,47 @@ def test_device_declines_consent_nothing_runs(api_server, app, owner):
     run = run_until(customer, run_id, lambda r: r["state"] == "ESCALATED")
     assert run["plans"] == []
     assert customer.get(f"/api/v1/sessions/{sess['id']}").json()["state"] == "terminated"
+
+
+@pytest.mark.parametrize(
+    ("restore_verified", "restart_completed", "expected_stage", "expected_status", "message_fragment"),
+    [
+        (True, True, "UNCONFIRMED", "RESTORED", "restored and verified, and Outlook was safely restarted"),
+        (True, False, "RESTORED_PENDING_RESTART", "RESTORED_PENDING_RESTART", "next time Outlook starts"),
+        (False, False, "FIX_PARTIALLY_APPLIED", "FAILED", "change remains in place"),
+    ],
+)
+def test_rollback_outcomes_never_resolve_the_original_ticket(
+    owner, restore_verified, restart_completed, expected_stage, expected_status, message_fragment,
+):
+    """Rollback changes recovery state, not whether the customer's original PDF symptom is resolved."""
+    import uuid
+
+    from sqlalchemy import select
+
+    from joltiq.db import session_scope
+    from joltiq.models import AgentMessage, AgentRun, Ticket
+    from joltiq.services.agent import _finish_rollback
+
+    org_id = uuid.UUID(owner.org_id)
+    user_id = uuid.UUID(owner.me["user"]["id"])
+    with session_scope(org_id) as db:
+        ticket = Ticket(org_id=org_id, number=772000 + int(restore_verified) + int(restart_completed),
+                        subject="Outlook PDF crash", description="crashes", requester_id=user_id, status="IN_PROGRESS")
+        db.add(ticket)
+        db.flush()
+        run = AgentRun(org_id=org_id, ticket_id=ticket.id, state="VERIFYING", correlation_id=uuid.uuid4().hex,
+                       started_by=user_id, outcome_stage="FIX_PARTIALLY_APPLIED",
+                       context={"partial_application": {"original_state": {"value": 3}, "current_state": {"value": 2}}})
+        db.add(run)
+        db.flush()
+
+        _finish_rollback(db, run, restore_verified=restore_verified, restart_completed=restart_completed,
+                         reason="fixture recovery outcome")
+
+        messages = db.execute(select(AgentMessage.content).where(AgentMessage.run_id == run.id)).scalars().all()
+        assert run.state == "ESCALATED"
+        assert run.outcome_stage == expected_stage
+        assert run.context["partial_application"]["rollback_status"] == expected_status
+        assert ticket.status == "ESCALATED" and ticket.resolution_verified is not True
+        assert any(message_fragment in message for message in messages)

@@ -49,6 +49,21 @@ def request(db: Session, *, org_id, run_id, plan_id, step: PlanStep, plan_hash: 
     return a
 
 
+def request_each_customer_step(db: Session, *, run, plan, steps: list[PlanStep], ticket, session_id) -> list[Approval]:
+    """Create one independently bound customer approval for every step in a sensitive recovery plan."""
+    from .actions.registry import ACTIONS
+
+    created = []
+    for step in steps:
+        created.append(request(
+            db, org_id=run.org_id, run_id=run.id, plan_id=plan.id, step=step, plan_hash=plan.plan_hash,
+            ticket_id=ticket.id, session_id=session_id, reason=step.rationale,
+            effects=ACTIONS[step.action].effects, approver_roles=["customer"],
+            requested_for_user_id=ticket.requester_id,
+        ))
+    return created
+
+
 def can_decide(db: Session, a: Approval, *, user_id, role: str | None, customer_id) -> tuple[bool, str]:
     if role is None:
         return False, "no role"

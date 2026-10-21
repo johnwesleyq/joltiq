@@ -31,6 +31,26 @@ class Outcome:
     data: dict[str, Any] | None = None
 
 
+def confirmed_state_change(execution: ActionExecution) -> bool:
+    """Return true only when execution evidence says a non-read-only action reached the target."""
+    spec = ACTIONS.get(execution.action)
+    if spec is None or spec.risk == "READ_ONLY":
+        return False
+    device_result = (execution.result or {}).get("device") or {}
+    return execution.status == "succeeded" or device_result.get("changed") is True or device_result.get("change_state") == "confirmed"
+
+
+def completed_state_changes(db: Session, run: AgentRun, plan: AgentPlan) -> list[ActionExecution]:
+    step_ids = db.execute(select(PlanStep.id).where(PlanStep.plan_id == plan.id)).scalars().all()
+    if not step_ids:
+        return []
+    executions = db.execute(
+        select(ActionExecution).where(ActionExecution.run_id == run.id, ActionExecution.step_id.in_(step_ids))
+        .order_by(ActionExecution.created_at)
+    ).scalars().all()
+    return [execution for execution in executions if confirmed_state_change(execution)]
+
+
 def execute_step(db: Session, run: AgentRun, plan: AgentPlan, step: PlanStep) -> Outcome:
     s = db.get(SupportSession, uuid_or_none(step.target.get("session_id"))) if step.target.get("session_id") else None
     device = db.get(Device, uuid_or_none(step.target.get("device_id"))) if step.target.get("device_id") else None
@@ -89,6 +109,10 @@ def execute_step(db: Session, run: AgentRun, plan: AgentPlan, step: PlanStep) ->
         if spec_channel == "desktop":
             if s is None or device is None:  # policy already denies this; defensive
                 return _done(db, run, ex, s, "failed", "no desktop session/device")
+            if step.action in ("office.addin.restore_load_behavior", "app.restart") and run.context.get("rollback_plan_id") == str(plan.id):
+                online = bool(device.last_seen_at and (utcnow() - device.last_seen_at).total_seconds() < 90)
+                if not online:
+                    return _done(db, run, ex, s, "failed", "device is offline; rollback was not dispatched")
             cmd = queue_command(db, device, action=step.action, params=dec.params, session=s, execution_id=ex.id,
                                 procedure_hash=plan.procedure_hash)
             ex.result = {"command_id": str(cmd.id)}

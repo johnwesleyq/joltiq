@@ -245,6 +245,170 @@ def test_restore_action_accepts_only_source_command_id_and_readback_ignores_clai
     assert status == V.VERIFIED
 
 
+@pytest.mark.parametrize(
+    "rollback_blocker", ["offline", "revoked", "stopped", "denied", "journal_missing", "restore_failed", "restart_declined"],
+)
+def test_partial_application_rollback_is_source_only_and_separately_approved(owner, rollback_blocker):
+    """The server may identify a prior mutation, but it must never send saved registry state back to the PC."""
+    from joltiq.db import session_scope
+    from joltiq.models import (
+        ActionExecution,
+        AgentMessage,
+        AgentPlan,
+        AgentRun,
+        Approval,
+        Device,
+        PlanStep,
+        SupportSession,
+        Ticket,
+        VerificationRun,
+        utcnow,
+    )
+    from joltiq.services import approvals as approval_svc
+    from joltiq.services.agent import h_awaiting_approval, h_execute
+
+    org_id = uuid.UUID(owner.org_id)
+    user_id = _uid(owner)
+    source_command_id = "change-command-7"
+    with session_scope(org_id) as db:
+        device = Device(org_id=org_id, owner_user_id=user_id, hostname="WIN11", status="active",
+                        capabilities=["office.addin.set_load_behavior", "office.addin.restore_load_behavior",
+                                      "office.addin.verify_restored", "app.restart"])
+        db.add(device)
+        db.flush()
+        ticket = Ticket(org_id=org_id, number=771001, subject="Outlook PDF crash", description="crashes",
+                        requester_id=user_id, status="IN_PROGRESS", device_id=device.id)
+        db.add(ticket)
+        db.flush()
+        run = AgentRun(org_id=org_id, ticket_id=ticket.id, state="EXECUTING", correlation_id="partial-rollback-test",
+                       started_by=user_id, context={"evidence": []})
+        db.add(run)
+        db.flush()
+        session = SupportSession(org_id=org_id, kind="desktop", state="active", owner_id=user_id, ticket_id=ticket.id,
+                                 device_id=device.id, run_id=run.id,
+                                 consent={"max_risk": "SENSITIVE", "device_local_consent": True})
+        db.add(session)
+        db.flush()
+        original = AgentPlan(org_id=org_id, run_id=run.id, revision=1, summary="Approved Outlook fix",
+                             hypothesis="PDF add-in crash", plan_hash="a" * 64, status="executing",
+                             procedure_version=4, procedure_hash="b" * 64)
+        db.add(original)
+        db.flush()
+        run.context = {**run.context, "current_plan_id": str(original.id)}
+        changed = PlanStep(org_id=org_id, plan_id=original.id, ordinal=0, action="office.addin.set_load_behavior",
+                           target={"session_id": str(session.id), "device_id": str(device.id)},
+                           params={"app": "Outlook", "addin_progid": "PdfPreview.Connect", "enabled": False},
+                           rationale="Disable the faulty add-in", risk="SENSITIVE", postconditions=[], status="done")
+        failed = PlanStep(org_id=org_id, plan_id=original.id, ordinal=1, action="app.restart",
+                          target=changed.target, params={"process": "outlook.exe"}, rationale="Restart safely",
+                          risk="SENSITIVE", postconditions=[], status="pending")
+        db.add_all([changed, failed])
+        db.flush()
+        source = ActionExecution(
+            org_id=org_id, run_id=run.id, step_id=changed.id, session_id=session.id,
+            action=changed.action, target=changed.target, params=changed.params, risk="SENSITIVE",
+            policy_decision={}, status="succeeded", idempotency_key="partial-source",
+            result={"command_id": source_command_id,
+                    "device": {"ok": True, "changed": True,
+                               "before": {"exists": True, "kind": "DWord", "value": 3},
+                               "after": {"exists": True, "kind": "DWord", "value": 2}}},
+        )
+        db.add(source)
+        db.flush()
+
+        session.emergency_stopped = True
+        h_execute(db, run)
+        rollback = db.get(AgentPlan, uuid.UUID(run.context["rollback_plan_id"]))
+        rollback_steps = db.execute(
+            select(PlanStep).where(PlanStep.plan_id == rollback.id).order_by(PlanStep.ordinal)
+        ).scalars().all()
+        rollback_approvals = db.execute(
+            select(Approval).where(Approval.plan_id == rollback.id).order_by(Approval.created_at)
+        ).scalars().all()
+
+        assert run.outcome_stage == "FIX_PARTIALLY_APPLIED"
+        assert run.state == "AWAITING_APPROVAL" and run.retries == 0
+        assert [(s.action, s.params) for s in rollback_steps] == [
+            ("office.addin.restore_load_behavior", {"source_command_id": source_command_id}),
+            ("app.restart", {"process": "outlook.exe"}),
+        ]
+        assert rollback_steps[0].postconditions == [
+            {"type": "device_addin_restore_matches", "params": {"source_command_id": source_command_id}}
+        ]
+        assert len(rollback_approvals) == 2
+        assert {a.step_id for a in rollback_approvals} == {s.id for s in rollback_steps}
+        assert len({a.step_hash for a in rollback_approvals}) == 2
+        assert all(a.status == "PENDING" and a.approver_roles == ["customer"] for a in rollback_approvals)
+        assert "before" not in repr(rollback_steps) and "after" not in repr(rollback_steps)
+        assert run.context["partial_application"]["original_state"]["value"] == 3
+        assert run.context["partial_application"]["current_state"]["value"] == 2
+
+        # The restore approval is independently bound and may advance before the restart approval.
+        restore_approval = next(a for a in rollback_approvals if a.action == "office.addin.restore_load_behavior")
+        restart_approval = next(a for a in rollback_approvals if a.action == "app.restart")
+        if rollback_blocker == "denied":
+            approval_svc.decide(db, restore_approval.id, approve=False, user_id=user_id, role="customer", customer_id=None)
+            h_awaiting_approval(db, run)
+            messages = db.execute(select(AgentMessage.content).where(AgentMessage.run_id == run.id)).scalars().all()
+            assert run.state == "ESCALATED" and run.context["partial_application"]["rollback_status"] == "FAILED"
+            assert any("change remains in place" in message for message in messages)
+            return
+        if rollback_blocker == "restart_declined":
+            rollback_steps[0].status = "done"
+            db.add(ActionExecution(
+                org_id=org_id, run_id=run.id, step_id=rollback_steps[0].id, session_id=session.id,
+                action=rollback_steps[0].action, target=rollback_steps[0].target, params=rollback_steps[0].params,
+                risk="SENSITIVE", policy_decision={}, status="succeeded", idempotency_key="restore-succeeded",
+                result={"command_id": "restore-command-7", "device": {"ok": True}},
+            ))
+            db.flush()
+            approval_svc.decide(db, restore_approval.id, approve=True, user_id=user_id, role="customer", customer_id=None)
+            approval_svc.decide(db, restart_approval.id, approve=False, user_id=user_id, role="customer", customer_id=None)
+            session.emergency_stopped = False
+            h_awaiting_approval(db, run)
+            vr = db.get(VerificationRun, uuid.UUID(run.context["verification_id"]))
+            vr.status = "VERIFIED"
+            vr.details = [{"type": "device_addin_restore_matches", "status": "VERIFIED"}]
+            run.paused_for = None
+            from joltiq.services.agent import h_verify
+
+            h_verify(db, run)
+            assert run.state == "ESCALATED" and run.outcome_stage == "RESTORED_PENDING_RESTART"
+            assert run.context["partial_application"]["rollback_status"] == "RESTORED_PENDING_RESTART"
+            return
+        if rollback_blocker in ("journal_missing", "restore_failed"):
+            approval_svc.decide(db, restore_approval.id, approve=True, user_id=user_id, role="customer", customer_id=None)
+            session.emergency_stopped = False
+            h_awaiting_approval(db, run)
+            rollback_steps[0].status = "dispatched"
+            db.add(ActionExecution(
+                org_id=org_id, run_id=run.id, step_id=rollback_steps[0].id, session_id=session.id,
+                action=rollback_steps[0].action, target=rollback_steps[0].target, params=rollback_steps[0].params,
+                risk="SENSITIVE", policy_decision={}, status="failed",
+                idempotency_key=f"restore-{rollback_blocker}",
+                error=("matching local journal entry not found" if rollback_blocker == "journal_missing"
+                       else "registry restore failed"), result={"device": {"ok": False}},
+            ))
+            db.flush()
+            h_execute(db, run)
+            messages = db.execute(select(AgentMessage.content).where(AgentMessage.run_id == run.id)).scalars().all()
+            assert run.state == "ESCALATED" and run.context["partial_application"]["rollback_status"] == "FAILED"
+            assert any("change remains in place" in message for message in messages)
+            return
+        approval_svc.decide(db, restore_approval.id, approve=True, user_id=user_id, role="customer", customer_id=None)
+        if rollback_blocker != "stopped":
+            session.emergency_stopped = False
+        if rollback_blocker == "revoked":
+            device.status, device.revoked_at = "revoked", utcnow()
+        h_awaiting_approval(db, run)
+        assert run.state == "EXECUTING" and restart_approval.status == "PENDING"
+        h_execute(db, run)
+        messages = db.execute(select(AgentMessage.content).where(AgentMessage.run_id == run.id)).scalars().all()
+        assert run.state == "ESCALATED" and run.outcome_stage == "FIX_PARTIALLY_APPLIED"
+        assert run.context["partial_application"]["rollback_status"] == "FAILED"
+        assert any("change remains in place" in message for message in messages)
+
+
 def test_desktop_candidate_selection_cannot_invent_or_modify_a_procedure():
     from joltiq.services.agent import select_candidate_procedure
 

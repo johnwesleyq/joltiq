@@ -61,6 +61,14 @@ def aggregate(statuses: list[str]) -> str:
     return V.PARTIAL if any(s == V.VERIFIED for s in statuses) else V.UNKNOWN
 
 
+def restore_readback_verified(details: list[dict]) -> bool:
+    """A restore is proven only by its separate local-journal/live-registry comparison."""
+    return any(
+        detail.get("type") == "device_addin_restore_matches" and detail.get("status") == V.VERIFIED
+        for detail in details
+    )
+
+
 def capture_pre_state(db: Session, ex: ActionExecution, postconditions: list[dict], session: SupportSession | None) -> dict[str, Any]:
     pre: dict[str, Any] = {}
     for i, pc in enumerate(postconditions):
