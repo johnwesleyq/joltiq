@@ -214,6 +214,29 @@ await TA("runtime sends the durable outbox before polling and never re-executes 
     Assert(harness.AcceptedResults.Count == 2, "completed duplicate did not resend its cached result");
 });
 
+await TA("runtime passes exact signed consent copy to the native UI", async () =>
+{
+    using var harness = new RuntimeHarness();
+    var ui = new CapturingUi();
+    var runtime = new AgentRuntime(harness.Client, new CountingProvider(), ui, new InMemoryCommandJournal());
+    harness.EnqueuePoll(harness.SessionBegin("copy-session", new JsonObject
+    {
+        ["native_title"] = "JoltIQ — permission requested",
+        ["native_message"] = "Disable Contoso PDF Preview and safely restart Outlook. Allow this session?",
+        ["addin_name"] = "Contoso PDF Preview",
+        ["addin_progid"] = "Contoso.PdfPreview",
+        ["active_message"] = "JoltIQ support is active on this PC — STOP ends control immediately.",
+    }));
+
+    await runtime.PollOnceAsync(default);
+
+    Assert(ui.Request is not null, "native consent model was not delivered");
+    Assert(ui.Request!.Title == "JoltIQ — permission requested", "signed title changed");
+    Assert(ui.Request.Body == "Disable Contoso PDF Preview and safely restart Outlook. Allow this session?", "signed body changed");
+    Assert(ui.Request.AddinName == "Contoso PDF Preview" && ui.Request.AddinProgId == "Contoso.PdfPreview", "signed add-in identity changed");
+    Assert(ui.ActiveMessage == "JoltIQ support is active on this PC — STOP ends control immediately.", "signed banner changed");
+});
+
 await TA("runtime ignores a duplicate while the original command is still running", async () =>
 {
     using var harness = new RuntimeHarness();
@@ -343,12 +366,17 @@ sealed class RuntimeHarness : IDisposable
 
     public void EnqueuePoll(params JsonObject[] envelopes) => _handler.Enqueue(envelopes);
 
-    public JsonObject SessionBegin(string sessionId) => Envelope(new JsonObject
+    public JsonObject SessionBegin(string sessionId, JsonObject? requestDetails = null)
     {
+        var body = new JsonObject
+        {
         ["type"] = "session.begin", ["session_id"] = sessionId, ["device_id"] = "device-1",
         ["issued_at"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds(), ["expires_at"] = DateTimeOffset.UtcNow.AddMinutes(5).ToUnixTimeSeconds(),
         ["nonce"] = Guid.NewGuid().ToString("N"),
-    });
+        };
+        if (requestDetails is not null) body["request_details"] = requestDetails;
+        return Envelope(body);
+    }
 
     public JsonObject Action(string commandId, string sessionId, string action, JsonObject parameters) => Envelope(new JsonObject
     {
@@ -399,8 +427,23 @@ sealed class CountingProvider : IActionProvider
 sealed class AcceptingUi : IUserInteraction
 {
     public string CurrentUserDisplayName => "Test User";
-    public Task<bool> AskConsentAsync(string sessionId, string description, TimeSpan timeout, CancellationToken ct) => Task.FromResult(true);
-    public void SessionStarted(string sessionId, Action stopRequested) { }
+    public Task<bool> AskConsentAsync(string sessionId, NativeConsentRequest request, TimeSpan timeout, CancellationToken ct) => Task.FromResult(true);
+    public void SessionStarted(string sessionId, string activeMessage, Action stopRequested) { }
+    public void SessionEnded(string sessionId, string reason) { }
+    public void ActionPerformed(string sessionId, string summary) { }
+}
+
+sealed class CapturingUi : IUserInteraction
+{
+    public NativeConsentRequest? Request { get; private set; }
+    public string? ActiveMessage { get; private set; }
+    public string CurrentUserDisplayName => "Test User";
+    public Task<bool> AskConsentAsync(string sessionId, NativeConsentRequest request, TimeSpan timeout, CancellationToken ct)
+    {
+        Request = request;
+        return Task.FromResult(true);
+    }
+    public void SessionStarted(string sessionId, string activeMessage, Action stopRequested) => ActiveMessage = activeMessage;
     public void SessionEnded(string sessionId, string reason) { }
     public void ActionPerformed(string sessionId, string summary) { }
 }

@@ -37,8 +37,10 @@ sealed class AutoUi(bool accept) : IUserInteraction
 {
     public AgentRuntime? Runtime;
     public bool StopAfterFirstAction;
-    public Task<bool> AskConsentAsync(string sessionId, string description, TimeSpan timeout, CancellationToken ct) => Task.FromResult(accept);
-    public void SessionStarted(string sessionId, Action stopRequested) => Console.WriteLine($"[banner] session {sessionId} active");
+    public Task<bool> AskConsentAsync(string sessionId, NativeConsentRequest request, TimeSpan timeout, CancellationToken ct)
+        => Task.FromResult(accept);
+    public void SessionStarted(string sessionId, string activeMessage, Action stopRequested)
+        => Console.WriteLine($"[banner] {activeMessage}");
     public void SessionEnded(string sessionId, string reason) => Console.WriteLine($"[banner] session {sessionId} ended: {reason}");
     public void ActionPerformed(string sessionId, string summary)
     {

@@ -207,10 +207,13 @@ def queue_command(db: Session, device: Device, *, action: str, params: dict, ses
 
 
 def session_begin_envelope(device: Device, s: SupportSession) -> dict:
-    return sign_envelope({"type": "session.begin", "session_id": str(s.id), "device_id": str(device.id),
-                          "requested_by": "JoltIQ support session", "consent": s.consent or {},
-                          "issued_at": int(utcnow().timestamp()), "expires_at": int(s.expires_at.timestamp()) if s.expires_at else None,
-                          "nonce": new_token(12)})
+    body = {"type": "session.begin", "session_id": str(s.id), "device_id": str(device.id),
+            "requested_by": "JoltIQ support session", "consent": s.consent or {},
+            "issued_at": int(utcnow().timestamp()), "expires_at": int(s.expires_at.timestamp()) if s.expires_at else None,
+            "nonce": new_token(12)}
+    if s.request_details:
+        body["request_details"] = s.request_details
+    return sign_envelope(body)
 
 
 def pending_for(db: Session, device: Device) -> list[dict]:

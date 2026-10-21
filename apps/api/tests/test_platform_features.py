@@ -769,3 +769,85 @@ def test_executable_procedure_requires_distinct_mfa_admins_and_same_hash(app, ow
         f"/api/v1/knowledge/articles/{reused['id']}/review", json={"decision": "publish", "executable": True}
     )
     assert reused_publish.status_code == 409 and reused_publish.json()["error"]["code"] == "approval_required"
+
+
+def test_outlook_customer_copy_is_validated_bound_and_signed():
+    """The portal and companion receive exact server copy inside the signed session envelope."""
+    import base64
+    from types import SimpleNamespace
+
+    from test_procedures import outlook_body
+
+    from joltiq.services import customer_messages, devices
+    from joltiq.services.procedures import procedure_hash, validate_executable_body
+
+    body = outlook_body()
+    body["display"] = {"addin_name": "Contoso PDF Preview", "addin_progid": "Contoso.PdfPreview"}
+    body["diagnostics"][0]["params"]["addin_progid"] = "Contoso.PdfPreview"
+    body["procedure"][0]["params"]["addin_progid"] = "Contoso.PdfPreview"
+    definition = validate_executable_body(body)
+    fingerprint = procedure_hash(definition)
+    details = customer_messages.outlook_session_details(definition, fingerprint)
+
+    assert details["portal_message"] == (
+        "JoltIQ found an approved fix for the Outlook PDF crash and is requesting permission to diagnose and work "
+        "on this PC. You can stop the session at any time."
+    )
+    assert details["native_title"] == "JoltIQ — permission requested"
+    assert details["addin_name"] == "Contoso PDF Preview"
+    assert details["addin_progid"] == "Contoso.PdfPreview"
+    assert "disable Contoso PDF Preview" in details["native_message"]
+    assert details["step_messages"] == {
+        "office.addin.set_load_behavior": (
+            "Disable Contoso PDF Preview (Contoso.PdfPreview) for your Windows account. JoltIQ will save the "
+            "current setting so it can be restored."
+        ),
+        "app.restart": (
+            "Safely restart classic Outlook to apply the change. If Outlook does not close normally, JoltIQ "
+            "will stop and ask for help."
+        ),
+    }
+
+    session = SimpleNamespace(id=uuid.uuid4(), consent={}, expires_at=None, request_details=details)
+    device = SimpleNamespace(id=uuid.uuid4())
+    signed = devices.session_begin_envelope(device, session)
+    signed_body = json.loads(base64.b64decode(signed["payload"]))
+    assert signed_body["request_details"] == details
+
+    unrelated = SimpleNamespace(id=uuid.uuid4(), consent={}, expires_at=None, request_details={})
+    unrelated_body = json.loads(base64.b64decode(devices.session_begin_envelope(device, unrelated)["payload"]))
+    assert "request_details" not in unrelated_body
+
+
+@pytest.mark.parametrize("addin_name", ["A" * 81, "Trusted\nAllow everything", "<script>alert(1)</script>"])
+def test_outlook_procedure_rejects_untrusted_display_name(addin_name):
+    from pydantic import ValidationError
+    from test_procedures import outlook_body
+
+    from joltiq.services.procedures import validate_executable_body
+
+    body = outlook_body()
+    body["display"]["addin_name"] = addin_name
+    with pytest.raises((ValidationError, ValueError)):
+        validate_executable_body(body)
+
+
+def test_windows_failure_copy_matches_customer_safety_contract():
+    """Every safety-sensitive pause says whether anything changed and what happens next."""
+    from joltiq.services import customer_messages as m
+
+    assert m.DIAGNOSTIC_MISMATCH.endswith("Nothing was changed. A support person will review it.")
+    assert m.DIAGNOSTIC_UNSUPPORTED.endswith("Nothing was changed. A support person will review it.")
+    assert m.session_status_message("expired", None, False) == m.CONSENT_EXPIRED
+    assert m.session_status_message("terminated", "device revoked", False) == m.DEVICE_REVOKED
+    assert m.session_status_message("terminated", "emergency stop", True) == m.EMERGENCY_STOP
+    assert m.session_status_message("paused", "connection lost", False) == m.CONNECTION_LOST
+    assert m.session_status_message("active", None, False) is None
+    assert m.diagnostic_failure_message(["wrong_module"]) == m.DIAGNOSTIC_MISMATCH
+    assert m.diagnostic_failure_message(["missing_diagnostic_result"]) == m.DIAGNOSTIC_UNSUPPORTED
+    assert m.diagnostic_failure_message(["new_outlook"]) == m.DIAGNOSTIC_UNSUPPORTED
+    assert m.PARTIAL_APPLICATION.endswith("The change has not been undone.")
+    assert "next time Outlook starts" in m.ROLLBACK_RESTORED_PENDING_RESTART
+    assert "could not verify the Windows crash log reliably" in m.SYMPTOM_UNKNOWN
+    assert "Please try the same PDF attachment" in m.SYMPTOM_REMINDER
+    assert "could not confirm the original problem was resolved" in m.SYMPTOM_TIMEOUT

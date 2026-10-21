@@ -189,7 +189,7 @@ def terminate(db: Session, s: SupportSession, *, by_kind: str, user_id=None, rea
     if s.state == "terminated":
         return
     release_lease(db, s, reason)
-    s.state, s.terminated_at = "terminated", utcnow()
+    s.state, s.terminated_at, s.pause_reason = "terminated", utcnow(), reason[:200]
     from .computer_use import stop_for_session
 
     stop_for_session(db, s, f"Session ended: {reason}")
@@ -216,11 +216,14 @@ def awaiting_user_auth(db: Session, s: SupportSession, kind: str) -> None:
 
 
 def ser(s: SupportSession, lease: ControlLease | None = None) -> dict[str, Any]:
+    from .customer_messages import session_status_message
+
     return {"id": str(s.id), "kind": s.kind, "state": s.state, "ticket_id": str(s.ticket_id) if s.ticket_id else None,
             "device_id": str(s.device_id) if s.device_id else None, "allowed_domains": s.allowed_domains, "consent": s.consent,
             "expires_at": s.expires_at.isoformat() if s.expires_at else None, "emergency_stopped": s.emergency_stopped,
             "recording_enabled": s.recording_enabled, "pause_reason": s.pause_reason, "run_id": str(s.run_id) if s.run_id else None,
             "request_details": s.request_details,
+            "status_message": session_status_message(s.state, s.pause_reason, s.emergency_stopped),
             "control": {"holder_kind": lease.holder_kind, "holder_user_id": str(lease.holder_user_id) if lease.holder_user_id else None,
                         "expires_at": lease.expires_at.isoformat()} if lease else None,
             "created_at": s.created_at.isoformat()}

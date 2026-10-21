@@ -123,24 +123,24 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
     // ---- IUserInteraction ----
     public string CurrentUserDisplayName => Environment.UserName;
 
-    public Task<bool> AskConsentAsync(string sessionId, string description, TimeSpan timeout, CancellationToken ct)
+    public Task<bool> AskConsentAsync(string sessionId, NativeConsentRequest request, TimeSpan timeout, CancellationToken ct)
     {
         var tcs = new TaskCompletionSource<bool>();
         _ui.Post(_ =>
         {
-            using var dlg = new ConsentForm(description, timeout);
+            using var dlg = new ConsentForm(request, timeout);
             tcs.TrySetResult(dlg.ShowDialog() == DialogResult.Yes);
         }, null);
         return tcs.Task;
     }
 
-    public void SessionStarted(string sessionId, Action stopRequested) => _ui.Post(_ =>
+    public void SessionStarted(string sessionId, string activeMessage, Action stopRequested) => _ui.Post(_ =>
     {
         _activeSession = sessionId;
-        _banner = new SessionBanner(stopRequested);
+        _banner = new SessionBanner(activeMessage, stopRequested);
         _banner.Show();
         _icon.Icon = SystemIcons.Warning;
-        _icon.ShowBalloonTip(5000, "Support session active", "Your support team's assistant can now run approved actions. Click STOP on the banner at any time.", ToolTipIcon.Warning);
+        _icon.ShowBalloonTip(5000, "Support session active", activeMessage, ToolTipIcon.Warning);
     }, null);
 
     public void SessionEnded(string sessionId, string reason) => _ui.Post(_ =>
@@ -165,14 +165,19 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
 
 internal sealed class ConsentForm : Form
 {
-    public ConsentForm(string description, TimeSpan timeout)
+    public ConsentForm(NativeConsentRequest request, TimeSpan timeout)
     {
-        Text = "JoltIQ — permission requested"; TopMost = true; FormBorderStyle = FormBorderStyle.FixedDialog; StartPosition = FormStartPosition.CenterScreen;
-        Width = 520; Height = 260; MaximizeBox = MinimizeBox = false;
-        var lbl = new Label { Text = description + "\n\nAllow this support session?", Dock = DockStyle.Top, Height = 140, Padding = new Padding(16), Font = new Font(Font.FontFamily, 10) };
-        var allow = new Button { Text = "Allow", DialogResult = DialogResult.Yes, Width = 120, Left = 250, Top = 160 };
-        var deny = new Button { Text = "Deny", DialogResult = DialogResult.No, Width = 120, Left = 380, Top = 160 };
-        Controls.AddRange(new Control[] { lbl, allow, deny });
+        Text = request.Title; TopMost = true; FormBorderStyle = FormBorderStyle.FixedDialog; StartPosition = FormStartPosition.CenterScreen;
+        Width = 560; Height = 300; MaximizeBox = MinimizeBox = false;
+        var body = new Label { Text = request.Body, Dock = DockStyle.Top, Height = 120, Padding = new Padding(16), Font = new Font(Font.FontFamily, 10) };
+        var identity = new Label {
+            Text = request.AddinName is null ? "" : $"Add-in: {request.AddinName}\nID: {request.AddinProgId}",
+            Dock = DockStyle.Top, Height = request.AddinName is null ? 0 : 54, Padding = new Padding(16, 2, 16, 2),
+            ForeColor = SystemColors.GrayText,
+        };
+        var allow = new Button { Text = "Allow", DialogResult = DialogResult.Yes, Width = 120, Left = 290, Top = 205 };
+        var deny = new Button { Text = "Deny", DialogResult = DialogResult.No, Width = 120, Left = 420, Top = 205 };
+        Controls.AddRange(new Control[] { identity, body, allow, deny });
         AcceptButton = deny; CancelButton = deny;  // safe default: Enter/Esc deny
         var t = new System.Windows.Forms.Timer { Interval = (int)timeout.TotalMilliseconds };
         t.Tick += (_, _) => { t.Stop(); DialogResult = DialogResult.No; };  // no answer = denied
@@ -182,15 +187,16 @@ internal sealed class ConsentForm : Form
 
 internal sealed class SessionBanner : Form
 {
-    private readonly Label _last = new() { AutoSize = true, ForeColor = Color.White, Top = 30, Left = 12 };
-    public SessionBanner(Action stop)
+    private readonly Label _last = new() { AutoSize = true, ForeColor = Color.White, Top = 50, Left = 12 };
+    public SessionBanner(string activeMessage, Action stop)
     {
         FormBorderStyle = FormBorderStyle.None; TopMost = true; ShowInTaskbar = false; BackColor = Color.FromArgb(180, 30, 30);
-        Width = 460; Height = 60; StartPosition = FormStartPosition.Manual;
+        Width = 720; Height = 80; StartPosition = FormStartPosition.Manual;
         var wa = Screen.PrimaryScreen!.WorkingArea; Left = wa.Right - Width - 12; Top = wa.Top + 12;
-        Controls.Add(new Label { Text = "● JoltIQ support session is ACTIVE on this PC", ForeColor = Color.White, AutoSize = true, Top = 8, Left = 12, Font = new Font(Font, FontStyle.Bold) });
+        Controls.Add(new Label { Text = activeMessage, ForeColor = Color.White, AutoSize = false, Width = Width - 112,
+            Height = 40, Top = 8, Left = 12, Font = new Font(Font, FontStyle.Bold) });
         Controls.Add(_last);
-        var b = new Button { Text = "STOP", Width = 80, Height = 40, Left = Width - 92, Top = 10, BackColor = Color.White };
+        var b = new Button { Text = "STOP", Width = 80, Height = 48, Left = Width - 92, Top = 12, BackColor = Color.White };
         b.Click += (_, _) => stop();
         Controls.Add(b);
     }

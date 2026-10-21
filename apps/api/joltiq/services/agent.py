@@ -533,10 +533,11 @@ def h_diagnose(db, run):
         if article_id:
             candidate = next(p for p in desktop if p["article_id"] == article_id)
             article = db.get(KnowledgeArticle, uuid.UUID(article_id))
-            from .customer_messages import DIAGNOSTIC_DEVICE_CONSENT, DIAGNOSTIC_PORTAL_CONSENT
+            from .customer_messages import outlook_session_details
             from .procedures import load_published_procedure
 
             procedure = load_published_procedure(article)
+            consent_details = outlook_session_details(procedure, article.procedure_hash)
             t = _ticket(db, run)
             if not t.device_id:
                 _escalate(db, run, "Approved Windows procedure matched, but no enrolled device is linked to this ticket")
@@ -544,14 +545,11 @@ def h_diagnose(db, run):
             s = sessions.start(
                 db, run.org_id, kind="desktop", owner_id=t.requester_id or run.started_by, ticket_id=t.id,
                 device_id=t.device_id, run_id=run.id,
-                request_details={"purpose": procedure.messages["diagnostic_consent"], "addin_name": procedure.display.addin_name,
-                                 "addin_progid": procedure.display.addin_progid, "procedure_hash": article.procedure_hash,
-                                 "read_only": True, "portal_message": DIAGNOSTIC_PORTAL_CONSENT,
-                                 "device_message": DIAGNOSTIC_DEVICE_CONSENT},
+                request_details=consent_details,
             )
             _ctx_update(run, candidate_procedure=candidate, diagnostic_session_id=str(s.id), candidate_hypothesis=selected.hypothesis)
             transition(db, run, R.AWAITING_DIAGNOSTIC_CONSENT, "approved candidate selected; awaiting read-only diagnostic consent")
-            _say(db, run, DIAGNOSTIC_PORTAL_CONSENT, data={"session_id": str(s.id), "kind": "diagnostic_consent"})
+            _say(db, run, consent_details["portal_message"], data={"session_id": str(s.id), "kind": "diagnostic_consent"})
             _set_ticket(db, run, TS.AWAITING_APPROVAL, "waiting for diagnostic consent")
             run.paused_for = "diagnostic_consent"
             return
@@ -586,7 +584,8 @@ def h_awaiting_diagnostic_consent(db, run):
         return
     if not (s.consent or {}).get("device_local_consent"):
         if not run.context.get("device_consent_message_sent"):
-            _say(db, run, DIAGNOSTIC_DEVICE_CONSENT, data={"session_id": str(s.id), "kind": "device_diagnostic_consent"})
+            _say(db, run, (s.request_details or {}).get("device_wait_message", DIAGNOSTIC_DEVICE_CONSENT),
+                 data={"session_id": str(s.id), "kind": "device_diagnostic_consent"})
             _ctx_update(run, device_consent_message_sent=True)
         run.paused_for = "diagnostic_device_consent"
         return
@@ -600,7 +599,7 @@ def h_awaiting_diagnostic_consent(db, run):
 
 
 def h_collecting_diagnostics(db, run):
-    from .customer_messages import DIAGNOSTIC_UNSUPPORTED
+    from .customer_messages import diagnostic_failure_message
     from .procedures import load_published_procedure
 
     ids = [uuid.UUID(x) for x in run.context.get("procedure_diag_commands", [])]
@@ -614,7 +613,7 @@ def h_collecting_diagnostics(db, run):
     decision = evaluate_diagnostic_gate(procedure, results)
     _ctx_update(run, diagnostic_decision={"allowed": decision.allowed, "reasons": decision.reasons}, diagnostic_results=results)
     if not decision.allowed:
-        _say(db, run, DIAGNOSTIC_UNSUPPORTED)
+        _say(db, run, diagnostic_failure_message(decision.reasons))
         _escalate(db, run, "Approved procedure did not pass diagnostic gate: " + ", ".join(decision.reasons))
         return
     transition(db, run, R.PLANNING, "canonical diagnostic gate passed")
@@ -760,7 +759,10 @@ def h_plan(db, run):
 
 def build_canonical_plan(db, run, article: KnowledgeArticle, procedure, session: SupportSession) -> AgentPlan:
     """Persist exact published remediation steps; no model-authored field can enter the plan."""
+    from .customer_messages import outlook_session_details
+
     steps = [step.model_dump(mode="json") for step in procedure.procedure]
+    approval_copy = outlook_session_details(procedure, article.procedure_hash)["step_messages"]
     phash = sha256_hex(canonical_json(steps))
     rev = len(db.execute(select(AgentPlan.id).where(AgentPlan.run_id == run.id)).all()) + 1
     candidate = run.context["candidate_procedure"]
@@ -790,7 +792,7 @@ def build_canonical_plan(db, run, article: KnowledgeArticle, procedure, session:
         spec = ACTIONS[ps.action]
         approvals.request(
             db, org_id=run.org_id, run_id=run.id, plan_id=plan.id, step=ps, plan_hash=phash,
-            ticket_id=run.ticket_id, session_id=session.id, reason=ps.rationale, effects=spec.effects,
+            ticket_id=run.ticket_id, session_id=session.id, reason=approval_copy[ps.action], effects=spec.effects,
             approver_roles=["customer"], requested_for_user_id=_ticket(db, run).requester_id,
         )
     _ctx_update(run, current_plan_id=str(plan.id))
@@ -1531,7 +1533,11 @@ def run_detail(db: Session, run: AgentRun, *, customer_view: bool) -> dict[str, 
     out = {
         "id": str(run.id), "ticket_id": str(run.ticket_id) if run.ticket_id else None, "state": run.state, "paused_for": run.paused_for,
         "retries": run.retries, "max_retries": run.max_retries, "cost_usd": round(run.cost_usd or 0, 4), "outcome_summary": run.outcome_summary,
-        "outcome_stage": run.outcome_stage,
+        "outcome_stage": run.outcome_stage, "symptom_response": ctx.get("symptom_response"),
+        "recovery": ({"rollback_status": (ctx.get("partial_application") or {}).get("rollback_status"),
+                      "change_remains": (ctx.get("partial_application") or {}).get("rollback_status")
+                      not in ("RESTORED", "RESTORED_PENDING_RESTART")}
+                     if ctx.get("partial_application") else None),
         "correlation_id": run.correlation_id, "created_at": run.created_at.isoformat(),
         "messages": [{"id": str(m.id), "role": m.role, "content": m.content, "data": m.data, "at": m.created_at.isoformat()} for m in msgs if m.role in ("user", "assistant")],
         "transitions": [{"from": t.from_state, "to": t.to_state, "reason": t.reason, "at": t.created_at.isoformat()} for t in trans],

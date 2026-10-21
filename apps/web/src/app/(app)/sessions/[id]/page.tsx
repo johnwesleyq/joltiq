@@ -67,7 +67,13 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
     {d.state === "pending_consent" && <div className="panel max-w-[640px] space-y-4 p-5">
       <h2 className="text-xl font-bold">Allow the assistant to work {d.kind === "browser" ? "in a web app" : "on your computer"}?</h2>
       {d.kind === "browser" ? <p>It will use a separate, isolated browser that can only open: <b>{d.allowed_domains.join(", ")}</b>. It can&apos;t see your own browser, passwords, or other tabs.</p>
-        : <p>The companion app on your computer will show a confirmation and a red banner while the session is active. You can press STOP there at any time.</p>}
+        : <>
+          <p>{d.request_details?.portal_message ?? "The companion app on your computer will ask before this session starts. You can press STOP there at any time."}</p>
+          {(d.request_details?.addin_name || d.request_details?.addin_progid) && <dl className="grid gap-1 rounded-md border border-line bg-paper p-3 text-sm sm:grid-cols-[8rem_1fr]">
+            <dt className="text-slate">Named add-in</dt><dd>{d.request_details.addin_name}</dd>
+            <dt className="text-slate">Add-in ID</dt><dd className="break-all font-mono text-xs">{d.request_details.addin_progid}</dd>
+          </dl>}
+        </>}
       <p className="text-sm text-slate">Sensitive steps still need your approval one by one. If a sign-in is needed, you type it yourself; the assistant pauses and can&apos;t see it.</p>
       {d.can_consent ? <>
         <div className="flex flex-wrap gap-4">
@@ -122,8 +128,10 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
     </div>}
 
     {d.kind === "desktop" && d.state !== "pending_consent" && <div className="panel max-w-[640px] p-5 text-sm">
-      <p>{d.consent?.device_local_consent ? "The person at the computer accepted the session. Actions run through the companion app, which shows a banner and a STOP button."
-        : d.state === "terminated" ? "This session has ended." : "Waiting for the person at the computer to accept the session in the companion app."}</p>
+      <p>{d.status_message ?? (d.consent?.device_local_consent
+        ? d.request_details?.active_message ?? "The person at the computer accepted the session. Actions run through the companion app, which shows a STOP button."
+        : d.state === "terminated" ? "This session has ended."
+          : d.request_details?.device_wait_message ?? "Waiting for the person at the computer to accept the session in the companion app.")}</p>
       {d.state !== "terminated" && <button className="btn btn-ghost mt-3" onClick={() => end.mutate(undefined)}>End session</button>}
     </div>}
     {d.kind === "desktop" && d.state !== "pending_consent" && <div className="mt-6"><DrivePanel sessionId={id} ready={d.state === "active" && !!d.consent?.device_local_consent} /></div>}

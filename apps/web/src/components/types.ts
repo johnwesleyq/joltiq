@@ -18,7 +18,9 @@ export type Approval = { id: string; status: string; action: string; risk: strin
   approver_roles: string[]; expires_at: string; decided_at: string | null; ticket_id?: string | null; run_id?: string | null; can_decide?: boolean };
 export type Run = {
   id: string; ticket_id: string; state: string; paused_for: string | null; retries: number; max_retries: number; cost_usd: number;
-  outcome_summary: string | null; messages: { id: string; role: string; content: string; data: Record<string, unknown>; at: string }[];
+  outcome_summary: string | null; outcome_stage: string; symptom_response: { result: string; at: string } | null;
+  recovery: { rollback_status: string | null; change_remains: boolean } | null;
+  messages: { id: string; role: string; content: string; data: Record<string, unknown>; at: string }[];
   transitions: { from: string; to: string; reason: string; at: string }[];
   plans: { id: string; revision: number; summary: string; hypothesis: string; risks: string[]; status: string; steps: Step[]; citations: Evidence[] }[];
   evidence: Evidence[]; hypotheses: { statement: string; confidence: number; evidence_ids: string[]; grounded: boolean }[];
@@ -32,5 +34,7 @@ export type Session = {
   consent: Record<string, unknown> | null; expires_at: string | null; emergency_stopped: boolean; pause_reason: string | null; run_id: string | null;
   control: { holder_kind: string; holder_user_id: string | null; expires_at: string } | null; created_at: string;
   can_consent?: boolean; you_hold_control?: boolean;
+  request_details: { portal_message?: string; device_wait_message?: string; active_message?: string; addin_name?: string; addin_progid?: string };
+  status_message?: string | null;
   browser?: { url?: string; title?: string; auth_required?: boolean; auth_kind?: string; blocked_requests?: string[]; error?: string };
 };

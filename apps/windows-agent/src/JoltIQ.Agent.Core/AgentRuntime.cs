@@ -17,13 +17,14 @@ public interface IActionProvider
 /// <summary>User-facing UI (Windows: tray + consent dialog + always-on-top session banner).</summary>
 public interface IUserInteraction
 {
-    Task<bool> AskConsentAsync(string sessionId, string description, TimeSpan timeout, CancellationToken ct);
-    void SessionStarted(string sessionId, Action stopRequested);
+    Task<bool> AskConsentAsync(string sessionId, NativeConsentRequest request, TimeSpan timeout, CancellationToken ct);
+    void SessionStarted(string sessionId, string activeMessage, Action stopRequested);
     void SessionEnded(string sessionId, string reason);
     void ActionPerformed(string sessionId, string summary);
     string CurrentUserDisplayName { get; }
 }
 
+public sealed record NativeConsentRequest(string Title, string Body, string? AddinName, string? AddinProgId, string ActiveMessage);
 public sealed record RuntimeLogEntry(DateTimeOffset At, string Level, string Message);
 public sealed record StopTiming(string SessionId, DateTimeOffset RequestedAt, long MonotonicTimestamp);
 
@@ -147,7 +148,7 @@ public sealed class AgentRuntime
         switch (type)
         {
             case "session.begin":
-                await BeginSessionAsync(sessionId!, exp, ct);
+                await BeginSessionAsync(sessionId!, exp, b, ct);
                 break;
             case "session.end":
                 if (sessionId is not null && _sessions.TryGetValue(sessionId, out var s)) EndLocal(s, "ended by server");
@@ -161,20 +162,33 @@ public sealed class AgentRuntime
         }
     }
 
-    private async Task BeginSessionAsync(string sessionId, long? exp, CancellationToken ct)
+    private async Task BeginSessionAsync(string sessionId, long? exp, JsonElement envelope, CancellationToken ct)
     {
-        var accepted = await _ui.AskConsentAsync(sessionId,
-            "Your support team's JoltIQ assistant is asking to run diagnostics and approved fixes on this computer. " +
-            "You will see a banner while it is active and can stop it at any time.", ConsentTimeout, ct);
+        var request = ConsentRequest(envelope);
+        var accepted = await _ui.AskConsentAsync(sessionId, request, ConsentTimeout, ct);
         var s = new LocalSession { SessionId = sessionId, ExpiresAt = exp, Active = accepted };
         _sessions[sessionId] = s;
         await _client.SendAsync(HttpMethod.Post, $"/sessions/{sessionId}/local-consent", new { accepted, user_display_name = _ui.CurrentUserDisplayName }, ct);
         if (accepted)
         {
-            _ui.SessionStarted(sessionId, () => _ = StopFromDeviceAsync(sessionId));
+            _ui.SessionStarted(sessionId, request.ActiveMessage, () => _ = StopFromDeviceAsync(sessionId));
             L("info", $"session {sessionId} accepted locally");
         }
         else L("info", $"session {sessionId} declined locally");
+    }
+
+    private static NativeConsentRequest ConsentRequest(JsonElement envelope)
+    {
+        const string title = "JoltIQ — permission requested";
+        const string body = "Your support team's JoltIQ assistant is asking to run diagnostics and approved fixes on this computer. " +
+                            "You will see a banner while it is active and can stop it at any time.";
+        const string active = "JoltIQ support is active on this PC — STOP ends control immediately.";
+        if (!envelope.TryGetProperty("request_details", out var details) || details.ValueKind != JsonValueKind.Object)
+            return new(title, body, null, null, active);
+        string? Read(string key) => details.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString() : null;
+        return new(Read("native_title") ?? title, Read("native_message") ?? body, Read("addin_name"), Read("addin_progid"),
+            Read("active_message") ?? active);
     }
 
     /// <summary>Kill switch: local cancellation happens first, so it works even if the server is unreachable.</summary>

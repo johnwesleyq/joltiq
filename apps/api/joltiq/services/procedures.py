@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..models import KnowledgeArticle
 from ..security.crypto import canonical_json, sha256_hex
@@ -82,8 +82,15 @@ class RollbackDefinition(StrictModel):
 
 
 class ProcedureDisplay(StrictModel):
-    addin_name: str = Field(min_length=1, max_length=200)
+    addin_name: str = Field(min_length=1, max_length=80)
     addin_progid: str = Field(pattern=r"^[A-Za-z0-9_.-]{1,120}$")
+
+    @field_validator("addin_name")
+    @classmethod
+    def safe_native_display_name(cls, value: str) -> str:
+        if value != value.strip() or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 .,&()+'/_-]{0,79}", value):
+            raise ValueError("addin_name contains unsafe native-dialog text")
+        return value
 
 
 class ProcedureDefinition(StrictModel):

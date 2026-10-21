@@ -11,7 +11,29 @@ const PAUSE_TEXT: Record<string, string> = {
   consent: "Waiting for permission to start the session.", device_consent: "Waiting for the person at the computer to accept the session.",
   user_auth: "Waiting for a sign-in in the session viewer. The assistant can't see what's typed.", human_control: "A person has control of the session.",
   device_result: "Waiting for the computer to report back.", verification: "Checking the result independently…", diagnostics: "Collecting diagnostics from the computer…",
+  diagnostic_consent: "Waiting for you to allow the read-only Outlook diagnosis.",
+  diagnostic_device_consent: "Waiting for the person at the PC to accept the signed JoltIQ prompt.",
+  procedure_diagnostics: "Checking Outlook, the named add-in, company policy, and matching crash evidence…",
+  symptom_check: "The fix is applied and checked. The ticket stays open until the original PDF problem is tested.",
+  symptom_observation: "Watching the Windows crash log for 60 seconds after your PDF test…",
 };
+
+const OUTCOMES: Record<string, { label: string; detail: string; tone: string }> = {
+  UNCONFIRMED: { label: "Diagnosis in progress", detail: "JoltIQ has not confirmed a fix yet.", tone: "border-slate/40 bg-paper" },
+  FIX_PARTIALLY_APPLIED: { label: "Part of the fix changed this PC", detail: "A change completed, but the full fix did not.", tone: "border-stop bg-stop-soft" },
+  RESTORED_PENDING_RESTART: { label: "Setting restored; Outlook restart pending", detail: "The original setting is back and will take effect the next time Outlook starts.", tone: "border-jolt bg-jolt-soft" },
+  FIX_APPLIED_VERIFIED: { label: "Fix applied and checked", detail: "The setting and Outlook restart passed their checks. The original PDF problem still needs confirmation.", tone: "border-jolt bg-jolt-soft" },
+  RESOLVED_VERIFIED: { label: "Problem resolved and verified", detail: "The PDF opened and no matching Outlook crash was recorded during the observation window.", tone: "border-verify bg-verify-soft" },
+  VERIFICATION_FAILED: { label: "A support person needs to review this", detail: "JoltIQ did not claim the problem was resolved.", tone: "border-stop bg-stop-soft" },
+};
+
+function OutcomeCard({ run }: { run: Run }) {
+  const outcome = OUTCOMES[run.outcome_stage] ?? OUTCOMES.UNCONFIRMED!;
+  return <div className={`border-l-4 px-4 py-3 ${outcome.tone}`} aria-label="Support outcome">
+    <div className="font-bold">{outcome.label}</div>
+    <p className="mt-0.5 text-sm text-slate">{outcome.detail}</p>
+  </div>;
+}
 
 export function ApprovalCard({ a, staff }: { a: Approval; staff: boolean }) {
   const [comment, setComment] = useState("");
@@ -38,6 +60,8 @@ export default function RunPanel({ run, staff }: { run: Run; staff: boolean }) {
   const v = run.verifications.at(-1);
   const escalate = useAct(() => api(`/agents/runs/${run.id}/escalate`, { json: { reason: "Technician took over" } }), [["run"], ["ticket"]]);
   const cancel = useAct(() => api(`/agents/runs/${run.id}/cancel`, { method: "POST" }), [["run"], ["ticket"]]);
+  const symptom = useAct((result: "pdf_opened" | "still_crashes" | "cannot_test") =>
+    api(`/agents/runs/${run.id}/symptom-check`, { json: { result } }), [["run"], ["ticket"]]);
   const active = !["RESOLVED", "ESCALATED", "FAILED", "CANCELLED", "PARTIALLY_RESOLVED"].includes(run.state);
   return <section className="space-y-5">
     <div className="flex flex-wrap items-center gap-2">
@@ -45,7 +69,30 @@ export default function RunPanel({ run, staff }: { run: Run; staff: boolean }) {
       {active && !run.paused_for && <span className="pulse text-sm text-slate">working…</span>}
       {run.uses_test_fixture_model && <span className="rounded bg-paper px-1.5 py-0.5 text-xs text-slate" title="No AI provider is configured; a deterministic local test model produced these steps.">Local test model</span>}
     </div>
+    <OutcomeCard run={run} />
     {run.paused_for && <p className="rounded-md bg-jolt-soft px-3 py-2 text-sm">{PAUSE_TEXT[run.paused_for] ?? `Paused: ${run.paused_for}`}</p>}
+
+    {run.outcome_stage === "FIX_APPLIED_VERIFIED" && run.paused_for === "symptom_check" && !run.symptom_response &&
+      <div className="rounded-md border-2 border-ink p-4" aria-labelledby={`symptom-${run.id}`}>
+        <h3 id={`symptom-${run.id}`} className="font-bold">Please open the same PDF attachment now. What happened?</h3>
+        <p className="mt-1 text-sm text-slate">Your answer starts an independent Windows crash-log check. It does not resolve the ticket by itself.</p>
+        <ErrorNote error={symptom.error} />
+        <div className="mt-3 grid gap-2 sm:grid-cols-3">
+          <button className="btn btn-primary" disabled={symptom.isPending} onClick={() => symptom.mutate("pdf_opened")}>The PDF opens now</button>
+          <button className="btn btn-ghost" disabled={symptom.isPending} onClick={() => symptom.mutate("still_crashes")}>Outlook still closes</button>
+          <button className="btn btn-ghost" disabled={symptom.isPending} onClick={() => symptom.mutate("cannot_test")}>I can&apos;t test this now</button>
+        </div>
+      </div>}
+
+    {run.recovery && <div className="rounded-md border border-stop bg-stop-soft p-4" aria-label="Recovery status">
+      <h3 className="font-bold">Recovery status</h3>
+      <p className="mt-1 text-sm">{run.recovery.change_remains
+        ? "The change remains in place until rollback is verified."
+        : run.recovery.rollback_status === "RESTORED_PENDING_RESTART"
+          ? "The original setting is restored. It will take effect the next time Outlook starts."
+          : "The original setting was restored and verified."}</p>
+      {run.recovery.rollback_status && <p className="mt-1 text-xs text-slate">Rollback: {run.recovery.rollback_status.replaceAll("_", " ").toLowerCase()}</p>}
+    </div>}
 
     {plan && <div>
       <h3 className="font-bold">Plan <span className="font-normal text-slate">· revision {plan.revision}</span></h3>
