@@ -2,7 +2,7 @@
 FROM mcr.microsoft.com/playwright/python:v1.56.0-noble
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
-RUN pip install --no-cache-dir fastapi==0.115.6 "uvicorn[standard]==0.32.1" playwright==1.56.0 pydantic==2.10.3
+RUN pip install --no-cache-dir fastapi==0.115.6 "uvicorn[standard]==0.32.1" playwright==1.56.0 pydantic==2.10.3 python-multipart==0.0.32
 COPY services/browser-worker /app
 USER pwuser
 EXPOSE 8100

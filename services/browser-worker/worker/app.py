@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import hmac
 import logging
 import os
@@ -28,7 +29,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import urlsplit
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from playwright.async_api import Browser, BrowserContext, Page, Route, async_playwright
 from pydantic import BaseModel, Field
 
@@ -36,6 +37,7 @@ log = logging.getLogger("joltiq.browser")
 TOKEN = os.environ.get("JOLTIQ_BROWSER_WORKER_TOKEN", "dev-browser-worker-token-change-me")
 MAX_SESSIONS = int(os.environ.get("JOLTIQ_BROWSER_MAX_SESSIONS", "8"))
 IDLE_TIMEOUT = int(os.environ.get("JOLTIQ_BROWSER_IDLE_SECONDS", "900"))
+MAX_UPLOAD_BYTES = int(os.environ.get("JOLTIQ_BROWSER_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
 SECRET_SELECTOR = ('input[type=password], input[autocomplete=one-time-code], input[autocomplete="current-password"], '
                    'input[autocomplete="new-password"], input[autocomplete^="cc-"], input[name*="otp" i], input[name*="cvv" i]')
 CAPTCHA_HINTS = re.compile(r"(recaptcha|hcaptcha|turnstile|captcha)", re.I)
@@ -235,6 +237,59 @@ def _resolve(page: Page, selector: str):
     if selector.startswith("text="):
         return page.get_by_text(selector[5:], exact=True)
     return page.locator(selector)
+
+
+def _safe_filename(filename: str) -> str:
+    base = filename.replace("\\", "/").rsplit("/", 1)[-1]
+    return re.sub(r"[^A-Za-z0-9._-]", "_", base)[:120] or "file"
+
+
+async def _upload_refusal(s: Session, error: str, **extra) -> dict[str, Any]:
+    result = {"ok": False, "error": error, **extra, "page": await page_state(s, include_snapshot=False)}
+    s.log.append({"t": time.time(), "actor": "ai", "action": "browser.upload", "ok": False, "error": error})
+    return result
+
+
+@app.post("/sessions/{sid}/upload", dependencies=[Depends(auth)])
+async def upload(
+    sid: str,
+    selector: str = Form(..., max_length=300),
+    filename: str = Form(..., max_length=255),
+    content_type: str = Form(..., max_length=120),
+    sha256: str = Form(..., pattern=r"^[0-9a-fA-F]{64}$"),
+    file: UploadFile = File(...),
+):
+    """Set one API-supplied attachment on one deterministic file input without accepting a host path."""
+    s = get(sid)
+    if s.paused:
+        return await _upload_refusal(s, "session paused")
+    auth_state = await detect_auth(s.page)
+    if auth_state["auth_required"]:
+        return await _upload_refusal(s, "authentication required — handing control to the user",
+                                     auth_required=True, kind=auth_state["kind"])
+
+    data = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(data) > MAX_UPLOAD_BYTES or await file.read(1):
+        return await _upload_refusal(s, f"file size exceeds {MAX_UPLOAD_BYTES} bytes")
+    actual_sha = hashlib.sha256(data).hexdigest()
+    if not hmac.compare_digest(actual_sha, sha256.lower()):
+        return await _upload_refusal(s, "file digest does not match approved attachment")
+
+    loc = _resolve(s.page, selector)
+    if await loc.count() != 1:
+        return await _upload_refusal(s, "selector must match exactly one file input")
+    element = loc.first
+    target = await element.evaluate("e => ({tag: e.tagName.toLowerCase(), type: (e.type || '').toLowerCase()})")
+    if target != {"tag": "input", "type": "file"}:
+        return await _upload_refusal(s, "selector must target a file input")
+    if not await element.is_enabled():
+        return await _upload_refusal(s, "file input is disabled")
+
+    safe_name = _safe_filename(filename)
+    await element.set_input_files({"name": safe_name, "mimeType": content_type, "buffer": data})
+    metadata = {"filename": safe_name, "size": len(data), "sha256": actual_sha}
+    s.log.append({"t": time.time(), "actor": "ai", "action": "browser.upload", "ok": True, "upload": metadata})
+    return {"ok": True, "upload": metadata, "page": await page_state(s, include_snapshot=False)}
 
 
 @app.post("/sessions/{sid}/actions", dependencies=[Depends(auth)])
