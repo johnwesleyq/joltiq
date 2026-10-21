@@ -63,7 +63,7 @@ Tests that replace an external service with a local fixture are marked `@pytest.
 
 The Windows acceptance gate is separate from compilation and simulation. Run `apps/windows-agent/scripts/test-on-windows.ps1` only on authorized disposable Windows 10/11 VMs and retain the evidence described in `docs/operations/windows-outlook-pdf-acceptance.md`. Until that aggregate passes, any installer is unsigned internal-only.
 
-Browser/SaaS automation remains the next product priority after Windows internal acceptance. Consent-bound `browser.upload` is implemented for validated attachments belonging to the same JoltIQ ticket and is tested end to end with real Chromium against the authorized local FieldDesk fixture. Public SaaS compatibility, live-account acceptance, production deployment and external security review remain unproven; see `docs/operations/browser-upload-evidence.md`.
+Browser/SaaS automation remains the next product priority after Windows internal acceptance. Consent-bound `browser.upload` uses a reusable published binding to the attachment explicitly selected by the customer on that ticket; the resolved file is covered by the exact plan and approval. It is tested end to end with real Chromium against the authorized local FieldDesk fixture. Public SaaS compatibility, live-account acceptance, production deployment and external security review remain unproven; see `docs/operations/browser-upload-evidence.md`.
 
 ## Configure integrations
 - **AI models**: Admin → AI models. Add an OpenAI, Anthropic or Gemini key, tick *Approved to receive our ticket data*, then Test. Without a key, a clearly labelled deterministic **local test model** runs approved procedures only, and it is disabled in production.

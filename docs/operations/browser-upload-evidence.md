@@ -7,7 +7,10 @@ Status: **AUTHORIZED LOCAL BROWSER MVP VERIFIED — NOT CUSTOMER-READY**
 ## Proven behavior
 
 - `browser.upload` remains a `SENSITIVE`, non-reversible action bound to the existing consent, exact-step approval, approval-signature, lease, idempotency, audit and emergency-stop gates.
-- A procedure can name only a deterministic selector and ticket attachment ID. It cannot provide a server path, object-storage key, URL, filename override or raw bytes.
+- A typed browser procedure can name only a deterministic selector and the fixed `customer_selected_ticket_attachment` binding. Hard-coded attachment IDs are refused at publication.
+- The portal makes the customer explicitly select one ticket file. The API freezes its safe metadata on the run, materializes its UUID into the exact plan, and includes that UUID in the plan hash and step approval. Approval copy identifies the safe filename, size, digest prefix and destination domain. The AI cannot choose or replace it.
+- A missing, wrong-ticket or cross-tenant selection is refused without falling back to the newest or only attachment. Rebinding an active run is refused.
+- Neither the procedure nor the request can provide a server path, object-storage key, URL, filename override or raw bytes.
 - The API transfers an attachment only when the run, browser session, ticket and attachment share the same organization and ticket.
 - Stored size, SHA-256, extension, magic bytes and content type are revalidated immediately before transfer.
 - The authenticated browser worker independently checks size and SHA-256, refuses paused or authentication-blocked sessions, requires exactly one enabled file input, and gives Playwright an in-memory payload.
@@ -35,6 +38,8 @@ JOLTIQ_REDIS_URL=redis://localhost:6379/15 \
 
 Result: 5 passed. Coverage includes approval-before-transfer, cross-ticket/cross-tenant/session mismatch, invalid IDs, stored size/digest/content corruption and audit/result redaction.
 
+The full security file additionally passes 56 tests, including typed binding publication, missing-selection refusal, deterministic materialization, same-ticket freezing and cross-ticket API refusal.
+
 ```bash
 JOLTIQ_DATABASE_URL=postgresql+psycopg://joltiq_app:***@localhost:55432/joltiq_test \
 JOLTIQ_MIGRATION_DATABASE_URL=postgresql+psycopg://postgres:***@localhost:55432/joltiq_test \
@@ -49,7 +54,7 @@ Result: 4 passed using the real API, PostgreSQL RLS, real browser worker, real C
 - The external AI provider is replaced by the repository's labelled deterministic local test fixture.
 - FieldDesk is an authorized local SaaS-like fixture, not a public vendor account.
 - Only deterministic selectors are supported; visual/semantic recovery from redesigned third-party pages is not proven.
-- The tested procedure binds one concrete attachment ID. A reusable production procedure still needs an approved runtime-binding rule such as “the customer-selected attachment on this ticket”; the AI must not choose an arbitrary attachment ID.
+- The runtime binding is proven only in the JoltIQ portal and local FieldDesk fixture. Live-vendor approval copy, record targeting and changed-page behavior still require vendor-specific acceptance.
 - Uploading to arbitrary public SaaS applications is not claimed. Each supported vendor workflow still needs its own published procedure, sandbox account and acceptance evidence.
 - This does not authorize access to a customer's existing Chrome or Edge profile. It operates only inside JoltIQ's isolated browser session.
 - Malware scanning beyond the existing file-type, magic-byte, macro and archive checks is not included.

@@ -16,12 +16,15 @@ export default function TicketView({ id, staff }: { id: string; staff: boolean }
   const [reply, setReply] = useState("");
   const [internal, setInternal] = useState(false);
   const [note, setNote] = useState("");
+  const [selectedAttachmentId, setSelectedAttachmentId] = useState("");
   const send = useAct(() => (runs.data?.[0] && !internal && !staff
-    ? api("/agents/chat", { json: { message: reply, ticket_id: id } })
+    ? api("/agents/chat", { json: { message: reply, ticket_id: id, attachment_id: selectedAttachmentId || undefined } })
     : api(`/tickets/${id}/comments`, { json: { body: reply, internal } })), [["ticket"], ["run"]]);
   const setStatus = useAct((status: string) => api(`/tickets/${id}/status`, { json: { status, resolution_note: status === "RESOLVED" ? note || undefined : undefined } }), [["ticket"]]);
   const assign = useAct((assignee_id: string | null) => api(`/tickets/${id}/assign`, { json: { assignee_id } }), [["ticket"]]);
-  const startAi = useAct(() => api("/agents/runs", { json: { ticket_id: id } }), [["run"]]);
+  const startAi = useAct(() => api("/agents/runs", {
+    json: { ticket_id: id, attachment_id: selectedAttachmentId || undefined },
+  }), [["run"]]);
   const upload = useAct((f: File) => { const fd = new FormData(); fd.append("file", f); return api(`/tickets/${id}/attachments`, { method: "POST", body: fd }); }, [["ticket"]]);
 
   if (t.isLoading) return <Loading />;
@@ -41,7 +44,18 @@ export default function TicketView({ id, staff }: { id: string; staff: boolean }
           <span className="block text-sm">{pendingSession.state === "pending_consent" ? "Review what the assistant wants to access, then allow or decline." : "Open the live view, take control, or stop it."}</span>
         </Link>}
         <div className="panel p-4"><p className="whitespace-pre-wrap">{d.description || <span className="text-slate">No description.</span>}</p>
-          {d.attachments.length > 0 && <ul className="mt-3 text-sm">{d.attachments.map((a) => <li key={a.id}><a className="underline" href={`/api/v1/tickets/${id}/attachments/${a.id}`}>{a.filename}</a> <span className="text-slate">({Math.ceil(a.size_bytes / 1024)} KB)</span></li>)}</ul>}
+          {d.attachments.length > 0 && <fieldset className="mt-4 border-t border-line pt-3">
+            <legend className="px-1 text-sm font-bold">Ticket files</legend>
+            {!staff && <p className="mb-2 text-xs text-slate">Choose a file only when you want the assistant to send it to an approved web app.</p>}
+            <ul className="space-y-1.5 text-sm">{d.attachments.map((a) => <li key={a.id} className="flex items-center justify-between gap-3">
+              <span><a className="underline" href={`/api/v1/tickets/${id}/attachments/${a.id}`}>{a.filename}</a> <span className="text-slate">({Math.ceil(a.size_bytes / 1024)} KB)</span></span>
+              {!staff && <label className="flex shrink-0 cursor-pointer items-center gap-1.5 rounded border border-line px-2 py-1 text-xs">
+                <input type="radio" name="assistant-attachment" value={a.id} checked={selectedAttachmentId === a.id} onChange={() => setSelectedAttachmentId(a.id)} />
+                Use with assistant
+              </label>}
+            </li>)}</ul>
+            {!staff && selectedAttachmentId && <button type="button" className="mt-2 text-xs underline" onClick={() => setSelectedAttachmentId("")}>Don&apos;t send a file</button>}
+          </fieldset>}
         </div>
         <div className="space-y-3">
           {d.comments.map((c) => <div key={c.id} className={c.internal ? "rounded-md border border-dashed border-slate/40 bg-paper p-3" : c.author_kind === "ai" ? "rounded-md border-l-4 border-jolt bg-surface p-3" : "panel p-3"}>

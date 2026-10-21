@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -95,7 +96,7 @@ def approve_and_consent(customer, run, run_id):
     assert sess_id, "AI should have requested a browser session"
     s = customer.get(f"/api/v1/sessions/{sess_id}").json()
     assert s["state"] == "pending_consent" and s["can_consent"] is True
-    assert s["allowed_domains"] == ["127.0.0.1"]
+    assert s["allowed_domains"] == [urlsplit(TESTAPP).hostname]
     r = customer.post(f"/api/v1/sessions/{sess_id}/consent", json={"minutes": 30, "max_risk": "SENSITIVE"})
     assert r.status_code == 200, r.text
     pending = [a for a in run["approvals"] if a["status"] == "PENDING"]
@@ -202,6 +203,7 @@ def consent_upload_session(customer, run):
     assert consent.status_code == 200, consent.text
     approvals = [approval for approval in run["approvals"] if approval["status"] == "PENDING"]
     assert [approval["action"] for approval in approvals] == ["browser.upload"]
+    assert f"Destination: {urlsplit(TESTAPP).hostname}." in approvals[0]["reason"]
     return session_id, approvals[0]
 
 

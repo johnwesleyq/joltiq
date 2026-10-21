@@ -954,9 +954,10 @@ def build_canonical_browser_plan(
             spec = ACTIONS[ps.action]
             reason = ps.rationale
             if ps.action == "browser.upload":
+                destinations = ", ".join(session.allowed_domains or [])
                 reason += (
                     f" File: {selected['filename']} ({selected['size_bytes']} bytes, "
-                    f"SHA-256 {selected['sha256'][:12]}…)."
+                    f"SHA-256 {selected['sha256'][:12]}…). Destination: {destinations}."
                 )
             approvals.request(
                 db,
