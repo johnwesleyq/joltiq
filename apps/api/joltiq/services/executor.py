@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from ..core.errors import Conflict, Unavailable
 from ..models import ActionExecution, AgentPlan, AgentRun, Approval, Device, PlanStep, SupportSession, Ticket, utcnow
 from ..models.enums import ApprovalStatus
-from . import approvals, audit, browser_client, policy, sessions
+from . import approvals, audit, browser_client, browser_uploads, policy, sessions
 from . import tickets as ticket_svc
 from .actions.registry import ACTIONS
 from .devices import queue_command
@@ -94,7 +94,11 @@ def execute_step(db: Session, run: AgentRun, plan: AgentPlan, step: PlanStep) ->
         if spec_channel == "browser":
             if s is None or not s.worker_session_ref:  # policy already denies this; defensive
                 return _done(db, run, ex, s, "failed", "no running browser session")
-            res = browser_client.act(s.worker_session_ref, step.action, dec.params, actor="ai")
+            if step.action == "browser.upload":
+                attachment = browser_uploads.load_for_execution(db, run, s, dec.params["attachment_id"])
+                res = browser_client.upload(s.worker_session_ref, dec.params["selector"], attachment)
+            else:
+                res = browser_client.act(s.worker_session_ref, step.action, dec.params, actor="ai")
             ex.result = {k: v for k, v in res.items() if k != "page"} | {"page": {"url": (res.get("page") or {}).get("url")}}
             if res.get("auth_required"):
                 sessions.awaiting_user_auth(db, s, res.get("kind") or "login")
@@ -121,6 +125,8 @@ def execute_step(db: Session, run: AgentRun, plan: AgentPlan, step: PlanStep) ->
         return _done(db, run, ex, s, "failed", f"no executor for {step.action}")
     except Unavailable as e:
         return _done(db, run, ex, s, "failed", e.message)
+    except browser_uploads.BrowserUploadRejected as e:
+        return _done(db, run, ex, s, "failed", str(e))
     except Conflict as e:
         ex.status = "pending"
         return Outcome("blocked", e.message, ex)

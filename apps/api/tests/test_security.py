@@ -2,6 +2,7 @@
 These run against the real API + PostgreSQL (RLS on). No external services."""
 from __future__ import annotations
 
+import hashlib
 import uuid
 
 import pytest
@@ -101,6 +102,190 @@ def test_approval_single_use_and_role_restrictions(app, owner):
     with session_scope(org) as db:
         ok, why = approvals.verify_and_consume(db, db.get(Approval, appr_id), db.get(PlanStep, step_id), db.get(AgentPlan, plan_id).plan_hash)
         assert not ok and "already used" in why
+
+
+def _browser_upload_plan(owner, *, data=b"approved upload contents", filename="customer-note.txt"):
+    from joltiq.db import session_scope
+    from joltiq.models import AgentPlan, AgentRun, PlanStep, SupportSession, TicketAttachment
+    from joltiq.security.crypto import canonical_json, sha256_hex
+    from joltiq.services import approvals, storage, tickets
+
+    org = uuid.UUID(owner.org_id)
+    with session_scope(org) as db:
+        ticket = tickets.create(db, org, subject="Upload evidence", description="x", requester_id=_uid(owner))
+        other_ticket = tickets.create(db, org, subject="Other ticket", description="x", requester_id=_uid(owner))
+        key, digest = storage.put(org, "attachments", filename, data)
+        attachment = TicketAttachment(
+            org_id=org,
+            ticket_id=ticket.id,
+            filename=filename,
+            content_type="text/plain",
+            size_bytes=len(data),
+            storage_key=key,
+            sha256=digest,
+            uploaded_by=_uid(owner),
+        )
+        db.add(attachment)
+        session = SupportSession(
+            org_id=org,
+            kind="browser",
+            state="active",
+            owner_id=_uid(owner),
+            allowed_domains=["example.com"],
+            consent={"max_risk": "SENSITIVE"},
+            ticket_id=ticket.id,
+            worker_session_ref="worker-upload-test",
+        )
+        db.add(session)
+        run = AgentRun(org_id=org, ticket_id=ticket.id, state="AWAITING_APPROVAL", correlation_id="upload", context={})
+        db.add(run)
+        db.flush()
+        params = {"selector": "#evidence", "attachment_id": str(attachment.id)}
+        steps = [{"a": "browser.upload", "p": params}]
+        plan_hash = sha256_hex(canonical_json(steps))
+        plan = AgentPlan(org_id=org, run_id=run.id, summary="upload", plan_hash=plan_hash, status="proposed")
+        db.add(plan)
+        db.flush()
+        step = PlanStep(
+            org_id=org,
+            plan_id=plan.id,
+            ordinal=0,
+            action="browser.upload",
+            target={"session_id": str(session.id)},
+            params=params,
+            risk="SENSITIVE",
+            postconditions=[],
+        )
+        db.add(step)
+        db.flush()
+        approval = approvals.request(
+            db,
+            org_id=org,
+            run_id=run.id,
+            plan_id=plan.id,
+            step=step,
+            plan_hash=plan_hash,
+            ticket_id=ticket.id,
+            session_id=session.id,
+            reason="upload customer attachment",
+            effects="sends a file",
+            approver_roles=["org_owner"],
+        )
+        return {
+            "org": org,
+            "run": run.id,
+            "plan": plan.id,
+            "step": step.id,
+            "approval": approval.id,
+            "session": session.id,
+            "ticket": ticket.id,
+            "other_ticket": other_ticket.id,
+            "attachment": attachment.id,
+            "storage_key": key,
+            "data": data,
+        }
+
+
+def test_browser_upload_executes_only_after_approval_and_never_audits_contents(owner, monkeypatch):
+    from joltiq.db import session_scope
+    from joltiq.models import ActionExecution, AgentPlan, AgentRun, PlanStep
+    from joltiq.services import approvals, browser_client
+    from joltiq.services.executor import execute_step
+
+    fixture = _browser_upload_plan(owner)
+    calls = []
+
+    def worker_upload(session_id, selector, upload):
+        calls.append((session_id, selector, upload))
+        return {
+            "ok": True,
+            "upload": {"filename": upload.filename, "size": upload.size, "sha256": upload.sha256},
+            "page": {"url": "https://example.com/ticket"},
+        }
+
+    monkeypatch.setattr(browser_client, "upload", worker_upload, raising=False)
+    with session_scope(fixture["org"]) as db:
+        outcome = execute_step(
+            db, db.get(AgentRun, fixture["run"]), db.get(AgentPlan, fixture["plan"]), db.get(PlanStep, fixture["step"])
+        )
+        assert outcome.status == "blocked" and "no approval" in outcome.detail
+        assert calls == []
+    with session_scope(fixture["org"]) as db:
+        approvals.decide(
+            db, fixture["approval"], approve=True, user_id=_uid(owner), role="org_owner", customer_id=None
+        )
+    with session_scope(fixture["org"]) as db:
+        outcome = execute_step(
+            db, db.get(AgentRun, fixture["run"]), db.get(AgentPlan, fixture["plan"]), db.get(PlanStep, fixture["step"])
+        )
+        assert outcome.status == "succeeded"
+        execution = db.get(ActionExecution, outcome.execution.id)
+        serialized = str(execution.result)
+        assert execution.result["upload"]["filename"] == "customer-note.txt"
+        assert fixture["data"].decode() not in serialized
+        assert fixture["storage_key"] not in serialized
+        assert len(calls) == 1 and calls[0][2].data == fixture["data"]
+        for forbidden in (fixture["data"].decode(), fixture["storage_key"]):
+            hits = db.execute(
+                text("select count(*) from audit_events where cast(row_to_json(audit_events) as text) like :value"),
+                {"value": f"%{forbidden}%"},
+            ).scalar()
+            assert hits == 0
+
+
+def test_browser_upload_rejects_cross_ticket_cross_tenant_and_mismatched_session(owner, new_client):
+    from conftest import register
+
+    from joltiq.db import session_scope
+    from joltiq.models import AgentRun, SupportSession, TicketAttachment
+    from joltiq.services.browser_uploads import BrowserUploadRejected, load_for_execution
+
+    fixture = _browser_upload_plan(owner)
+    other_owner = register(new_client(), "Other upload tenant")
+    other_fixture = _browser_upload_plan(other_owner, data=b"other tenant")
+    with session_scope(fixture["org"]) as db:
+        run = db.get(AgentRun, fixture["run"])
+        session = db.get(SupportSession, fixture["session"])
+        attachment = db.get(TicketAttachment, fixture["attachment"])
+        attachment.ticket_id = fixture["other_ticket"]
+        db.flush()
+        with pytest.raises(BrowserUploadRejected, match="ticket"):
+            load_for_execution(db, run, session, str(attachment.id))
+        attachment.ticket_id = fixture["ticket"]
+        db.flush()
+        session.ticket_id = fixture["other_ticket"]
+        with pytest.raises(BrowserUploadRejected, match="session"):
+            load_for_execution(db, run, session, str(attachment.id))
+        session.ticket_id = fixture["ticket"]
+        with pytest.raises(BrowserUploadRejected, match="not found"):
+            load_for_execution(db, run, session, str(other_fixture["attachment"]))
+        for invalid in ("not-a-uuid", str(uuid.uuid4())):
+            with pytest.raises(BrowserUploadRejected, match="not found"):
+                load_for_execution(db, run, session, invalid)
+
+
+@pytest.mark.parametrize("corruption", ["size", "digest", "content"])
+def test_browser_upload_revalidates_stored_attachment_before_dispatch(owner, corruption):
+    from joltiq.db import session_scope
+    from joltiq.models import AgentRun, SupportSession, TicketAttachment
+    from joltiq.services.browser_uploads import BrowserUploadRejected, load_for_execution
+
+    data = b"MZ executable" if corruption == "content" else b"approved upload contents"
+    fixture = _browser_upload_plan(owner, data=data)
+    with session_scope(fixture["org"]) as db:
+        run = db.get(AgentRun, fixture["run"])
+        session = db.get(SupportSession, fixture["session"])
+        attachment = db.get(TicketAttachment, fixture["attachment"])
+        if corruption == "size":
+            attachment.size_bytes += 1
+        elif corruption == "digest":
+            attachment.sha256 = "0" * 64
+        else:
+            attachment.sha256 = hashlib.sha256(data).hexdigest()
+            attachment.size_bytes = len(data)
+        with pytest.raises(BrowserUploadRejected, match="size|digest|content"):
+            load_for_execution(db, run, session, str(attachment.id))
+
 
 
 def test_model_cannot_set_risk_or_invent_actions():

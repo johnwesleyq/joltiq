@@ -7,6 +7,7 @@ import httpx
 
 from ..config import get_settings
 from ..core.errors import Unavailable
+from .browser_uploads import BrowserUpload
 
 
 def _h() -> dict[str, str]:
@@ -50,6 +51,20 @@ def close(session_id: str) -> None:
 
 def act(session_id: str, action: str, params: dict[str, Any], actor: str = "ai") -> dict[str, Any]:
     return _req("POST", f"/sessions/{session_id}/actions", json={"action": action, "params": params, "actor": actor})
+
+
+def upload(session_id: str, selector: str, attachment: BrowserUpload) -> dict[str, Any]:
+    return _req(
+        "POST",
+        f"/sessions/{session_id}/upload",
+        data={
+            "selector": selector,
+            "filename": attachment.filename,
+            "content_type": attachment.content_type,
+            "sha256": attachment.sha256,
+        },
+        files={"file": ("attachment", attachment.data, "application/octet-stream")},
+    )
 
 
 def human_input(session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
