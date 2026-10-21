@@ -207,4 +207,3 @@ def test_upload_refuses_unsafe_or_ambiguous_target_without_setting_a_file(
     if pause:
         assert client.post(f"/sessions/{sid}/pause", headers=AUTH, json={"paused": False}).status_code == 200
     assert receipt(client, sid) == "ready"
-
