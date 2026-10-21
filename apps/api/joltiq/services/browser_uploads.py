@@ -67,6 +67,14 @@ def load_for_execution(db: Session, run: AgentRun, session: SupportSession, atta
     ).scalar_one_or_none()
     if attachment is None:
         raise BrowserUploadRejected("attachment not found for this ticket")
+    frozen = (run.context or {}).get("selected_attachment")
+    if frozen and (
+        frozen.get("id") != str(attachment.id)
+        or frozen.get("filename") != attachment.filename
+        or frozen.get("size_bytes") != attachment.size_bytes
+        or not hmac.compare_digest(str(frozen.get("sha256", "")).lower(), attachment.sha256.lower())
+    ):
+        raise BrowserUploadRejected("attachment changed after customer selection")
     try:
         data = storage.get(run.org_id, attachment.storage_key)
     except (FileNotFoundError, OSError, PermissionError) as exc:

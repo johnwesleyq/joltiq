@@ -126,6 +126,7 @@ def _browser_upload_plan(owner, *, data=b"approved upload contents", filename="c
             uploaded_by=_uid(owner),
         )
         db.add(attachment)
+        db.flush()
         session = SupportSession(
             org_id=org,
             kind="browser",
@@ -137,7 +138,20 @@ def _browser_upload_plan(owner, *, data=b"approved upload contents", filename="c
             worker_session_ref="worker-upload-test",
         )
         db.add(session)
-        run = AgentRun(org_id=org, ticket_id=ticket.id, state="AWAITING_APPROVAL", correlation_id="upload", context={})
+        run = AgentRun(
+            org_id=org,
+            ticket_id=ticket.id,
+            state="AWAITING_APPROVAL",
+            correlation_id="upload",
+            context={
+                "selected_attachment": {
+                    "id": str(attachment.id),
+                    "filename": attachment.filename,
+                    "size_bytes": attachment.size_bytes,
+                    "sha256": attachment.sha256,
+                }
+            },
+        )
         db.add(run)
         db.flush()
         params = {"selector": "#evidence", "attachment_id": str(attachment.id)}
@@ -264,7 +278,7 @@ def test_browser_upload_rejects_cross_ticket_cross_tenant_and_mismatched_session
                 load_for_execution(db, run, session, invalid)
 
 
-@pytest.mark.parametrize("corruption", ["size", "digest", "content"])
+@pytest.mark.parametrize("corruption", ["size", "digest", "content", "frozen metadata"])
 def test_browser_upload_revalidates_stored_attachment_before_dispatch(owner, corruption):
     from joltiq.db import session_scope
     from joltiq.models import AgentRun, SupportSession, TicketAttachment
@@ -280,10 +294,12 @@ def test_browser_upload_revalidates_stored_attachment_before_dispatch(owner, cor
             attachment.size_bytes += 1
         elif corruption == "digest":
             attachment.sha256 = "0" * 64
-        else:
+        elif corruption == "content":
             attachment.sha256 = hashlib.sha256(data).hexdigest()
             attachment.size_bytes = len(data)
-        with pytest.raises(BrowserUploadRejected, match="size|digest|content"):
+        else:
+            attachment.filename = "changed-after-approval.txt"
+        with pytest.raises(BrowserUploadRejected, match="size|digest|content|changed"):
             load_for_execution(db, run, session, str(attachment.id))
 
 
@@ -952,6 +968,11 @@ def test_typed_browser_procedure_refuses_missing_selection_and_hard_coded_attach
     }
     with pytest.raises(ValueError, match="attachment_binding"):
         publication_hash(body)
+
+    upload_only = _runtime_browser_procedure()
+    upload_only["procedure"] = upload_only["procedure"][1:]
+    with pytest.raises(ValueError, match="navigate"):
+        publication_hash(upload_only)
 
 
 def test_agent_run_freezes_only_an_accessible_same_ticket_attachment(owner):

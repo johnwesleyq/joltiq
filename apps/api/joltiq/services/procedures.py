@@ -161,6 +161,8 @@ class BrowserProcedureDefinition(StrictModel):
         uploads = [step for step in self.procedure if step.action == "browser.upload"]
         if len(uploads) != 1:
             raise ValueError("typed browser procedure requires exactly one browser.upload step")
+        if self.procedure[0].action != "browser.navigate":
+            raise ValueError("typed browser procedure must begin with browser.navigate")
         return self
 
 

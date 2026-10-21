@@ -38,7 +38,7 @@ JOLTIQ_REDIS_URL=redis://localhost:6379/15 \
 
 Result: 5 passed. Coverage includes approval-before-transfer, cross-ticket/cross-tenant/session mismatch, invalid IDs, stored size/digest/content corruption and audit/result redaction.
 
-The full security file additionally passes 56 tests, including typed binding publication, missing-selection refusal, deterministic materialization, same-ticket freezing and cross-ticket API refusal.
+The full security file additionally passes 57 tests, including typed binding publication, missing-selection refusal, deterministic materialization, same-ticket freezing, post-approval metadata-change refusal and cross-ticket API refusal.
 
 ```bash
 JOLTIQ_DATABASE_URL=postgresql+psycopg://joltiq_app:***@localhost:55432/joltiq_test \
