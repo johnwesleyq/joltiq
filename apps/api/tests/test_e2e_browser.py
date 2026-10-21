@@ -16,6 +16,8 @@ pytestmark = [pytest.mark.browser, pytest.mark.mocked]
 
 EMAIL = "dispatch@acmeplumbing.test"
 PASSWORD_FD = "FieldDesk-Test-Pass-2026"
+UPLOAD_BYTES = b"customer supplied evidence\n"
+UPLOAD_SHA256 = "1c2cce5877b05bd8d5e448088e12552acc87efaa881e81e2333d4f3402b4bb5d"
 
 
 @pytest.fixture(scope="module")
@@ -112,6 +114,175 @@ def human_sign_in(customer, sess_id):
     assert r.status_code == 200, r.text
     time.sleep(0.5)
     assert customer.post(f"/api/v1/sessions/{sess_id}/handback").status_code == 200
+
+
+def create_upload_ticket(customer, *, subject="FieldDesk case evidence upload"):
+    response = customer.post(
+        "/api/v1/tickets",
+        json={"subject": subject, "description": "Attach the customer-supplied case evidence to the FieldDesk case."},
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def attach_evidence(customer, ticket_id):
+    response = customer.post(
+        f"/api/v1/tickets/{ticket_id}/attachments",
+        files={"file": ("case-evidence.txt", UPLOAD_BYTES, "text/plain")},
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def publish_upload_procedure(app, owner, attachment_id):
+    evidence_url = f"{TESTAPP}/app/evidence"
+    receipt = f"Received case-evidence.txt (27 bytes) sha256 {UPLOAD_SHA256}"
+    body = {
+        "symptoms": ["FieldDesk case evidence is missing", "Customer supplied evidence must be attached to the FieldDesk case"],
+        "environment": ["FieldDesk web app"],
+        "prerequisites": ["Customer supplied a validated ticket attachment", "FieldDesk admin sign-in"],
+        "diagnostics": ["Confirm the exact ticket attachment is present"],
+        "remediation": ["Open the case evidence page", "Upload the approved ticket attachment"],
+        "risk": "SENSITIVE (sends customer data to FieldDesk)",
+        "verification": ["Reload the evidence page and confirm the server receipt"],
+        "visibility": ["technician", "admin", "org_owner", "customer"],
+        "procedure": [
+            {
+                "action": "browser.navigate",
+                "params": {"url": evidence_url},
+                "rationale": "Open the FieldDesk evidence page",
+                "postconditions": [],
+            },
+            {
+                "action": "browser.upload",
+                "params": {"selector": "testid=evidence-file", "attachment_id": attachment_id},
+                "rationale": "Upload the exact customer-approved ticket attachment",
+                "postconditions": [
+                    {
+                        "type": "browser_readback",
+                        "params": {"url": evidence_url, "selector": "testid=evidence-receipt", "expect_text": receipt},
+                        "description": "FieldDesk independently reports receipt of the exact file",
+                    }
+                ],
+            },
+        ],
+    }
+    article = owner.post(
+        "/api/v1/knowledge/articles", json={"title": "Attach customer case evidence in FieldDesk", "body": body}
+    ).json()
+    publish_executable(app, owner, article["id"])
+    drain()
+    return article
+
+
+def start_upload_run(customer, ticket_id):
+    response = customer.post(
+        "/api/v1/agents/chat",
+        json={
+            "ticket_id": ticket_id,
+            "message": "The customer supplied evidence is missing from our FieldDesk web app case. Please attach it.",
+        },
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def consent_upload_session(customer, run):
+    assert [step["action"] for step in run["plans"][-1]["steps"]] == ["browser.navigate", "browser.upload"]
+    session_id = next(message["data"]["session_id"] for message in run["messages"] if message["data"].get("session_id"))
+    consent = customer.post(
+        f"/api/v1/sessions/{session_id}/consent", json={"minutes": 30, "max_risk": "SENSITIVE"}
+    )
+    assert consent.status_code == 200, consent.text
+    approvals = [approval for approval in run["approvals"] if approval["status"] == "PENDING"]
+    assert [approval["action"] for approval in approvals] == ["browser.upload"]
+    return session_id, approvals[0]
+
+
+def prepare_upload_run(app, owner, customer, *, attachment_ticket_id=None):
+    run_ticket = create_upload_ticket(customer)
+    source_ticket = run_ticket if attachment_ticket_id is None else attachment_ticket_id
+    attachment = attach_evidence(customer, source_ticket["id"])
+    publish_upload_procedure(app, owner, attachment["id"])
+    chat = start_upload_run(customer, run_ticket["id"])
+    run = wait_state(customer, chat["run_id"], lambda value: value["state"] == "AWAITING_APPROVAL")
+    session_id, approval = consent_upload_session(customer, run)
+    return chat, session_id, approval
+
+
+def test_browser_upload_denial_sends_no_file(services, app, team):
+    owner, _tech, customer = team
+    httpx.post(f"{TESTAPP}/__test__/reset")
+    chat, _session_id, approval = prepare_upload_run(app, owner, customer)
+
+    decision = customer.post(
+        f"/api/v1/approvals/{approval['id']}/decision", json={"decision": "deny", "comment": "Do not send this file"}
+    )
+
+    assert decision.status_code == 200, decision.text
+    run = wait_state(customer, chat["run_id"], lambda value: value["state"] == "ESCALATED")
+    assert "denied" in run["transitions"][-1]["reason"].lower()
+    assert httpx.get(f"{TESTAPP}/__test__/state").json()["upload"] is None
+
+
+def test_browser_upload_approved_attachment_is_received_and_verified(services, app, team):
+    owner, _tech, customer = team
+    httpx.post(f"{TESTAPP}/__test__/reset")
+    chat, session_id, approval = prepare_upload_run(app, owner, customer)
+    decision = customer.post(f"/api/v1/approvals/{approval['id']}/decision", json={"decision": "approve"})
+    assert decision.status_code == 200, decision.text
+
+    wait_state(customer, chat["run_id"], lambda value: value["paused_for"] == "user_auth")
+    human_sign_in(customer, session_id)
+    run = wait_state(
+        customer,
+        chat["run_id"],
+        lambda value: value["state"] in ("RESOLVED", "ESCALATED", "FAILED", "PARTIALLY_RESOLVED"),
+        timeout=120,
+    )
+
+    assert run["state"] == "RESOLVED", run["transitions"][-8:]
+    assert run["verifications"][-1]["status"] == "VERIFIED"
+    assert httpx.get(f"{TESTAPP}/__test__/state").json()["upload"] == {
+        "filename": "case-evidence.txt",
+        "size": 27,
+        "sha256": UPLOAD_SHA256,
+    }
+
+
+def test_browser_upload_wrong_ticket_attachment_is_refused(services, app, team):
+    owner, _tech, customer = team
+    httpx.post(f"{TESTAPP}/__test__/reset")
+    source_ticket = create_upload_ticket(customer, subject="Unrelated FieldDesk case")
+    chat, session_id, approval = prepare_upload_run(app, owner, customer, attachment_ticket_id=source_ticket)
+    assert customer.post(f"/api/v1/approvals/{approval['id']}/decision", json={"decision": "approve"}).status_code == 200
+    wait_state(customer, chat["run_id"], lambda value: value["paused_for"] == "user_auth")
+    human_sign_in(customer, session_id)
+
+    run = wait_state(
+        customer,
+        chat["run_id"],
+        lambda value: any("attachment" in transition["reason"].lower() for transition in value["transitions"]),
+        timeout=120,
+    )
+
+    assert any("attachment" in transition["reason"].lower() for transition in run["transitions"])
+    assert run["state"] in ("AWAITING_APPROVAL", "ESCALATED")
+    assert httpx.get(f"{TESTAPP}/__test__/state").json()["upload"] is None
+
+
+def test_browser_upload_emergency_stop_sends_no_file(services, app, team):
+    owner, _tech, customer = team
+    httpx.post(f"{TESTAPP}/__test__/reset")
+    chat, session_id, approval = prepare_upload_run(app, owner, customer)
+
+    stopped = customer.post(f"/api/v1/sessions/{session_id}/emergency-stop")
+
+    assert stopped.status_code == 200 and stopped.json()["emergency_stopped"] is True
+    customer.post(f"/api/v1/approvals/{approval['id']}/decision", json={"decision": "approve"})
+    drain()
+    assert customer.get(f"/api/v1/agents/runs/{chat['run_id']}").json()["state"] == "ESCALATED"
+    assert httpx.get(f"{TESTAPP}/__test__/state").json()["upload"] is None
 
 
 def test_browser_vertical_slice_verified_resolution(services, app, team):

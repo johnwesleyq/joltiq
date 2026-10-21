@@ -287,6 +287,12 @@ async def upload(
 
     safe_name = _safe_filename(filename)
     await element.set_input_files({"name": safe_name, "mimeType": content_type, "buffer": data})
+    # File inputs often auto-submit on change. Let that navigation start, then avoid reading title/URL mid-commit.
+    await asyncio.sleep(0.15)
+    try:
+        await s.page.wait_for_load_state("domcontentloaded", timeout=5000)
+    except Exception:  # noqa: BLE001,S110 - non-navigating upload widgets are also valid
+        pass
     metadata = {"filename": safe_name, "size": len(data), "sha256": actual_sha}
     s.log.append({"t": time.time(), "actor": "ai", "action": "browser.upload", "ok": True, "upload": metadata})
     return {"ok": True, "upload": metadata, "page": await page_state(s, include_snapshot=False)}
@@ -354,6 +360,9 @@ async def act(sid: str, body: ActionIn):
     s.log.append({"t": time.time(), "actor": body.actor, "action": a, "ok": result.get("ok"),
                   "params": {k: ("[text]" if k == "text" else v) for k, v in prm.items()}})
     result["page"] = await page_state(s, include_snapshot=False)
+    if body.actor == "ai" and result["page"].get("auth_required"):
+        result["auth_required"] = True
+        result["kind"] = result["page"].get("kind")
     return result
 
 

@@ -8,10 +8,11 @@ Control endpoints under /__test__/ let tests flip failure modes and inspect pers
 """
 from __future__ import annotations
 
+import hashlib
 import html
 import secrets
 
-from fastapi import FastAPI, Form, Request
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 app = FastAPI(title="FieldDesk test app (authorized E2E target)")
@@ -19,7 +20,7 @@ app = FastAPI(title="FieldDesk test app (authorized E2E target)")
 USERS = {"dispatch.admin": "FieldDesk-Test-Pass-2026"}
 MFA_CODE = "424242"
 STATE = {"settings": {"notify_email": "", "job_notifications": "off"}, "buggy_save": False, "require_mfa": False,
-         "sessions": {}, "save_count": 0}
+         "sessions": {}, "save_count": 0, "upload": None}
 
 
 def page(title: str, body: str) -> HTMLResponse:
@@ -36,9 +37,11 @@ def user_of(request: Request) -> str | None:
 
 
 @app.get("/app/login")
-def login_form():
-    return page("FieldDesk sign in", """
+def login_form(next: str = "/app/settings"):
+    safe_next = next if next.startswith("/app/") and not next.startswith("//") else "/app/settings"
+    return page("FieldDesk sign in", f"""
       <form method="post" action="/app/login">
+        <input type="hidden" name="next" value="{html.escape(safe_next)}">
         <label for="u">Username</label><input id="u" name="username" autocomplete="username">
         <label for="p">Password</label><input id="p" name="password" type="password" autocomplete="current-password">
         <button type="submit">Sign in</button>
@@ -46,12 +49,13 @@ def login_form():
 
 
 @app.post("/app/login")
-def login(username: str = Form(...), password: str = Form(...)):
+def login(username: str = Form(...), password: str = Form(...), next: str = Form("/app/settings")):
     if USERS.get(username) != password:
         return page("FieldDesk sign in", "<p role='alert'>Invalid username or password</p><a href='/app/login'>Try again</a>")
+    safe_next = next if next.startswith("/app/") and not next.startswith("//") else "/app/settings"
     sid = secrets.token_urlsafe(16)
     STATE["sessions"][sid] = {"user": username, "mfa_ok": not STATE["require_mfa"]}
-    r = RedirectResponse("/app/mfa" if STATE["require_mfa"] else "/app/settings", status_code=303)
+    r = RedirectResponse("/app/mfa" if STATE["require_mfa"] else safe_next, status_code=303)
     r.set_cookie("fd_session", sid, httponly=True)
     return r
 
@@ -102,6 +106,35 @@ def save(request: Request, notify_email: str = Form(""), job_notifications: str 
     return page("Notification settings", "<p role='status'>Settings saved successfully.</p><a href='/app/settings'>Back</a>")
 
 
+@app.get("/app/evidence")
+def evidence_form(request: Request):
+    if not user_of(request):
+        return RedirectResponse("/app/login?next=/app/evidence", status_code=303)
+    receipt = STATE["upload"]
+    receipt_text = "No evidence received" if receipt is None else (
+        f"Received {receipt['filename']} ({receipt['size']} bytes) sha256 {receipt['sha256']}"
+    )
+    return page("Case evidence", f"""
+      <form method="post" action="/app/evidence" enctype="multipart/form-data">
+        <label for="evidence">Attach case evidence</label>
+        <input id="evidence" name="file" type="file" data-testid="evidence-file" onchange="this.form.submit()">
+      </form>
+      <p data-testid="evidence-receipt">{html.escape(receipt_text)}</p>""")
+
+
+@app.post("/app/evidence")
+async def receive_evidence(request: Request, file: UploadFile = File(...)):
+    if not user_of(request):
+        return RedirectResponse("/app/login?next=/app/evidence", status_code=303)
+    data = await file.read()
+    STATE["upload"] = {
+        "filename": file.filename or "file",
+        "size": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
+    return RedirectResponse("/app/evidence", status_code=303)
+
+
 # ---------------- fake vendor docs for the research fixture ----------------
 DOCS = {
     "/docs/outlook-attachment-crash": ("Outlook closes unexpectedly when opening attachments - Vendor Support",
@@ -132,10 +165,10 @@ def doc(slug: str):
 @app.post("/__test__/reset")
 def reset(buggy_save: bool = False, require_mfa: bool = False):
     STATE.update({"settings": {"notify_email": "", "job_notifications": "off"}, "buggy_save": buggy_save,
-                  "require_mfa": require_mfa, "sessions": {}, "save_count": 0})
+                  "require_mfa": require_mfa, "sessions": {}, "save_count": 0, "upload": None})
     return {"ok": True}
 
 
 @app.get("/__test__/state")
 def state():
-    return {"settings": STATE["settings"], "save_count": STATE["save_count"]}
+    return {"settings": STATE["settings"], "save_count": STATE["save_count"], "upload": STATE["upload"]}

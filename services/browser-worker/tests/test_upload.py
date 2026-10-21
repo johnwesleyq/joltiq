@@ -24,6 +24,8 @@ class UploadPageHandler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         variants = {
             "/upload": '<input type="file" id="file"><pre id="receipt">ready</pre>',
+            "/autosubmit": '<form method="post"><input type="file" id="file" name="file" onchange="this.form.submit()"></form>'
+                           '<pre id="receipt">ready</pre>',
             "/login": '<input type="password" id="password"><input type="file" id="file"><pre id="receipt">ready</pre>',
             "/nonfile": '<input type="text" id="file"><pre id="receipt">ready</pre>',
             "/disabled": '<input type="file" id="file" disabled><pre id="receipt">ready</pre>',
@@ -48,6 +50,13 @@ class UploadPageHandler(BaseHTTPRequestHandler):
         self.send_header("content-length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def do_POST(self):  # noqa: N802
+        content_length = int(self.headers.get("content-length", "0"))
+        self.rfile.read(content_length)
+        self.send_response(303)
+        self.send_header("location", "/upload")
+        self.end_headers()
 
     def log_message(self, *_args):
         return
@@ -143,6 +152,32 @@ def test_upload_requires_worker_bearer_token(client, upload_site):
 
     assert response.status_code == 401
     assert receipt(client, sid) == "ready"
+
+
+def test_navigation_surfaces_authentication_required_before_sensitive_action(client, upload_site):
+    sid = uuid.uuid4().hex
+    created = client.post("/sessions", headers=AUTH, json={"session_id": sid, "allowed_domains": ["127.0.0.1"]})
+    assert created.status_code == 200
+
+    response = client.post(
+        f"/sessions/{sid}/actions",
+        headers=AUTH,
+        json={"action": "browser.navigate", "params": {"url": upload_site + "/login"}, "actor": "ai"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["auth_required"] is True
+    assert response.json()["kind"] == "login"
+
+
+def test_upload_waits_for_auto_submit_navigation_before_building_response(client, upload_site):
+    sid = start_session(client, upload_site, "/autosubmit")
+
+    response = upload(client, sid)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["ok"] is True
+    assert response.json()["page"]["url"] == upload_site + "/upload"
 
 
 @pytest.mark.parametrize(
