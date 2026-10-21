@@ -24,7 +24,16 @@ Report vulnerabilities to security@joltiq.io. JoltIQ holds **no** SOC 2, ISO 270
 | Uploads | Extension + magic bytes, executables refused, macro-enabled Office refused, zip-bomb guard, size limit, served as attachment with nosniff. **No antivirus engine.** |
 | Web | CSP, frame-ancestors none, nosniff, referrer policy, same-origin API proxy. |
 | Logging | JSON logs with request IDs and redaction of emails, keys, tokens, cards, passwords and IPs. Secret-named fields are fully masked. |
-| Dependencies | `pip-audit` and `npm audit` clean as of 2026-10-18 after upgrades (FastAPI 0.143 / Starlette 1.8, cryptography 50, python-multipart 0.0.32, pypdf 6.21, PyJWT 2.15, Next 16.4.2). |
+| Dependencies | On 2026-10-20, `npm audit --omit=dev --audit-level=high` was clean. `pip-audit` reported `certifi 2026.7.22` as affected by `PYSEC-2026-4320`; it reports `2026.10.19` as the fixed version. This is release-blocking until upgraded or formally accepted. |
+
+## Windows Outlook PDF workflow boundary
+
+- Executable steps are copied from a published, fingerprinted procedure after typed diagnosis. Remembered/chat fixes may select only a published candidate ID and cannot create actions.
+- Publishing requires two different MFA-backed admins. Customer portal consent, native-device consent, and exact per-step approval remain separate.
+- The MVP Windows companion exposes no screen-control action. The Outlook HKCU write runs only in the matching interactive user's tray process, never as SYSTEM.
+- Rollback names the earlier command only. The PC restores its DPAPI-protected local journal entry and refuses a missing, mismatched, or server-supplied prior value.
+- A verified setting and responsive Outlook mean `FIX_APPLIED_VERIFIED`; only a customer PDF attempt plus trustworthy post-attempt crash observation can produce `RESOLVED_VERIFIED`.
+- The workflow is `IMPLEMENTED_NOT_TESTED` on Windows. No Windows CI run, VM acceptance aggregate, signed MSI, or external review evidence exists. See `docs/operations/windows-outlook-pdf-evidence-index.md`.
 
 ## Release-blocking security work still open
 - External penetration test and code review.
@@ -32,3 +41,5 @@ Report vulnerabilities to security@joltiq.io. JoltIQ holds **no** SOC 2, ISO 270
 - Egress proxy for fetches and browser workers (NetworkPolicy is provided for Kubernetes).
 - Antivirus scanning of uploads and downloads.
 - Windows companion runtime review on real hardware, code signing, and update signing.
+- Complete all 59 Windows Outlook acceptance runs, including STOP timing and licensed classic Outlook, and retain the aggregate evidence bundle.
+- Upgrade or formally accept the `certifi` advisory recorded above.

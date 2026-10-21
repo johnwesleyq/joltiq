@@ -1,8 +1,8 @@
 # Project status — JoltIQ
 
-**Last updated:** 2026-10-18 · **Build environment:** Linux sandbox (2 vCPU), PostgreSQL 16.15 + pgvector, Redis 7.0, Python 3.13, Node 22, .NET SDK 8.0.131, Playwright Chromium 1194. No Windows host. Docker registry and nuget.org were unreachable.
+**Last updated:** 2026-10-20 · **Task 12 environment:** macOS 26.6 (arm64), Python 3.12.8, Node 24.14.1, Docker 29.7.2, PostgreSQL/Redis in the local Compose network, Playwright Chromium 1194, and .NET 8 SDK in a Linux container. No Windows host and no Git remote.
 
-**Overall:** All 12 milestones have working code. The full browser vertical slice runs end to end on real infrastructure. The desktop path runs end to end through the real protocol code with a **simulated OS**. **Not production-ready:** live credentials, Windows runtime verification, container image builds and a security review are outstanding.
+**Overall:** The Windows Outlook PDF MVP is implemented and its portable security/core tests run, but it is **not ready for customers or a pilot**. Windows CI, Windows 10/11 VM acceptance, licensed classic-Outlook acceptance, installer lifecycle proof, Authenticode signing, and external security review have not happened. Browser/SaaS automation remains the product priority after this Windows internal-acceptance gate; secure `browser.upload` is the next implementation plan.
 
 Status legend: **IT** = IMPLEMENTED_AND_TESTED · **INT** = IMPLEMENTED_NOT_TESTED · **P** = PARTIALLY_IMPLEMENTED · **B** = BLOCKED_EXTERNAL_DEPENDENCY · **NI** = NOT_IMPLEMENTED
 
@@ -28,9 +28,10 @@ Status legend: **IT** = IMPLEMENTED_AND_TESTED · **INT** = IMPLEMENTED_NOT_TEST
 | Live viewer, take control, hand back, emergency stop, single control lease (DB-enforced) | IT | `test_e2e_browser.py`, `test_security.py` |
 | Policy engine (5 risk levels, tenant rules, consent scope) + approvals (step-hash bound, HMAC, single-use, expiry, supersede) | IT | `test_security.py`, `test_platform_features.py::test_policy…` |
 | Independent verifier (browser read-back, device read-back, DB re-fetch, HTTP) | IT | Browser: VERIFIED + FAILED (app "saves" without persisting) both caught |
-| Windows companion protocol (enroll, signed requests, nonce/counter replay protection, signed envelopes, revocation) | IT | `test_device_protocol.py` (Python attacker), .NET `SelfTest` 10/10, `test_e2e_desktop.py` through the .NET runtime |
-| Windows OS actions (UIA, registry HKCU, event log, services, processes), DPAPI key store, tray consent dialog / banner / kill switch hotkey, privileged broker | **B** | Source written; **cannot compile on Linux** (Windows Desktop SDK). Needs a Windows build host + an authorized Windows 11 test machine. |
-| Windows installer (WiX v5 MSI), signing, repair/uninstall | **B** | `installer/Product.wxs`, `scripts/build.ps1`, `sign.ps1`, `test-on-windows.ps1`. Not built. **Not signed** (no certificate). |
+| Windows companion protocol (enroll, signed requests, nonce/counter replay protection, signed envelopes, revocation, durable journal/outbox) | IT (portable) / **INT (Windows)** | API protocol tests plus .NET Core self-test **19/19**. Native Windows runtime evidence is still absent. |
+| Outlook PDF diagnosis, exact published plan, per-step approval, HKCU mutation, safe restart, rollback, and symptom verification | **INT / B** | Implemented with portable/server tests. `IMPLEMENTED_NOT_TESTED` on Windows; `BLOCKED_EXTERNAL_DEPENDENCY` for the required Windows VM matrix. |
+| Windows OS providers, DPAPI journal, tray consent/banner/STOP, and tray/SYSTEM separation | **INT / B** | Source and Windows-only xUnit tests exist. They have not run on Windows 10/11. |
+| Windows installer (WiX v5), lifecycle, signing, repair/upgrade/uninstall | **INT / B** | Build/release workflows and checks exist but have not run on `windows-latest`; no MSI artifact exists here and nothing is signed. Any local output is unsigned internal-only. |
 | Companion authenticated auto-update | **P** | Heartbeat reports latest/required version. No signed downloader yet. |
 | **Computer use (screen-driving agent)**: goal approval by the consenting customer, look→act loop, approval / question / “your turn to type” pauses, secret-typing refusal, step limit, budget, stop on session end, per-step screenshots + audit, live screen in the session page | IT (server, fake device + scripted fixture model) | `test_computer_use.py` (6 tests) through the real signed device protocol. Anthropic computer toolset adapter (`computer_toolset_20260801`, legacy `computer_20251124`) **INT (live)**: no key |
 | Device screen/input layer for computer use | **NI (by design here)** | Not in this repo. Plug in an established remote-support SDK or an in-house adapter; contract in `apps/desktop-agent/README.md`. Protocol client + local policy for macOS/Windows in `apps/desktop-agent` |
@@ -53,22 +54,24 @@ Status legend: **IT** = IMPLEMENTED_AND_TESTED · **INT** = IMPLEMENTED_NOT_TEST
 | Web app: all portal/console/admin/platform pages, accessible labels, mobile layout | IT | `tsc` clean, `next build` OK, `tests/e2e/web/ui_smoke.py` passes in real Chromium |
 | Voice input | INT | Web Speech API; can't run headless |
 | Docker images / Compose stack | **B** | `docker compose config` valid. Images not built (registry blocked). |
-| CI (GitHub Actions: API, web, windows-latest) | INT | Not executed (no push) |
+| CI (GitHub Actions: API, web, windows-latest, protected signed release) | INT | Workflows implemented. Not executed because this checkout has no Git remote; no workflow evidence exists. |
 | Production deployment | NI (by design) | Reference k8s manifests only. Nothing deployed. |
 
 ## Tests actually run (this environment)
 
 | Command | Result |
 |---|---|
-| `cd apps/api && pytest` | **99 passed**, 0 failed (68 s). Includes real-Chromium browser E2E (6), desktop protocol E2E via .NET (2), security (29), model-adapter contracts (8). Tests marked `mocked` use local fixtures for AI, search, Freshdesk, SMTP and webhook receivers. |
-| `ruff check joltiq tests` / `mypy joltiq` | All checks passed / no issues in 74 files (mypy caught and fixed an OpenAI-adapter `NameError`) |
-| `dotnet run --project apps/windows-agent/tests/JoltIQ.Agent.Core.SelfTest` | **10 passed**, 0 failed |
-| `dotnet build` Core / Simulator / SelfTest | Succeeded (offline config) |
-| `dotnet build` Windows / Tray / Broker / Tests | **BLOCKED**: NETSDK1100, requires Windows |
-| `apps/web: tsc --noEmit` / `eslint src` / `next build` (Next 16.4.2) | Clean / clean / built |
+| `cd apps/api && PYTHONPATH=. .venv/bin/pytest` | **152 passed, 2 skipped, 0 failed** in 55.23 s. The two simulator-spawning tests skipped because native `dotnet` is unavailable on this Mac. |
+| `ruff check joltiq tests` / `mypy joltiq` | Passed; mypy reports no issues in 80 source files. |
+| .NET 8 container: `dotnet run --project apps/windows-agent/tests/JoltIQ.Agent.Core.SelfTest -c Release` | **19 passed**, 0 failed. |
+| .NET 8 container: Outlook fixture `validate-harness` | Four contract checks passed: complete catalog, valid synthetic bundle, missing evidence rejected, secret-bearing evidence rejected. This is not Windows acceptance. |
+| `dotnet build/test` Windows / Tray / Broker / Windows xUnit / WiX | **BLOCKED_EXTERNAL_DEPENDENCY**: not run on Windows. |
+| `apps/web: npm run typecheck && npm run build` | Passed; Next.js generated all 35 routes. |
 | `tests/e2e/web/ui_smoke.py` against a running stack | Passed: 23 pages, register → knowledge upload → chat → ticket → queue → sign-out redirect, no page errors or 5xx |
 | `tests/performance/perf.py` (20 concurrent, 4 API workers, same 2-vCPU box as DB + browser + web) | ticket list p50 1.03 s / p95 1.33 s (~19 rps); search p50 1.03 s; create p95 3.0 s; browser session start p50 109 ms (Chromium launch 817 ms); crashed-worker job reclaimed in 0.5 s. Single-request latency is 10–15 ms, so these figures are CPU-bound by this sandbox. |
-| `pip-audit -r requirements.lock` / `npm audit --omit=dev` | Clean after upgrades (were: python-multipart, starlette, cryptography, pyjwt, pypdf, pytest, next/postcss) |
+| `pip-audit -r requirements.lock` | **1 release-blocking finding:** `certifi 2026.7.22`, `PYSEC-2026-4320`; fixed version reported as `2026.10.19`. |
+| `npm audit --omit=dev --audit-level=high` | 0 vulnerabilities. |
+| Windows acceptance | **0/59 required runs**; no aggregate or real-Windows evidence exists. |
 
 ## Known risks and limitations
 - Per-tenant audit hash chain uses an advisory lock, which serializes writes within one tenant (visible in create p95). Consider batching or a per-tenant sequence table.
@@ -76,22 +79,24 @@ Status legend: **IT** = IMPLEMENTED_AND_TESTED · **INT** = IMPLEMENTED_NOT_TEST
 - Browser read-back trusts the customer's web app to reflect persisted state on reload. Apps with client-side caches need app-specific postconditions.
 - `browser.upload` is advertised in the registry but unsupported in the worker.
 - The SSRF guard validates DNS and then lets httpx resolve again (small rebinding window). Production must route fetches through an egress proxy that enforces public-only IPs (noted in `ssrf.py`).
-- No security review, penetration test or dependency audit has been performed. Don't make compliance claims.
+- The focused Task 12 review was an implementer self-review, not an external security review. No penetration test has been performed. Don't make compliance claims.
+- Windows results are unproven until the 59-run acceptance aggregate passes; simulator, synthetic bundle, and macOS results do not substitute.
+- `certifi 2026.7.22` is affected by `PYSEC-2026-4320` according to the fresh dependency audit.
 
 ## Needed from the owner
 1. AI provider key(s): OpenAI / Anthropic / Gemini, plus approval to send ticket data to them.
 2. Brave Search or Tavily API key.
 3. Stripe test account: secret key, webhook secret, and prices with lookup keys `joltiq_{plan}_{month|year}`.
 4. Freshdesk sandbox (subdomain + API key) for live adapter acceptance.
-5. A Windows 11 test machine (and a Windows build agent or the CI windows-latest runner) and an Authenticode code-signing certificate.
+5. Disposable Windows 10 and Windows 11 64-bit VMs, licensed classic Outlook on at least one Windows 11 VM, a connected Windows CI runner, and an Authenticode code-signing certificate.
 6. Production infrastructure choices and approval: managed Postgres, Redis, S3, domain + TLS, secrets manager.
 7. SMTP provider credentials.
 
 ## Where to resume (next tasks, in order)
-0. Computer use: choose and integrate the device screen/input layer (remote-support SDK or in-house adapter per `apps/desktop-agent/README.md`), then run a live goal with an Anthropic key on a test machine. Add OpenAI computer-use adapter.
-1. On Windows: `pwsh apps/windows-agent/scripts/build.ps1 -Version 1.0.0`, fix any compile errors in the Windows / Tray / Broker projects, run `JoltIQ.Agent.Tests`, then `scripts/test-on-windows.ps1` on an authorized Windows 11 host. Record results here.
+0. Clear the Windows internal gate: connect the Git remote, run Windows CI, then run all 59 acceptance executions and produce a passing aggregate. Sign and timestamp the MSI before any pilot.
+1. Implement secure, consent-bound `browser.upload` as the next browser/SaaS priority. Do not enable arbitrary screen control in the Windows Outlook MVP.
 2. With credentials: run live smoke tests for each AI provider (Admin → AI models → Test), live research, Stripe checkout and webhook, and Freshdesk sync. Add `@pytest.mark.live` tests.
 3. Implement OIDC (Entra) login (`/auth/oidc/{start,callback}` with PyJWT/JWKS validation).
-4. Implement `browser.upload` in the worker, plus desktop screen viewing.
+4. Choose and review any future device screen/input layer separately; it is outside this Windows Outlook MVP.
 5. Build Docker images in CI; run `docker compose up` acceptance.
 6. External security review / penetration test.

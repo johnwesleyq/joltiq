@@ -12,6 +12,9 @@
 - [ ] Stripe live mode explicitly authorized. Prices validated. Webhook endpoint configured and signature verified.
 - [ ] SMTP provider configured with SPF/DKIM/DMARC.
 - [ ] Monitoring: Prometheus scrape, alerts routed, OTLP traces flowing, log retention set.
-- [ ] Windows companion: MSI built and **signed** with an authorized certificate. Acceptance script passed on Windows 11 (results attached). Compatibility matrix updated. Only claim the OS versions that were tested.
+- [ ] Windows CI: Windows projects compile with warnings as errors; Core and Windows xUnit suites pass; installer lifecycle evidence is attached.
+- [ ] Windows companion: exact MSI SHA-256 recorded and **signed** with an authorized certificate and trusted timestamp. Signature and timestamp independently verified before upload. Unsigned builds remain internal-only.
+- [ ] Windows Outlook PDF acceptance: all 59 required runs pass from clean snapshots, including five Windows 11 fixture happy paths, one Windows 10 path, one licensed classic-Outlook path, every failure case, and a passing `windows-acceptance.json`. Only claim OS versions actually evidenced.
+- [ ] Windows evidence is reviewed for secret/PII leakage, source commit, harness commit, procedure hash, device/session identity, STOP timing, final ticket state, and actual desktop/registry/event-log state.
 - [ ] Rollback plan: previous image tags pinned. Migrations reviewed for backward compatibility.
 - [ ] Live acceptance: full release scenario (ticket → chat → knowledge → research → consent → plan → approval → execution → VERIFIED → ticket updated → draft article) on the production-like environment.

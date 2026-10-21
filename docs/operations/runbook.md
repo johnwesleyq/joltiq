@@ -22,6 +22,20 @@
 | Device offline | Devices page "last seen" | Machine asleep, offline or app closed. The companion reconnects with backoff. |
 | Suspected tampering | `GET /api/v1/audit/verify` per tenant, or `cli verify-audit ORG` | Preserve the DB snapshot and start incident response. |
 
+## Windows Outlook PDF internal acceptance
+
+This workflow is not approved for customer use until the evidence index says Windows VM acceptance and signing have passed.
+
+1. Use authorized, disposable 64-bit Windows 10/11 VMs. Reset to a named clean snapshot before every required run.
+2. Build on Windows with `pwsh apps/windows-agent/scripts/build.ps1 -Version <version>`. Treat an unsigned package as internal-only.
+3. Run installer lifecycle verification, then the 56-case / 59-run acceptance catalog using `apps/windows-agent/scripts/test-on-windows.ps1` and `docs/operations/windows-outlook-pdf-acceptance.md`.
+4. Keep evidence outside the repository under `%ProgramData%\JoltIQ\AcceptanceEvidence`. Finalize every run and require aggregate `windows-acceptance.json` to report `passed: true`.
+5. If any action is stopped, disconnected, duplicated, expired, revoked, or partially applied, keep the ticket open/escalated and retain the journal, command, audit, registry, event-log, screen, timing, and final-state evidence. Never rerun a mutation to make the evidence pass.
+6. A restored registry value is not active until Outlook restarts. If safe restart cannot complete, report `RESTORED_PENDING_RESTART`; never force-close Outlook through a save prompt.
+7. A quiet or unreadable event log is `UNKNOWN`, not proof. `FIX_APPLIED_VERIFIED` and `RESOLVED_VERIFIED` are separate outcomes.
+
+See `windows-outlook-pdf-evidence-index.md` for the current gate status and artifact hashes.
+
 ## Backups and restore
 Managed PITR for PostgreSQL, plus daily logical dumps (`pg_dump -Fc`) to versioned, encrypted object storage. S3 bucket versioning on. Restore drill: restore into a new instance, run `alembic current`, run `/readyz`, then sample-verify audit chains.
 

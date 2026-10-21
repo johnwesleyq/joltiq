@@ -2,7 +2,7 @@
 
 JoltIQ is an AI support technician for MSPs, B2B software support teams, internal IT and small service businesses. It takes in tickets, asks diagnostic questions, searches tenant knowledge, researches unfamiliar problems on the live web, and proposes a typed plan. It asks for consent and approval before acting, then operates an isolated browser or a Windows companion. It verifies each outcome **independently** before it resolves anything, and otherwise escalates to a person.
 
-> Status: development build. Not production-ready. See `PROJECT_STATUS.md` for what has been tested and what is blocked.
+> Status: development build. The Windows Outlook PDF workflow is implemented but has **not** passed Windows CI, Windows VM acceptance, signing, or external review. It is not customer- or pilot-ready. See `PROJECT_STATUS.md` and `docs/operations/windows-outlook-pdf-evidence-index.md`.
 
 ## Repository
 
@@ -51,7 +51,7 @@ cd apps/web && npm ci && npm run build && JOLTIQ_API_URL=http://127.0.0.1:8000 n
 
 ```bash
 createdb joltiq_test && psql joltiq_test -c 'create extension vector'
-cd apps/api && .venv/bin/pytest                      # 96 tests: unit, integration, security, browser E2E, desktop protocol E2E
+cd apps/api && PYTHONPATH=. .venv/bin/pytest         # unit, integration, security, browser E2E, desktop protocol E2E
 cd apps/web && npm run typecheck && npm run build
 python tests/e2e/web/ui_smoke.py http://127.0.0.1:3000 ./shots   # real-browser UI smoke (stack must be running)
 python tests/performance/perf.py                     # latency/concurrency against a running stack
@@ -60,6 +60,10 @@ pwsh apps/windows-agent/scripts/build.ps1 -Version 1.0.0                        
 ```
 
 Tests that replace an external service with a local fixture are marked `@pytest.mark.mocked`.
+
+The Windows acceptance gate is separate from compilation and simulation. Run `apps/windows-agent/scripts/test-on-windows.ps1` only on authorized disposable Windows 10/11 VMs and retain the evidence described in `docs/operations/windows-outlook-pdf-acceptance.md`. Until that aggregate passes, any installer is unsigned internal-only.
+
+Browser/SaaS automation remains the next product priority after Windows internal acceptance. The first follow-on implementation is a secure, consent-bound `browser.upload`; the current registry entry is not a working upload implementation.
 
 ## Configure integrations
 - **AI models**: Admin → AI models. Add an OpenAI, Anthropic or Gemini key, tick *Approved to receive our ticket data*, then Test. Without a key, a clearly labelled deterministic **local test model** runs approved procedures only, and it is disabled in production.
