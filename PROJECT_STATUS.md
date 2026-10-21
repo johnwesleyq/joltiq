@@ -69,7 +69,7 @@ Status legend: **IT** = IMPLEMENTED_AND_TESTED · **INT** = IMPLEMENTED_NOT_TEST
 | `apps/web: npm run typecheck && npm run build` | Passed; Next.js generated all 35 routes. |
 | `tests/e2e/web/ui_smoke.py` against a running stack | Passed: 23 pages, register → knowledge upload → chat → ticket → queue → sign-out redirect, no page errors or 5xx |
 | `tests/performance/perf.py` (20 concurrent, 4 API workers, same 2-vCPU box as DB + browser + web) | ticket list p50 1.03 s / p95 1.33 s (~19 rps); search p50 1.03 s; create p95 3.0 s; browser session start p50 109 ms (Chromium launch 817 ms); crashed-worker job reclaimed in 0.5 s. Single-request latency is 10–15 ms, so these figures are CPU-bound by this sandbox. |
-| `pip-audit -r requirements.lock` | **1 release-blocking finding:** `certifi 2026.7.22`, `PYSEC-2026-4320`; fixed version reported as `2026.10.19`. |
+| `pip-audit -r requirements.lock` | **No known vulnerabilities found** after upgrading `certifi` to `2026.10.19`. The post-upgrade container run also passed the complete API/browser suite: 152 passed, 2 expected skips. |
 | `npm audit --omit=dev --audit-level=high` | 0 vulnerabilities. |
 | Windows acceptance | **0/59 required runs**; no aggregate or real-Windows evidence exists. |
 
@@ -81,7 +81,6 @@ Status legend: **IT** = IMPLEMENTED_AND_TESTED · **INT** = IMPLEMENTED_NOT_TEST
 - The SSRF guard validates DNS and then lets httpx resolve again (small rebinding window). Production must route fetches through an egress proxy that enforces public-only IPs (noted in `ssrf.py`).
 - The focused Task 12 review was an implementer self-review, not an external security review. No penetration test has been performed. Don't make compliance claims.
 - Windows results are unproven until the 59-run acceptance aggregate passes; simulator, synthetic bundle, and macOS results do not substitute.
-- `certifi 2026.7.22` is affected by `PYSEC-2026-4320` according to the fresh dependency audit.
 
 ## Needed from the owner
 1. AI provider key(s): OpenAI / Anthropic / Gemini, plus approval to send ticket data to them.

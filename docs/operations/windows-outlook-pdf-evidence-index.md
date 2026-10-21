@@ -27,7 +27,7 @@ This index deliberately separates implementation from execution evidence. A sour
 | API full suite | **152 passed, 2 skipped, 0 failed** in 64.68 s on the final post-review run. The two skipped tests spawn the .NET simulator, and native `dotnet` is unavailable on this Mac. The plan's literal `.venv/bin/pytest` first failed because the editable package was not on this worktree venv's import path; the corrected invocation used `PYTHONPATH=.` and an isolated test database through the local proxy. |
 | API lint | `ruff check joltiq tests` — passed. |
 | API types | `mypy joltiq` — passed after correcting branch-introduced type errors. |
-| Python dependency audit | **BLOCKED FOR RELEASE:** `certifi 2026.7.22`, `PYSEC-2026-4320`; fixed version reported by `pip-audit`: `2026.10.19`. |
+| Python dependency audit | **CLEARED:** upgraded `certifi` to `2026.10.19`; the complete API/browser suite passed with 152 passed and 2 expected skips, and `pip-audit -r requirements.lock` reported no known vulnerabilities. |
 | Web | `npm run typecheck`, `npm run build`, and `npm audit --omit=dev --audit-level=high` — passed; audit reported zero vulnerabilities. |
 | Companion Core | .NET 8 SDK container: **20 passed, 0 failed**. The final security self-review added coverage proving a reused command ID with altered signed parameters is refused instead of receiving cached success. |
 | Acceptance harness contract | .NET 8 SDK container: catalog, complete synthetic bundle, missing-evidence rejection, and secret-evidence rejection all passed. This validates the harness, not Windows behavior. |
@@ -75,9 +75,8 @@ Every accepted run must provide the 14 evidence classes required by the catalog.
 
 ## Next gates
 
-1. Fix or formally accept the `certifi` advisory; rerun `pip-audit`.
-2. Connect a Git remote and run the Windows CI workflow; retain TRX, MSI lifecycle, checksum, and workflow evidence.
-3. Run all 59 acceptance executions on disposable Windows 10/11 VMs and produce a passing aggregate.
-4. Configure the protected signing environment and produce an Authenticode-valid, timestamped MSI for any pilot.
-5. Obtain independent security review.
-6. After Windows internal acceptance, implement the separate secure `browser.upload` plan. Browser/SaaS automation remains the product priority; it does not inherit Windows acceptance merely because the safety protocol is reusable.
+1. Connect a Git remote and run the Windows CI workflow; retain TRX, MSI lifecycle, checksum, and workflow evidence.
+2. Run all 59 acceptance executions on disposable Windows 10/11 VMs and produce a passing aggregate.
+3. Configure the protected signing environment and produce an Authenticode-valid, timestamped MSI for any pilot.
+4. Obtain independent security review.
+5. After Windows internal acceptance, implement the separate secure `browser.upload` plan. Browser/SaaS automation remains the product priority; it does not inherit Windows acceptance merely because the safety protocol is reusable.

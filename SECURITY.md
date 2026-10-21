@@ -24,7 +24,7 @@ Report vulnerabilities to security@joltiq.io. JoltIQ holds **no** SOC 2, ISO 270
 | Uploads | Extension + magic bytes, executables refused, macro-enabled Office refused, zip-bomb guard, size limit, served as attachment with nosniff. **No antivirus engine.** |
 | Web | CSP, frame-ancestors none, nosniff, referrer policy, same-origin API proxy. |
 | Logging | JSON logs with request IDs and redaction of emails, keys, tokens, cards, passwords and IPs. Secret-named fields are fully masked. |
-| Dependencies | On 2026-10-20, `npm audit --omit=dev --audit-level=high` was clean. `pip-audit` reported `certifi 2026.7.22` as affected by `PYSEC-2026-4320`; it reports `2026.10.19` as the fixed version. This is release-blocking until upgraded or formally accepted. |
+| Dependencies | On 2026-10-20, `npm audit --omit=dev --audit-level=high` was clean. `certifi` was upgraded from the affected `2026.7.22` release to `2026.10.19`; the complete API/browser suite passed and `pip-audit -r requirements.lock` reported no known vulnerabilities. |
 
 ## Windows Outlook PDF workflow boundary
 
@@ -42,4 +42,3 @@ Report vulnerabilities to security@joltiq.io. JoltIQ holds **no** SOC 2, ISO 270
 - Antivirus scanning of uploads and downloads.
 - Windows companion runtime review on real hardware, code signing, and update signing.
 - Complete all 59 Windows Outlook acceptance runs, including STOP timing and licensed classic Outlook, and retain the aggregate evidence bundle.
-- Upgrade or formally accept the `certifi` advisory recorded above.
