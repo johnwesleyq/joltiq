@@ -250,6 +250,8 @@ def test_restore_action_accepts_only_source_command_id_and_readback_ignores_clai
 )
 def test_partial_application_rollback_is_source_only_and_separately_approved(owner, rollback_blocker):
     """The server may identify a prior mutation, but it must never send saved registry state back to the PC."""
+    from test_procedures import outlook_body
+
     from joltiq.db import session_scope
     from joltiq.models import (
         ActionExecution,
@@ -258,6 +260,7 @@ def test_partial_application_rollback_is_source_only_and_separately_approved(own
         AgentRun,
         Approval,
         Device,
+        KnowledgeArticle,
         PlanStep,
         SupportSession,
         Ticket,
@@ -266,15 +269,21 @@ def test_partial_application_rollback_is_source_only_and_separately_approved(own
     )
     from joltiq.services import approvals as approval_svc
     from joltiq.services.agent import h_awaiting_approval, h_execute
+    from joltiq.services.procedures import procedure_hash, validate_executable_body
 
     org_id = uuid.UUID(owner.org_id)
     user_id = _uid(owner)
     source_command_id = "change-command-7"
     with session_scope(org_id) as db:
+        body = outlook_body()
+        article = KnowledgeArticle(
+            org_id=org_id, title="Approved Outlook fix", status="published", executable=True,
+            body=body, procedure_hash=procedure_hash(validate_executable_body(body)), version=4,
+        )
         device = Device(org_id=org_id, owner_user_id=user_id, hostname="WIN11", status="active",
                         capabilities=["office.addin.set_load_behavior", "office.addin.restore_load_behavior",
                                       "office.addin.verify_restored", "app.restart"])
-        db.add(device)
+        db.add_all([article, device])
         db.flush()
         ticket = Ticket(org_id=org_id, number=771001, subject="Outlook PDF crash", description="crashes",
                         requester_id=user_id, status="IN_PROGRESS", device_id=device.id)
@@ -291,7 +300,8 @@ def test_partial_application_rollback_is_source_only_and_separately_approved(own
         db.flush()
         original = AgentPlan(org_id=org_id, run_id=run.id, revision=1, summary="Approved Outlook fix",
                              hypothesis="PDF add-in crash", plan_hash="a" * 64, status="executing",
-                             procedure_version=4, procedure_hash="b" * 64)
+                             procedure_article_id=article.id, procedure_version=article.version,
+                             procedure_hash=article.procedure_hash)
         db.add(original)
         db.flush()
         run.context = {**run.context, "current_plan_id": str(original.id)}

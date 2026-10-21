@@ -761,6 +761,8 @@ def build_canonical_plan(db, run, article: KnowledgeArticle, procedure, session:
     """Persist exact published remediation steps; no model-authored field can enter the plan."""
     from .customer_messages import outlook_session_details
 
+    if article.procedure_hash is None:
+        raise ValueError("canonical procedure is missing its publication fingerprint")
     steps = [step.model_dump(mode="json") for step in procedure.procedure]
     approval_copy = outlook_session_details(procedure, article.procedure_hash)["step_messages"]
     phash = sha256_hex(canonical_json(steps))
@@ -817,7 +819,7 @@ def offer_rollback(db: Session, run: AgentRun, source_execution: ActionExecution
     if source_execution.action != "office.addin.set_load_behavior":
         raise ValueError("the source command is not an add-in change")
 
-    raw_steps = [
+    raw_steps: list[dict[str, Any]] = [
         {
             "action": "office.addin.restore_load_behavior",
             "params": {"source_command_id": str(source_command_id)},
@@ -834,8 +836,8 @@ def offer_rollback(db: Session, run: AgentRun, source_execution: ActionExecution
             "postconditions": [{"type": "device_process_responding", "params": {"process": "outlook.exe"}}],
         },
     ]
-    for step in raw_steps:
-        step["params"] = validate_params(step["action"], step["params"])
+    for raw_step in raw_steps:
+        raw_step["params"] = validate_params(raw_step["action"], raw_step["params"])
     plan_hash = sha256_hex(canonical_json(raw_steps))
     revision = len(db.execute(select(AgentPlan.id).where(AgentPlan.run_id == run.id)).all()) + 1
     plan = AgentPlan(
@@ -849,14 +851,14 @@ def offer_rollback(db: Session, run: AgentRun, source_execution: ActionExecution
     target = {"session_id": str(session.id), "device_id": str(session.device_id)}
     steps: list[PlanStep] = []
     for ordinal, item in enumerate(raw_steps):
-        step = PlanStep(
+        plan_step = PlanStep(
             org_id=run.org_id, plan_id=plan.id, ordinal=ordinal, action=item["action"], target=target,
             params=item["params"], rationale=item["rationale"], risk=ACTIONS[item["action"]].risk,
             postconditions=item["postconditions"],
         )
-        db.add(step)
+        db.add(plan_step)
         db.flush()
-        steps.append(step)
+        steps.append(plan_step)
     approvals.request_each_customer_step(db, run=run, plan=plan, steps=steps, ticket=ticket, session_id=session.id)
     _ctx_update(run, current_plan_id=str(plan.id), rollback_plan_id=str(plan.id),
                 rollback_source_execution_id=str(source_execution.id), rollback_source_command_id=str(source_command_id),
@@ -1112,7 +1114,7 @@ def h_execute(db, run):
                 _rollback_failed(db, run, f"Rollback action {st.action} was blocked: {out.detail}")
             else:
                 changed = completed_state_changes(db, run, plan)
-                if changed:
+                if changed and _is_outlook_pdf_plan(db, plan):
                     mark_partial_application(db, run, st, changed, f"Action blocked after a completed change: {out.detail}")
                 else:
                     _escalate(db, run, f"Action {st.action} blocked at execution: {out.detail}")
@@ -1132,7 +1134,7 @@ def _execution_failed(db, run, st: PlanStep, why: str) -> None:
             _rollback_failed(db, run, f"Rollback restore failed: {why[:300]}")
         return
     changed = completed_state_changes(db, run, plan)
-    if changed:
+    if changed and _is_outlook_pdf_plan(db, plan):
         mark_partial_application(db, run, st, changed, why)
         return
     if run.retries < run.max_retries:
@@ -1260,7 +1262,7 @@ def h_verify(db, run):
                 failed_procedures=run.context.get("failed_procedures", []) + [p["article_id"] for p in run.context.get("procedures", [])
                                                                               if p["title"] in plan.summary])
     changed = completed_state_changes(db, run, plan)
-    if changed:
+    if changed and _is_outlook_pdf_plan(db, plan):
         steps = db.execute(select(PlanStep).where(PlanStep.plan_id == plan.id).order_by(PlanStep.ordinal)).scalars().all()
         marker = steps[-1]
         mark_partial_application(db, run, marker, changed, f"independent verification {status}")

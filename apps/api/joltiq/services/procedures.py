@@ -147,6 +147,8 @@ def _legacy_browser_payload(body: dict) -> dict:
         if not isinstance(raw, dict) or set(raw) - allowed:
             raise ValueError("invalid legacy browser step")
         action = raw.get("action")
+        if not isinstance(action, str):
+            raise ValueError("legacy browser step requires an action")
         spec = ACTIONS.get(action)
         if not spec or spec.channel != "browser" or spec.computer_use:
             raise ValueError("legacy executable procedures may contain browser actions only")
