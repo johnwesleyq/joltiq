@@ -49,6 +49,7 @@ Result: 4 passed using the real API, PostgreSQL RLS, real browser worker, real C
 - The external AI provider is replaced by the repository's labelled deterministic local test fixture.
 - FieldDesk is an authorized local SaaS-like fixture, not a public vendor account.
 - Only deterministic selectors are supported; visual/semantic recovery from redesigned third-party pages is not proven.
+- The tested procedure binds one concrete attachment ID. A reusable production procedure still needs an approved runtime-binding rule such as “the customer-selected attachment on this ticket”; the AI must not choose an arbitrary attachment ID.
 - Uploading to arbitrary public SaaS applications is not claimed. Each supported vendor workflow still needs its own published procedure, sandbox account and acceptance evidence.
 - This does not authorize access to a customer's existing Chrome or Edge profile. It operates only inside JoltIQ's isolated browser session.
 - Malware scanning beyond the existing file-type, magic-byte, macro and archive checks is not included.

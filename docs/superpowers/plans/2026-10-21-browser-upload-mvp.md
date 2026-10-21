@@ -139,4 +139,3 @@ Expected: full API/browser suite passes and Ruff reports no errors.
 - [ ] **Step 5: Commit**
 
 Commit message: `test: prove approved browser attachment upload`
-

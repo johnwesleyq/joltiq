@@ -153,7 +153,6 @@ def test_upload_requires_worker_bearer_token(client, upload_site):
     assert response.status_code == 401
     assert receipt(client, sid) == "ready"
 
-
 def test_navigation_surfaces_authentication_required_before_sensitive_action(client, upload_site):
     sid = uuid.uuid4().hex
     created = client.post("/sessions", headers=AUTH, json={"session_id": sid, "allowed_domains": ["127.0.0.1"]})

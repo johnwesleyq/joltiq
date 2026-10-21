@@ -29,4 +29,3 @@ The action fails without setting a file when the attachment is missing, belongs 
 ## Acceptance boundary
 
 The MVP is complete when automated tests prove worker-side upload and refusal behavior, API-side tenant/ticket/integrity enforcement, exact approval gating, and an end-to-end upload into the authorized local SaaS fixture with independently observed server-side receipt. This does not claim compatibility with arbitrary public SaaS sites or customer readiness; a separate live SaaS pilot and external security review remain required.
-
