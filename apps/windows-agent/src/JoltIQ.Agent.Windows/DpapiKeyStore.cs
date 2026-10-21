@@ -28,6 +28,8 @@ public sealed class DpapiKeyStore : IKeyStore
         catch (CryptographicException) { return null; } // copied from another user/machine → treated as not enrolled
     }
 
+    public bool Exists(string name) => File.Exists(Path.Combine(_dir, name + ".dpapi"));
+
     public void Save(string name, byte[] data)
     {
         var p = Path.Combine(_dir, name + ".dpapi");

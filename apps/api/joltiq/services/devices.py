@@ -36,7 +36,7 @@ from .actions.registry import ACTIONS, validate_params
 PROTOCOL_VERSION = "1"
 MAX_SKEW = 120
 ENROLL_TTL_MIN = 15
-COMMAND_TTL_S = 300
+COMMAND_TTL_S = 120
 DESKTOP_ACTIONS = [a.id for a in ACTIONS.values() if a.channel == "desktop" and not a.computer_use]
 _TEST_DESKTOP_ACTIONS = [a.id for a in ACTIONS.values() if a.channel == "desktop"]
 MIN_AGENT_VERSION = "1.0.0"
@@ -234,17 +234,54 @@ def pending_for(db: Session, device: Device) -> list[dict]:
     return out
 
 
-def record_result(db: Session, device: Device, command_id: uuid.UUID, status: str, result: dict) -> DeviceCommand:
+def record_result(db: Session, device: Device, command_id: uuid.UUID, status: str,
+                  result: dict) -> tuple[DeviceCommand, bool, bool, bool]:
     from ..security.redaction import redact_obj
 
-    cmd = db.get(DeviceCommand, command_id)
+    cmd = db.execute(select(DeviceCommand).where(DeviceCommand.id == command_id).with_for_update()).scalar_one_or_none()
     if not cmd or cmd.device_id != device.id:
         raise NotFound("command not found")
-    if cmd.status not in ("delivered", "queued"):
-        raise Conflict(f"command already {cmd.status}")
     if status not in ("done", "failed", "rejected"):
         raise AppError("bad status")
-    cmd.status, cmd.result, cmd.completed_at = status, redact_obj(result), utcnow()
+    clean = redact_obj(result)
+    linked_run = None
+    if cmd.execution_id:
+        from ..models import ActionExecution, AgentRun
+
+        execution = db.get(ActionExecution, cmd.execution_id)
+        linked_run = db.get(AgentRun, execution.run_id) if execution and execution.run_id else None
+    if linked_run is None and cmd.session_id:
+        from ..models import AgentRun
+
+        support_session = db.get(SupportSession, cmd.session_id)
+        linked_run = db.get(AgentRun, support_session.run_id) if support_session and support_session.run_id else None
+    linked_run_terminal = bool(linked_run and linked_run.state in
+                               ("RESOLVED", "ESCALATED", "FAILED", "CANCELLED", "PARTIALLY_RESOLVED"))
+    if cmd.status in ("done", "failed", "rejected"):
+        if cmd.status == status and cmd.result == clean:
+            return cmd, True, False, False
+        audit.security_event(db, "device_command_result_conflict", org_id=device.org_id, severity="critical",
+                             data={"device": str(device.id), "command": str(cmd.id), "stored_status": cmd.status,
+                                   "reported_status": status})
+        return cmd, False, False, True
+    if cmd.status == "expired" or linked_run_terminal:
+        late_evidence = {"late": True, "reported_status": status, "result": clean}
+        if cmd.result is not None:
+            if cmd.result == late_evidence:
+                return cmd, True, True, False
+            audit.security_event(db, "device_command_result_conflict", org_id=device.org_id, severity="critical",
+                                 data={"device": str(device.id), "command": str(cmd.id), "stored_status": "expired",
+                                       "reported_status": status})
+            return cmd, False, True, True
+        cmd.status, cmd.result, cmd.completed_at = "expired", late_evidence, utcnow()
+        from .realtime import publish
+
+        publish(db, device.org_id, "device.command_late_result", {"command_id": str(cmd.id), "reported_status": status,
+                                                                   "action": cmd.action})
+        return cmd, False, True, False
+    if cmd.status not in ("delivered", "queued"):
+        raise Conflict(f"command already {cmd.status}")
+    cmd.status, cmd.result, cmd.completed_at = status, clean, utcnow()
     from .realtime import publish
 
     publish(db, device.org_id, "device.command_result", {"command_id": str(cmd.id), "status": status, "action": cmd.action,
@@ -253,7 +290,7 @@ def record_result(db: Session, device: Device, command_id: uuid.UUID, status: st
         from .jobs import enqueue
 
         enqueue(db, "agent.device_result", {"command_id": str(cmd.id)}, org_id=device.org_id)
-    return cmd
+    return cmd, False, False, False
 
 
 def revoke(db: Session, device: Device, actor_id) -> None:

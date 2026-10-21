@@ -61,9 +61,12 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
     private void Start()
     {
         if (string.IsNullOrEmpty(_cfg.ServerUrl)) return;
-        _client = new AgentClient(_cfg.ServerUrl, new DpapiKeyStore());
+        var keyStore = new DpapiKeyStore();
+        var journal = new DpapiCommandJournal(keyStore);
+        _client = new AgentClient(_cfg.ServerUrl, keyStore);
         if (!_client.Enrolled) return;
-        _runtime = new AgentRuntime(_client, new WindowsActionProvider(_client.State.EnrolledUserSid), this);
+        var provider = new WindowsActionProvider(_client.State.EnrolledUserSid, journal, ActionHost.InteractiveTray);
+        _runtime = new AgentRuntime(_client, provider, this, journal);
         _cts = new CancellationTokenSource();
         _ = Task.Run(() => _runtime.RunAsync(_cts.Token));
         _icon.Text = $"JoltIQ Companion — connected ({_client.State.DeviceId?[..8]})";
@@ -77,9 +80,11 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
         {
             _cts?.Cancel();
             _cfg.ServerUrl = f.ServerUrl; _cfg.Save();
-            _client = new AgentClient(f.ServerUrl, new DpapiKeyStore());
-            var prov = new WindowsActionProvider();
+            var keyStore = new DpapiKeyStore();
+            var journal = new DpapiCommandJournal(keyStore);
+            _client = new AgentClient(f.ServerUrl, keyStore);
             var sid = WindowsIdentity.GetCurrent().User?.Value ?? throw new InvalidOperationException("Cannot identify the enrolling Windows user");
+            var prov = new WindowsActionProvider(sid, journal, ActionHost.InteractiveTray);
             _client.EnrollAsync(f.Code, Environment.MachineName, "Windows", Environment.OSVersion.Version.ToString(), prov.Capabilities, sid).GetAwaiter().GetResult();
             MessageBox.Show("This device is enrolled. Support sessions always ask for your permission first.", "JoltIQ", MessageBoxButtons.OK, MessageBoxIcon.Information);
             Start();

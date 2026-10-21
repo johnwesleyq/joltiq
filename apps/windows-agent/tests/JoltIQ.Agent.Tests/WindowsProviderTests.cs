@@ -20,8 +20,14 @@ public class WindowsProviderTests
     private sealed class MemoryJournal : ICommandJournal
     {
         private readonly Dictionary<string, MutationRecord> _records = new();
+        private readonly InMemoryCommandJournal _commands = new();
         public bool RefuseWrites { get; set; }
         public bool RefuseAppliedMarker { get; set; }
+        public bool MarkRunning(ActionExecutionContext context, string action) => _commands.MarkRunning(context, action);
+        public bool TryGetCommand(string commandId, out CommandJournalEntry record) => _commands.TryGetCommand(commandId, out record);
+        public bool MarkCompleted(string commandId, string status, JsonObject result) => _commands.MarkCompleted(commandId, status, result);
+        public IReadOnlyList<PendingCommandReport> PendingReports() => _commands.PendingReports();
+        public bool AcknowledgeReport(string commandId) => _commands.AcknowledgeReport(commandId);
         public bool TrySaveMutation(MutationRecord record)
         {
             if (RefuseWrites || _records.ContainsKey(record.SourceCommandId)) return false;
@@ -461,5 +467,34 @@ public class WindowsProviderTests
         s.Save("k", new byte[] { 1, 2, 3 });
         Assert.Equal(new byte[] { 1, 2, 3 }, s.Load("k"));
         Assert.NotEqual(new byte[] { 1, 2, 3 }, File.ReadAllBytes(Path.Combine(dir, "k.dpapi")));  // encrypted at rest
+    }
+
+    [Fact] public void DpapiCommandJournal_EncryptsAndReloadsPendingResult()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "jqjournal-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var first = new DpapiCommandJournal(DataProtectionScope.CurrentUser, dir);
+            Assert.True(first.MarkRunning(Context("dpapi-command"), "system.info"));
+            Assert.True(first.MarkCompleted("dpapi-command", "done", new JsonObject { ["ok"] = true, ["secret"] = "not-plaintext" }));
+
+            var stored = File.ReadAllBytes(Path.Combine(dir, "command-journal.v1.json.dpapi"));
+            Assert.DoesNotContain("not-plaintext", System.Text.Encoding.UTF8.GetString(stored));
+            var restarted = new DpapiCommandJournal(DataProtectionScope.CurrentUser, dir);
+            Assert.Equal("dpapi-command", Assert.Single(restarted.PendingReports()).CommandId);
+        }
+        finally { if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true); }
+    }
+
+    [Fact] public void DpapiCommandJournal_RefusesExistingUndecryptableState()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "jqjournal-corrupt-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(dir);
+            File.WriteAllBytes(Path.Combine(dir, "command-journal.v1.json.dpapi"), RandomNumberGenerator.GetBytes(64));
+            Assert.Throws<InvalidDataException>(() => new DpapiCommandJournal(DataProtectionScope.CurrentUser, dir));
+        }
+        finally { if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true); }
     }
 }

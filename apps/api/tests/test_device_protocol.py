@@ -6,6 +6,7 @@ import hashlib
 import json
 import secrets
 import time
+import uuid
 
 from conftest import ApiClient
 from cryptography.hazmat.primitives import hashes, serialization
@@ -46,6 +47,11 @@ class FakeDevice:
     def get(self, path, **kw):
         full = "/api/v1/agent/v1" + path
         return self.c.get(full, headers=self.headers("GET", full, **kw))
+
+    def post(self, path, payload):
+        full = "/api/v1/agent/v1" + path
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        return self.c.post(full, content=body, headers={**self.headers("POST", full, body), "content-type": "application/json"})
 
 
 def _code(owner):
@@ -114,3 +120,100 @@ def test_cross_tenant_device_invisible(app, owner, new_client):
     other = register(new_client(), "Other")
     assert other.get(f"/api/v1/devices/{d.device_id}").status_code == 404
     assert other.post(f"/api/v1/devices/{d.device_id}/revoke").status_code == 404
+
+
+def _queued_command(owner, device_id):
+    from joltiq.db import session_scope
+    from joltiq.models import Device
+    from joltiq.services.devices import queue_command
+
+    with session_scope(uuid.UUID(owner.org_id)) as db:
+        device = db.get(Device, uuid.UUID(device_id))
+        command = queue_command(db, device, action="system.info", params={}, session=None)
+        return str(command.id), command.created_at, command.expires_at
+
+
+def test_command_expiry_is_120_seconds(app, owner):
+    d = FakeDevice(app)
+    assert d.enroll(_code(owner)).status_code == 200
+    _, created_at, expires_at = _queued_command(owner, d.device_id)
+    assert 119 <= (expires_at - created_at).total_seconds() <= 121
+
+
+def test_identical_terminal_result_retry_is_idempotent_but_conflict_is_security_event(app, owner):
+    from sqlalchemy import select
+
+    from joltiq.db import session_scope
+    from joltiq.models import DeviceCommand, SecurityEvent
+
+    d = FakeDevice(app)
+    assert d.enroll(_code(owner)).status_code == 200
+    command_id, _, _ = _queued_command(owner, d.device_id)
+    result = {"status": "done", "result": {"ok": True, "value": 7}}
+    assert d.post(f"/commands/{command_id}/result", result).status_code == 200
+    retry = d.post(f"/commands/{command_id}/result", result)
+    assert retry.status_code == 200 and retry.json()["idempotent"] is True
+
+    conflict = d.post(f"/commands/{command_id}/result", {"status": "failed", "result": {"ok": False}})
+    assert conflict.status_code == 409 and conflict.json()["error"]["code"] == "command_result_conflict"
+    with session_scope(uuid.UUID(owner.org_id)) as db:
+        command = db.get(DeviceCommand, uuid.UUID(command_id))
+        assert command.status == "done" and command.result == {"ok": True, "value": 7}
+        events = db.execute(select(SecurityEvent).where(SecurityEvent.kind == "device_command_result_conflict")).scalars().all()
+        assert len(events) == 1
+
+
+def test_late_result_is_retained_as_evidence_without_changing_terminal_state_or_enqueuing_work(app, owner):
+    from sqlalchemy import select
+
+    from joltiq.db import session_scope
+    from joltiq.models import DeviceCommand, Job
+
+    d = FakeDevice(app)
+    assert d.enroll(_code(owner)).status_code == 200
+    command_id, _, _ = _queued_command(owner, d.device_id)
+    with session_scope(uuid.UUID(owner.org_id)) as db:
+        command = db.get(DeviceCommand, uuid.UUID(command_id))
+        command.status = "expired"
+
+    late = d.post(f"/commands/{command_id}/result", {"status": "done", "result": {"ok": True, "changed": True}})
+    assert late.status_code == 200 and late.json() == {"ok": True, "status": "expired", "late": True, "idempotent": False}
+    with session_scope(uuid.UUID(owner.org_id)) as db:
+        command = db.get(DeviceCommand, uuid.UUID(command_id))
+        assert command.status == "expired"
+        assert command.result == {"late": True, "reported_status": "done", "result": {"ok": True, "changed": True}}
+        jobs = db.execute(select(Job).where(Job.kind == "agent.device_result", Job.payload["command_id"].astext == command_id)).scalars().all()
+        assert jobs == []
+
+
+def test_result_after_run_escalation_stays_late_evidence_and_cannot_revive_execution(app, owner):
+    from sqlalchemy import select
+
+    from joltiq.db import session_scope
+    from joltiq.models import ActionExecution, AgentRun, Device, DeviceCommand, Job
+    from joltiq.services.devices import queue_command
+
+    d = FakeDevice(app)
+    assert d.enroll(_code(owner)).status_code == 200
+    org_id = uuid.UUID(owner.org_id)
+    with session_scope(org_id) as db:
+        run = AgentRun(org_id=org_id, state="ESCALATED", correlation_id="late-result-test", outcome_stage="UNCONFIRMED")
+        db.add(run)
+        db.flush()
+        execution = ActionExecution(org_id=org_id, run_id=run.id, action="system.info", target={}, params={}, risk="READ_ONLY",
+                                    policy_decision={}, status="failed", result={}, idempotency_key="late-result-test")
+        db.add(execution)
+        db.flush()
+        device = db.get(Device, uuid.UUID(d.device_id))
+        command = queue_command(db, device, action="system.info", params={}, session=None, execution_id=execution.id)
+        command_id, execution_id = str(command.id), execution.id
+
+    response = d.post(f"/commands/{command_id}/result", {"status": "done", "result": {"ok": True}})
+    assert response.status_code == 200 and response.json()["late"] is True
+    with session_scope(org_id) as db:
+        command = db.get(DeviceCommand, uuid.UUID(command_id))
+        execution = db.get(ActionExecution, execution_id)
+        assert command.status == "expired" and command.result["reported_status"] == "done"
+        assert execution.status == "failed"
+        jobs = db.execute(select(Job).where(Job.kind == "agent.device_result", Job.payload["command_id"].astext == command_id)).scalars().all()
+        assert jobs == []

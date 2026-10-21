@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -24,6 +25,7 @@ public interface IUserInteraction
 }
 
 public sealed record RuntimeLogEntry(DateTimeOffset At, string Level, string Message);
+public sealed record StopTiming(string SessionId, DateTimeOffset RequestedAt, long MonotonicTimestamp);
 
 /// <summary>Poll loop: verify envelope → replay check → local consent/policy → execute → redact → report.</summary>
 public sealed class AgentRuntime
@@ -32,20 +34,24 @@ public sealed class AgentRuntime
     private readonly IActionProvider _provider;
     private readonly IUserInteraction _ui;
     private readonly LocalPolicy _policy;
+    private readonly ICommandJournal _journal;
     private readonly ReplayGuard _replay = new();
     private readonly Dictionary<string, LocalSession> _sessions = new();
-    private readonly HashSet<string> _handledCommands = new();
+    private readonly List<StopTiming> _stopEvents = new();
     private EnvelopeVerifier? _verifier;
     public List<RuntimeLogEntry> Log { get; } = new();
     public TimeSpan PollInterval { get; set; } = TimeSpan.FromSeconds(3);
     public TimeSpan ConsentTimeout { get; set; } = TimeSpan.FromMinutes(2);
 
-    public AgentRuntime(AgentClient client, IActionProvider provider, IUserInteraction ui, LocalPolicy? policy = null)
+    public AgentRuntime(AgentClient client, IActionProvider provider, IUserInteraction ui, ICommandJournal journal,
+        LocalPolicy? policy = null)
     {
-        _client = client; _provider = provider; _ui = ui; _policy = policy ?? new LocalPolicy();
+        _client = client; _provider = provider; _ui = ui; _journal = journal;
+        _policy = policy ?? new LocalPolicy();
     }
 
     public IReadOnlyDictionary<string, LocalSession> Sessions => _sessions;
+    public IReadOnlyList<StopTiming> StopEvents { get { lock (_stopEvents) return _stopEvents.ToArray(); } }
 
     private void L(string level, string msg)
     {
@@ -89,6 +95,7 @@ public sealed class AgentRuntime
     public async Task<int> PollOnceAsync(CancellationToken ct)
     {
         _verifier ??= new EnvelopeVerifier(_client.State.ServerPublicKeyPem!);
+        await FlushPendingReportsAsync(ct);
         var res = await _client.SendAsync(HttpMethod.Get, "/poll", null, ct);
         var envs = res?["envelopes"]?.AsArray() ?? new JsonArray();
         var n = 0;
@@ -118,11 +125,24 @@ public sealed class AgentRuntime
         long? exp = b.TryGetProperty("expires_at", out var ea) && ea.ValueKind == JsonValueKind.Number ? ea.GetInt64() : null;
         var sessionId = b.TryGetProperty("session_id", out var si) && si.ValueKind == JsonValueKind.String ? si.GetString() : null;
 
-        if (type == "action" && b.TryGetProperty("command_id", out var cidEl) && _handledCommands.Contains(cidEl.GetString()!)) return;
+        if (b.TryGetProperty("device_id", out var did) && did.GetString() != _client.State.DeviceId) { L("critical", "envelope for another device"); return; }
+        if (type == "action" && b.TryGetProperty("command_id", out var cidEl) &&
+            _journal.TryGetCommand(cidEl.GetString()!, out var existing))
+        {
+            if (!Matches(existing, b, sessionId))
+            {
+                L("critical", $"conflicting duplicate command {existing.CommandId} was refused");
+                return;
+            }
+            if (existing.State == LocalCommandState.Completed)
+                await SendCachedReportAsync(existing, ct);
+            else
+                L("info", $"duplicate command {existing.CommandId} is already running");
+            return;
+        }
         if (type == "session.begin" && sessionId is not null && _sessions.ContainsKey(sessionId)) return;
         var (ok, why) = _replay.Check(nonce, issued, exp);
         if (!ok) { L("warn", $"envelope rejected: {why}"); return; }
-        if (b.TryGetProperty("device_id", out var did) && did.GetString() != _client.State.DeviceId) { L("critical", "envelope for another device"); return; }
 
         switch (type)
         {
@@ -160,6 +180,7 @@ public sealed class AgentRuntime
     /// <summary>Kill switch: local cancellation happens first, so it works even if the server is unreachable.</summary>
     public async Task StopFromDeviceAsync(string sessionId)
     {
+        lock (_stopEvents) _stopEvents.Add(new StopTiming(sessionId, DateTimeOffset.UtcNow, Stopwatch.GetTimestamp()));
         if (_sessions.TryGetValue(sessionId, out var s)) EndLocal(s, "stopped by user");
         try { await _client.SendAsync(HttpMethod.Post, $"/sessions/{sessionId}/stop", new { }, CancellationToken.None); }
         catch (Exception e) { L("warn", $"stop notification will not reach server now: {e.Message}"); }
@@ -167,9 +188,12 @@ public sealed class AgentRuntime
 
     private void EndLocal(LocalSession s, string reason)
     {
-        if (!s.Active && s.Cancel.IsCancellationRequested) return;
-        s.Active = false;
-        s.Cancel.Cancel();
+        lock (s.DispatchGate)
+        {
+            if (!s.Active && s.Cancel.IsCancellationRequested) return;
+            s.Active = false;
+            s.Cancel.Cancel();
+        }
         _ui.SessionEnded(s.SessionId, reason);
         L("info", $"session {s.SessionId} ended: {reason}");
     }
@@ -177,20 +201,32 @@ public sealed class AgentRuntime
     private async Task RunActionAsync(JsonElement b, string? sessionId, CancellationToken ct)
     {
         var cid = b.GetProperty("command_id").GetString()!;
-        _handledCommands.Add(cid);
         var action = b.GetProperty("action").GetString()!;
         var p = b.GetProperty("params");
         LocalSession? s = sessionId is not null && _sessions.TryGetValue(sessionId, out var ss) ? ss : null;
+        var executionContext = new ActionExecutionContext(
+            cid,
+            _client.State.DeviceId ?? "",
+            sessionId ?? "",
+            "",
+            b.TryGetProperty("procedure_hash", out var procedureHash) && procedureHash.ValueKind == JsonValueKind.String
+                ? procedureHash.GetString()
+                : null);
+        if (!_journal.MarkRunning(executionContext, action))
+        {
+            L("critical", $"command {cid} could not enter the durable running state; it was not executed");
+            return;
+        }
         var verdict = _policy.Evaluate(action, p, s);
         if (!verdict.Allowed)
         {
             L("warn", $"action {action} refused by local policy: {verdict.Reason}");
-            await Report(cid, "rejected", new JsonObject { ["ok"] = false, ["error"] = $"refused by device policy: {verdict.Reason}" }, ct);
+            await CompleteAndReportAsync(cid, "rejected", new JsonObject { ["ok"] = false, ["error"] = $"refused by device policy: {verdict.Reason}" }, ct);
             return;
         }
         if (!_provider.Capabilities.Contains(action))
         {
-            await Report(cid, "rejected", new JsonObject { ["ok"] = false, ["error"] = "not supported on this device" }, ct);
+            await CompleteAndReportAsync(cid, "rejected", new JsonObject { ["ok"] = false, ["error"] = "not supported on this device" }, ct);
             return;
         }
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, s!.Cancel.Token);
@@ -199,15 +235,13 @@ public sealed class AgentRuntime
         string status;
         try
         {
-            var executionContext = new ActionExecutionContext(
-                cid,
-                _client.State.DeviceId ?? "",
-                sessionId ?? "",
-                "",
-                b.TryGetProperty("procedure_hash", out var procedureHash) && procedureHash.ValueKind == JsonValueKind.String
-                    ? procedureHash.GetString()
-                    : null);
-            result = await _provider.ExecuteAsync(action, p, linked.Token, executionContext);
+            Task<JsonObject> execution;
+            lock (s.DispatchGate)
+            {
+                linked.Token.ThrowIfCancellationRequested();
+                execution = _provider.ExecuteAsync(action, p, linked.Token, executionContext);
+            }
+            result = await execution;
             result["ok"] ??= true;
             status = result["ok"]!.GetValue<bool>() ? "done" : "failed";
             _ui.ActionPerformed(s.SessionId, Describe(action, p));
@@ -222,11 +256,46 @@ public sealed class AgentRuntime
             result = new JsonObject { ["ok"] = false, ["error"] = Redactor.Redact(e.Message) };
             status = "failed";
         }
-        await Report(cid, status, Redactor.RedactNode(result)!.AsObject(), ct);
+        await CompleteAndReportAsync(cid, status, result, ct);
     }
 
-    private Task Report(string cid, string status, JsonObject result, CancellationToken ct) =>
-        _client.SendAsync(HttpMethod.Post, $"/commands/{cid}/result", new { status, result }, ct);
+    private async Task CompleteAndReportAsync(string cid, string status, JsonObject result, CancellationToken ct)
+    {
+        var redacted = Redactor.RedactNode(result)!.AsObject();
+        if (!_journal.MarkCompleted(cid, status, redacted))
+        {
+            L("critical", $"command {cid} completed but its result could not be persisted; no success was reported");
+            return;
+        }
+        await SendReportAsync(new PendingCommandReport(cid, status, redacted, DateTimeOffset.UtcNow), ct);
+    }
+
+    private async Task FlushPendingReportsAsync(CancellationToken ct)
+    {
+        foreach (var report in _journal.PendingReports()) await SendReportAsync(report, ct);
+    }
+
+    private async Task SendCachedReportAsync(CommandJournalEntry entry, CancellationToken ct)
+    {
+        if (entry.Status is null || entry.Result is null || entry.CompletedAt is null) return;
+        await SendReportAsync(new PendingCommandReport(entry.CommandId, entry.Status, entry.Result, entry.CompletedAt.Value), ct);
+    }
+
+    private async Task SendReportAsync(PendingCommandReport report, CancellationToken ct)
+    {
+        await _client.SendCommandResultAsync(report, ct);
+        if (!_journal.AcknowledgeReport(report.CommandId))
+            L("warn", $"server accepted command {report.CommandId}, but local acknowledgement was not saved; it will be retried safely");
+    }
+
+    private static bool Matches(CommandJournalEntry entry, JsonElement envelope, string? sessionId)
+    {
+        var procedureHash = envelope.TryGetProperty("procedure_hash", out var hash) && hash.ValueKind == JsonValueKind.String
+            ? hash.GetString()
+            : null;
+        return entry.DeviceId == envelope.GetProperty("device_id").GetString() && entry.SessionId == (sessionId ?? "") &&
+               entry.Action == envelope.GetProperty("action").GetString() && entry.ProcedureHash == procedureHash;
+    }
 
     private static string Describe(string action, JsonElement p) => action switch
     {

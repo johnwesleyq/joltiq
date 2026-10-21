@@ -94,6 +94,9 @@ public sealed class AgentClient : IDisposable
         return text.Length == 0 ? null : JsonNode.Parse(text);
     }
 
+    public Task<JsonNode?> SendCommandResultAsync(PendingCommandReport report, CancellationToken ct = default) =>
+        SendAsync(HttpMethod.Post, $"/commands/{report.CommandId}/result", new { status = report.Status, result = report.Result }, ct);
+
     public void ForgetEnrollment()
     {
         _store.Delete("device.key");

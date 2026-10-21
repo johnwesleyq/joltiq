@@ -136,4 +136,5 @@ public sealed class LocalSession
     public long? ExpiresAt { get; init; }
     public bool Expired => ExpiresAt is { } e && e < DateTimeOffset.UtcNow.ToUnixTimeSeconds();
     public CancellationTokenSource Cancel { get; } = new();
+    internal object DispatchGate { get; } = new();
 }

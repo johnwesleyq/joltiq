@@ -4,6 +4,7 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Depends, Header, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -183,8 +184,11 @@ class ResultIn(BaseModel):
 @agent_router.post("/commands/{cid}/result")
 def command_result(cid: uuid.UUID, body: ResultIn, dd=Depends(device_auth)):
     db, d = dd
-    cmd = svc.record_result(db, d, cid, body.status, body.result)
-    return {"ok": True, "status": cmd.status}
+    cmd, idempotent, late, conflict = svc.record_result(db, d, cid, body.status, body.result)
+    if conflict:
+        return JSONResponse(status_code=409, content={"error": {"code": "command_result_conflict",
+                                                                  "message": "terminal command result conflicts with the first report"}})
+    return {"ok": True, "status": cmd.status, "late": late, "idempotent": idempotent}
 
 
 @agent_router.post("/commands/{cid}/screenshot")

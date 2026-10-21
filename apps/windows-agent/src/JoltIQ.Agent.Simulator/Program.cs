@@ -22,7 +22,7 @@ if (args[0] == "run")
 {
     using var c = new AgentClient(args[1], new InsecureFileKeyStore(args[2]));
     var ui = new AutoUi(!args.Contains("--decline"));
-    var rt = new AgentRuntime(c, sim, ui) { PollInterval = TimeSpan.FromMilliseconds(400) };
+    var rt = new AgentRuntime(c, sim, ui, new InMemoryCommandJournal()) { PollInterval = TimeSpan.FromMilliseconds(400) };
     ui.Runtime = rt;
     ui.StopAfterFirstAction = args.Contains("--stop-after-first-action");
     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(int.Parse(args[3])));

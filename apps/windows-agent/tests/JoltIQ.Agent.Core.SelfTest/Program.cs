@@ -11,6 +11,11 @@ void T(string name, Action body)
     try { body(); passed++; Console.WriteLine($"PASS {name}"); }
     catch (Exception e) { failures++; Console.WriteLine($"FAIL {name}: {e.Message}"); }
 }
+async Task TA(string name, Func<Task> body)
+{
+    try { await body(); passed++; Console.WriteLine($"PASS {name}"); }
+    catch (Exception e) { failures++; Console.WriteLine($"FAIL {name}: {e.Message}"); }
+}
 void Assert(bool c, string m = "assertion failed") { if (!c) throw new Exception(m); }
 JsonElement J(string s) => JsonDocument.Parse(s).RootElement;
 var active = new LocalSession { SessionId = "s1", Active = true, ExpiresAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 600 };
@@ -114,5 +119,288 @@ T("client refuses plain HTTP to non-local servers", () =>
     catch (ArgumentException) { }
 });
 
+T("command journal prevents duplicate execution and acknowledges the durable outbox", () =>
+{
+    var journal = new InMemoryCommandJournal();
+    var context = new ActionExecutionContext("cmd-1", "device-1", "session-1", "user-1", "procedure-1");
+    Assert(journal.MarkRunning(context, "system.info"), "first dispatch was refused");
+    Assert(!journal.MarkRunning(context, "system.info"), "duplicate dispatch was accepted");
+    Assert(journal.MarkCompleted("cmd-1", "done", JsonNode.Parse("{\"ok\":true,\"value\":7}")!.AsObject()), "completion was not saved");
+    Assert(journal.TryGetCommand("cmd-1", out var saved) && saved.State == LocalCommandState.Completed, "completion missing");
+    Assert(saved.Result?["value"]?.GetValue<int>() == 7, "wrong cached result");
+    Assert(journal.PendingReports().Count == 1, "pending report missing");
+    Assert(journal.AcknowledgeReport("cmd-1"), "acknowledgement failed");
+    Assert(journal.PendingReports().Count == 0, "acknowledged report remained pending");
+});
+
+T("persistent journal survives restart with result and exact typed rollback state", () =>
+{
+    var dir = Path.Combine(Path.GetTempPath(), "joltiq-journal-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new InsecureFileKeyStore(dir);
+        var first = new PersistentCommandJournal(store);
+        var context = new ActionExecutionContext("cmd-persist", "device-1", "session-1", "user-1", "procedure-1");
+        Assert(first.MarkRunning(context, "office.addin.set_load_behavior"));
+        var before = new RegistryValueSnapshot(true, @"Software\Microsoft\Office\Outlook\Addins\Fixture", "LoadBehavior", "32",
+            "DWord", JsonValue.Create(3));
+        Assert(first.TrySaveMutation(new MutationRecord("cmd-persist", "device-1", "session-1", "user-1", "procedure-1",
+            "office.addin.set_load_behavior", before)), "typed pre-state was not saved");
+        Assert(first.MarkCompleted("cmd-persist", "done", JsonNode.Parse("{\"ok\":true}")!.AsObject()));
+
+        var restarted = new PersistentCommandJournal(store);
+        Assert(restarted.PendingReports().Single().CommandId == "cmd-persist", "pending report was lost on restart");
+        Assert(restarted.TryGet("cmd-persist", out var mutation), "rollback record was lost on restart");
+        Assert(mutation.Before.RegistryView == "32" && mutation.Before.Kind == "DWord" &&
+               mutation.Before.Value?.GetValue<int>() == 3, "typed rollback state changed");
+        Assert(restarted.TryMarkMutationApplied("cmd-persist", before with { Value = JsonValue.Create(2) }));
+        Assert(restarted.TryMarkRestored("cmd-persist", "restore-1"), "first restore link was refused");
+        Assert(!restarted.TryMarkRestored("cmd-persist", "restore-2"), "rollback record was reused");
+    }
+    finally { if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true); }
+});
+
+T("process restart converts interrupted running command into pending unknown-outcome evidence", () =>
+{
+    var store = new MemoryKeyStore();
+    var first = new PersistentCommandJournal(store);
+    var context = new ActionExecutionContext("interrupted", "device-1", "session-1", "user-1", "procedure-1");
+    Assert(first.MarkRunning(context, "office.addin.set_load_behavior"));
+    var before = new RegistryValueSnapshot(true, @"Software\Microsoft\Office\Outlook\Addins\Fixture", "LoadBehavior", "64",
+        "DWord", JsonValue.Create(3));
+    Assert(first.TrySaveMutation(new MutationRecord("interrupted", "device-1", "session-1", "user-1", "procedure-1",
+        "office.addin.set_load_behavior", before)));
+    Assert(first.TryMarkMutationApplied("interrupted", before with { Value = JsonValue.Create(2) }));
+
+    var restarted = new PersistentCommandJournal(store);
+    var report = restarted.PendingReports().Single();
+    Assert(report.Status == "failed", "interrupted action was not failed safely");
+    Assert(report.Result["outcome"]?.GetValue<string>() == "unknown", "unknown outcome was hidden");
+    Assert(report.Result["changed"]?.GetValue<bool>() is true, "completed mutation was not disclosed");
+    Assert(report.Result["source_command_id"]?.GetValue<string>() == "interrupted", "rollback reference missing");
+});
+
+T("corrupt persistent journal fails closed instead of forgetting handled commands", () =>
+{
+    var store = new MemoryKeyStore();
+    store.Save("command-journal.v1.json", Encoding.UTF8.GetBytes("not valid journal JSON"));
+    try { _ = new PersistentCommandJournal(store); throw new Exception("corrupt journal was treated as empty"); }
+    catch (InvalidDataException) { }
+});
+
+await TA("runtime sends the durable outbox before polling and never re-executes a completed duplicate", async () =>
+{
+    using var harness = new RuntimeHarness();
+    var journal = new InMemoryCommandJournal();
+    var provider = new CountingProvider();
+    var runtime = new AgentRuntime(harness.Client, provider, new AcceptingUi(), journal);
+    var begin = harness.SessionBegin("session-1");
+    var action = harness.Action("command-1", "session-1", "system.info", new JsonObject());
+    harness.EnqueuePoll(begin, action);
+    harness.FailNextResult = true;
+
+    try { await runtime.PollOnceAsync(default); throw new Exception("lost connection was not surfaced"); }
+    catch (AgentProtocolException) { }
+    Assert(provider.CallCount == 1, "action did not execute exactly once before disconnect");
+    Assert(journal.PendingReports().Count == 1, "completed result was lost after disconnect");
+
+    harness.Paths.Clear();
+    harness.EnqueuePoll(action);
+    await runtime.PollOnceAsync(default);
+    Assert(provider.CallCount == 1, "completed duplicate executed again");
+    Assert(journal.PendingReports().Count == 0, "accepted report was not acknowledged");
+    Assert(harness.Paths.Count >= 2 && harness.Paths[0].EndsWith("/commands/command-1/result") && harness.Paths[1].EndsWith("/poll"),
+        "pending result did not flush before polling for new work");
+    Assert(harness.AcceptedResults.Count == 2, "completed duplicate did not resend its cached result");
+});
+
+await TA("runtime ignores a duplicate while the original command is still running", async () =>
+{
+    using var harness = new RuntimeHarness();
+    var provider = new CountingProvider { WaitForRelease = true };
+    var runtime = new AgentRuntime(harness.Client, provider, new AcceptingUi(), new InMemoryCommandJournal());
+    harness.EnqueuePoll(harness.SessionBegin("session-1"));
+    await runtime.PollOnceAsync(default);
+    var action = harness.Action("command-running", "session-1", "system.info", new JsonObject());
+    harness.EnqueuePoll(action);
+    var first = runtime.PollOnceAsync(default);
+    await provider.Entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+    harness.EnqueuePoll(action);
+    await runtime.PollOnceAsync(default);
+    Assert(provider.CallCount == 1, "running duplicate executed concurrently");
+    provider.Release.TrySetResult();
+    await first;
+});
+
+await TA("STOP refuses queued work and cancels in-progress work with monotonic evidence", async () =>
+{
+    using (var before = new RuntimeHarness())
+    {
+        var provider = new CountingProvider();
+        var runtime = new AgentRuntime(before.Client, provider, new AcceptingUi(), new InMemoryCommandJournal());
+        before.EnqueuePoll(before.SessionBegin("session-before"));
+        await runtime.PollOnceAsync(default);
+        await runtime.StopFromDeviceAsync("session-before");
+        before.EnqueuePoll(before.Action("after-stop", "session-before", "system.info", new JsonObject()));
+        await runtime.PollOnceAsync(default);
+        Assert(provider.CallCount == 0, "queued work ran after STOP");
+        Assert(runtime.StopEvents.Count == 1 && runtime.StopEvents[0].MonotonicTimestamp > 0, "STOP timing evidence missing");
+    }
+
+    using (var during = new RuntimeHarness())
+    {
+        var provider = new CountingProvider { WaitForCancellation = true };
+        var journal = new InMemoryCommandJournal();
+        var runtime = new AgentRuntime(during.Client, provider, new AcceptingUi(), journal);
+        during.EnqueuePoll(during.SessionBegin("session-during"));
+        await runtime.PollOnceAsync(default);
+        during.EnqueuePoll(during.Action("during-stop", "session-during", "system.info", new JsonObject()));
+        var running = runtime.PollOnceAsync(default);
+        await provider.Entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await runtime.StopFromDeviceAsync("session-during");
+        await running;
+        Assert(provider.CancellationObserved, "in-progress action did not receive STOP cancellation");
+        Assert(journal.TryGetCommand("during-stop", out var saved) && saved.Status == "failed", "cancelled result was not journaled");
+    }
+});
+
 Console.WriteLine($"\n{passed} passed, {failures} failed");
 return failures == 0 ? 0 : 1;
+
+sealed class MemoryKeyStore : IKeyStore
+{
+    private readonly Dictionary<string, byte[]> _data = new(StringComparer.Ordinal);
+    public byte[]? Load(string name) => _data.TryGetValue(name, out var value) ? value.ToArray() : null;
+    public void Save(string name, byte[] data) => _data[name] = data.ToArray();
+    public void Delete(string name) => _data.Remove(name);
+}
+
+sealed class ProtocolHandler : HttpMessageHandler
+{
+    private readonly Queue<JsonArray> _polls = new();
+    public bool FailNextResult { get; set; }
+    public List<string> Paths { get; } = new();
+    public List<JsonObject> AcceptedResults { get; } = new();
+
+    public void Enqueue(params JsonObject[] envelopes)
+    {
+        lock (_polls) _polls.Enqueue(new JsonArray(envelopes.Select(x => (JsonNode?)x.DeepClone()).ToArray()));
+    }
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        var path = request.RequestUri!.AbsolutePath;
+        Paths.Add(path);
+        if (path.EndsWith("/poll"))
+        {
+            JsonArray envelopes;
+            lock (_polls) envelopes = _polls.Count == 0 ? new JsonArray() : _polls.Dequeue();
+            return Json(new JsonObject { ["envelopes"] = envelopes });
+        }
+        if (path.Contains("/commands/") && path.EndsWith("/result"))
+        {
+            if (FailNextResult)
+            {
+                FailNextResult = false;
+                return new HttpResponseMessage(System.Net.HttpStatusCode.ServiceUnavailable) { Content = new StringContent("offline") };
+            }
+            var body = JsonNode.Parse(await request.Content!.ReadAsStringAsync(cancellationToken))!.AsObject();
+            AcceptedResults.Add(body);
+            return Json(new JsonObject { ["ok"] = true });
+        }
+        return Json(new JsonObject { ["ok"] = true });
+    }
+
+    private static HttpResponseMessage Json(JsonNode body) => new(System.Net.HttpStatusCode.OK)
+    {
+        Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json"),
+    };
+}
+
+sealed class RuntimeHarness : IDisposable
+{
+    private readonly ECDsa _server = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+    private readonly ProtocolHandler _handler = new();
+    public AgentClient Client { get; }
+    public bool FailNextResult { set => _handler.FailNextResult = value; }
+    public List<string> Paths => _handler.Paths;
+    public List<JsonObject> AcceptedResults => _handler.AcceptedResults;
+
+    public RuntimeHarness()
+    {
+        var store = new MemoryKeyStore();
+        using var deviceKey = DeviceKey.Create();
+        store.Save("device.key", deviceKey.ExportPkcs8());
+        store.Save("state.json", JsonSerializer.SerializeToUtf8Bytes(new AgentState
+        {
+            ServerUrl = "http://localhost",
+            DeviceId = "device-1",
+            OrgId = "org-1",
+            ServerPublicKeyPem = _server.ExportSubjectPublicKeyInfoPem(),
+        }));
+        Client = new AgentClient("http://localhost", store, _handler);
+    }
+
+    public void EnqueuePoll(params JsonObject[] envelopes) => _handler.Enqueue(envelopes);
+
+    public JsonObject SessionBegin(string sessionId) => Envelope(new JsonObject
+    {
+        ["type"] = "session.begin", ["session_id"] = sessionId, ["device_id"] = "device-1",
+        ["issued_at"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds(), ["expires_at"] = DateTimeOffset.UtcNow.AddMinutes(5).ToUnixTimeSeconds(),
+        ["nonce"] = Guid.NewGuid().ToString("N"),
+    });
+
+    public JsonObject Action(string commandId, string sessionId, string action, JsonObject parameters) => Envelope(new JsonObject
+    {
+        ["type"] = "action", ["command_id"] = commandId, ["device_id"] = "device-1", ["session_id"] = sessionId,
+        ["action"] = action, ["params"] = parameters, ["procedure_hash"] = "procedure-1",
+        ["issued_at"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds(), ["expires_at"] = DateTimeOffset.UtcNow.AddMinutes(2).ToUnixTimeSeconds(),
+        ["nonce"] = Guid.NewGuid().ToString("N"), ["risk"] = "READ_ONLY",
+    });
+
+    private JsonObject Envelope(JsonObject body)
+    {
+        var payload = Encoding.UTF8.GetBytes(body.ToJsonString());
+        return new JsonObject
+        {
+            ["payload"] = Convert.ToBase64String(payload),
+            ["signature"] = Convert.ToBase64String(_server.SignData(payload, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence)),
+        };
+    }
+
+    public void Dispose() { Client.Dispose(); _server.Dispose(); }
+}
+
+sealed class CountingProvider : IActionProvider
+{
+    public int CallCount { get; private set; }
+    public bool WaitForRelease { get; init; }
+    public bool WaitForCancellation { get; init; }
+    public bool CancellationObserved { get; private set; }
+    public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public IReadOnlyCollection<string> Capabilities { get; } = new[] { "system.info" };
+    public IDictionary<string, string> Facts() => new Dictionary<string, string>();
+
+    public async Task<JsonObject> ExecuteAsync(string action, JsonElement parameters, CancellationToken ct, ActionExecutionContext? context = null)
+    {
+        CallCount++;
+        Entered.TrySetResult();
+        if (WaitForRelease) await Release.Task.WaitAsync(ct);
+        if (WaitForCancellation)
+        {
+            try { await Task.Delay(Timeout.InfiniteTimeSpan, ct); }
+            catch (OperationCanceledException) { CancellationObserved = true; throw; }
+        }
+        return new JsonObject { ["ok"] = true, ["calls"] = CallCount };
+    }
+}
+
+sealed class AcceptingUi : IUserInteraction
+{
+    public string CurrentUserDisplayName => "Test User";
+    public Task<bool> AskConsentAsync(string sessionId, string description, TimeSpan timeout, CancellationToken ct) => Task.FromResult(true);
+    public void SessionStarted(string sessionId, Action stopRequested) { }
+    public void SessionEnded(string sessionId, string reason) { }
+    public void ActionPerformed(string sessionId, string summary) { }
+}
