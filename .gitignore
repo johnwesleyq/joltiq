@@ -15,3 +15,9 @@ coverage/
 test-results/
 playwright-report/
 *.log
+
+# Generated Windows acceptance evidence (may contain device/customer metadata)
+apps/windows-agent/artifacts/
+apps/windows-agent/evidence/
+windows-acceptance-evidence/
+windows-acceptance.json
