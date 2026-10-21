@@ -134,10 +134,12 @@ def attach_evidence(customer, ticket_id):
     return response.json()
 
 
-def publish_upload_procedure(app, owner, attachment_id):
+def publish_upload_procedure(app, owner):
     evidence_url = f"{TESTAPP}/app/evidence"
     receipt = f"Received case-evidence.txt (27 bytes) sha256 {UPLOAD_SHA256}"
     body = {
+        "procedure_schema": 3,
+        "kind": "browser",
         "symptoms": ["FieldDesk case evidence is missing", "Customer supplied evidence must be attached to the FieldDesk case"],
         "environment": ["FieldDesk web app"],
         "prerequisites": ["Customer supplied a validated ticket attachment", "FieldDesk admin sign-in"],
@@ -155,7 +157,10 @@ def publish_upload_procedure(app, owner, attachment_id):
             },
             {
                 "action": "browser.upload",
-                "params": {"selector": "testid=evidence-file", "attachment_id": attachment_id},
+                "params": {
+                    "selector": "testid=evidence-file",
+                    "attachment_binding": "customer_selected_ticket_attachment",
+                },
                 "rationale": "Upload the exact customer-approved ticket attachment",
                 "postconditions": [
                     {
@@ -175,11 +180,12 @@ def publish_upload_procedure(app, owner, attachment_id):
     return article
 
 
-def start_upload_run(customer, ticket_id):
+def start_upload_run(customer, ticket_id, attachment_id):
     response = customer.post(
         "/api/v1/agents/chat",
         json={
             "ticket_id": ticket_id,
+            "attachment_id": attachment_id,
             "message": "The customer supplied evidence is missing from our FieldDesk web app case. Please attach it.",
         },
     )
@@ -203,8 +209,8 @@ def prepare_upload_run(app, owner, customer, *, attachment_ticket_id=None):
     run_ticket = create_upload_ticket(customer)
     source_ticket = run_ticket if attachment_ticket_id is None else attachment_ticket_id
     attachment = attach_evidence(customer, source_ticket["id"])
-    publish_upload_procedure(app, owner, attachment["id"])
-    chat = start_upload_run(customer, run_ticket["id"])
+    publish_upload_procedure(app, owner)
+    chat = start_upload_run(customer, run_ticket["id"], attachment["id"])
     run = wait_state(customer, chat["run_id"], lambda value: value["state"] == "AWAITING_APPROVAL")
     session_id, approval = consent_upload_session(customer, run)
     return chat, session_id, approval
@@ -254,20 +260,20 @@ def test_browser_upload_wrong_ticket_attachment_is_refused(services, app, team):
     owner, _tech, customer = team
     httpx.post(f"{TESTAPP}/__test__/reset")
     source_ticket = create_upload_ticket(customer, subject="Unrelated FieldDesk case")
-    chat, session_id, approval = prepare_upload_run(app, owner, customer, attachment_ticket_id=source_ticket)
-    assert customer.post(f"/api/v1/approvals/{approval['id']}/decision", json={"decision": "approve"}).status_code == 200
-    wait_state(customer, chat["run_id"], lambda value: value["paused_for"] == "user_auth")
-    human_sign_in(customer, session_id)
+    run_ticket = create_upload_ticket(customer)
+    attachment = attach_evidence(customer, source_ticket["id"])
+    publish_upload_procedure(app, owner)
 
-    run = wait_state(
-        customer,
-        chat["run_id"],
-        lambda value: any("attachment" in transition["reason"].lower() for transition in value["transitions"]),
-        timeout=120,
+    refused = customer.post(
+        "/api/v1/agents/chat",
+        json={
+            "ticket_id": run_ticket["id"],
+            "attachment_id": attachment["id"],
+            "message": "Attach this evidence to FieldDesk.",
+        },
     )
 
-    assert any("attachment" in transition["reason"].lower() for transition in run["transitions"])
-    assert run["state"] in ("AWAITING_APPROVAL", "ESCALATED")
+    assert refused.status_code == 404
     assert httpx.get(f"{TESTAPP}/__test__/state").json()["upload"] is None
 
 

@@ -21,7 +21,7 @@ from .schemas import json_schema
 log = logging.getLogger("joltiq.ai")
 T = TypeVar("T", bound=BaseModel)
 
-TASKS = ["intent", "clarify", "retrieval", "diagnosis", "research", "planning", "vision", "tool_selection",
+TASKS = ["intent", "clarify", "retrieval", "diagnosis", "candidate_selection", "research", "planning", "vision", "tool_selection",
          "verification_analysis", "article_drafting", "summary", "chat", "computer_use"]
 DEFAULT_ORDER = ["anthropic", "openai", "gemini"]
 TASK_TIER = {"planning": "planning", "diagnosis": "planning", "vision": "vision", "computer_use": "computer_use"}

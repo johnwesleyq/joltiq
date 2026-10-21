@@ -26,7 +26,7 @@ from urllib.parse import urlsplit
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from ..core.errors import AppError, Conflict, EntitlementExceeded, Unavailable
+from ..core.errors import AppError, Conflict, EntitlementExceeded, NotFound, Unavailable
 from ..models import (
     ActionExecution,
     AgentMessage,
@@ -42,6 +42,7 @@ from ..models import (
     PlanStep,
     SupportSession,
     Ticket,
+    TicketAttachment,
     VerificationRun,
     utcnow,
 )
@@ -79,9 +80,41 @@ SYSTEM_BASE = (
 
 
 # ---------------- creation & messaging ----------------
-def start_run(db: Session, org_id: uuid.UUID, *, ticket: Ticket, started_by, first_message: str | None = None) -> AgentRun:
+def select_attachment_for_run(db: Session, run: AgentRun, ticket: Ticket, attachment_id: uuid.UUID) -> None:
+    attachment = db.execute(
+        select(TicketAttachment).where(
+            TicketAttachment.id == attachment_id,
+            TicketAttachment.org_id == run.org_id,
+            TicketAttachment.ticket_id == ticket.id,
+        )
+    ).scalar_one_or_none()
+    if attachment is None:
+        raise NotFound("Attachment not found")
+    frozen = {
+        "id": str(attachment.id),
+        "filename": attachment.filename,
+        "size_bytes": attachment.size_bytes,
+        "sha256": attachment.sha256,
+    }
+    existing = (run.context or {}).get("selected_attachment")
+    if existing and existing != frozen:
+        raise Conflict("The selected attachment is already frozen for this run", code="attachment_binding_frozen")
+    run.context = {**(run.context or {}), "selected_attachment": frozen}
+
+
+def start_run(
+    db: Session,
+    org_id: uuid.UUID,
+    *,
+    ticket: Ticket,
+    started_by,
+    first_message: str | None = None,
+    attachment_id: uuid.UUID | None = None,
+) -> AgentRun:
     active = db.execute(select(AgentRun).where(AgentRun.ticket_id == ticket.id, AgentRun.state.notin_([s.value for s in TERMINAL_RUN_STATES]))).scalars().first()
     if active:
+        if attachment_id:
+            select_attachment_for_run(db, active, ticket, attachment_id)
         if first_message:
             add_message(db, active, "user", first_message, author_id=started_by)
         return active
@@ -91,6 +124,8 @@ def start_run(db: Session, org_id: uuid.UUID, *, ticket: Ticket, started_by, fir
     run.max_retries = int(((org.settings if org else {}) or {}).get("max_retries", 2))
     db.add(run)
     db.flush()
+    if attachment_id:
+        select_attachment_for_run(db, run, ticket, attachment_id)
     add_message(db, run, "user", first_message or f"{ticket.subject}\n\n{ticket.description}", author_id=started_by)
     ticket_svc.add_event(db, ticket, "ai_run_started", actor_kind="ai", data={"run_id": str(run.id)})
     audit.record(db, org_id=org_id, actor_kind="user", actor_id=started_by, action="agent.run_started", resource_type="agent_run", resource_id=run.id)
@@ -334,7 +369,7 @@ def _maybe_collect_diagnostics(db, run) -> bool:
 
 def _procedures_for(db, hits: list[dict]) -> list[dict]:
     """Executable procedures only come from human-approved, published knowledge articles."""
-    from .procedures import load_published_procedure, publication_hash
+    from .procedures import load_published_browser_procedure, load_published_procedure, publication_hash
 
     out = []
     for h in hits:
@@ -350,6 +385,9 @@ def _procedures_for(db, hits: list[dict]) -> list[dict]:
             if body.get("procedure_schema") == 2:
                 definition = load_published_procedure(art)
                 proc = [step.model_dump(mode="json") for step in definition.procedure]
+            elif body.get("procedure_schema") == 3:
+                definition = load_published_browser_procedure(art)
+                proc = [step.model_dump(mode="json") for step in definition.procedure]
             else:
                 if not art.procedure_hash or publication_hash(body) != art.procedure_hash:
                     raise ValueError("published procedure fingerprint mismatch")
@@ -362,7 +400,8 @@ def _procedures_for(db, hits: list[dict]) -> list[dict]:
             )
             continue
         if proc:
-            out.append({"article_id": str(art.id), "title": art.title, "kind": body.get("kind"), "steps": proc, "evidence_id": h["eid"],
+            out.append({"article_id": str(art.id), "title": art.title, "kind": body.get("kind"),
+                        "procedure_schema": body.get("procedure_schema"), "steps": proc, "evidence_id": h["eid"],
                         "hypothesis": body.get("hypothesis", art.title), "risks": body.get("risks", []),
                         "procedure": {"article_id": str(art.id), "version": art.version, "hash": art.procedure_hash}})
     return out
@@ -553,6 +592,50 @@ def h_diagnose(db, run):
             _set_ticket(db, run, TS.AWAITING_APPROVAL, "waiting for diagnostic consent")
             run.paused_for = "diagnostic_consent"
             return
+    browser = [
+        p for p in run.context.get("procedures", [])
+        if p.get("kind") == "browser" and p.get("procedure_schema") == 3
+    ]
+    if browser:
+        selected = _model(
+            db,
+            run,
+            "candidate_selection",
+            S.CandidateSelection,
+            {"candidates": [{k: p.get(k) for k in ("article_id", "title", "hypothesis", "evidence_id")} for p in browser]},
+        )
+        article_id = select_candidate_procedure(browser, selected.article_id)
+        if article_id:
+            attachment = (run.context or {}).get("selected_attachment")
+            if not attachment:
+                _escalate(db, run, "The approved browser procedure requires the customer to select a ticket attachment")
+                return
+            candidate = next(p for p in browser if p["article_id"] == article_id)
+            article = db.get(KnowledgeArticle, uuid.UUID(article_id))
+            from .browser_uploads import materialize_selected_attachment
+            from .procedures import load_published_browser_procedure
+
+            load_published_browser_procedure(article)
+            steps = materialize_selected_attachment(article.body or {}, attachment["id"])
+            t = _ticket(db, run)
+            session = sessions.start(
+                db,
+                run.org_id,
+                kind="browser",
+                owner_id=t.requester_id or run.started_by,
+                ticket_id=t.id,
+                allowed_domains=_hosts_from_steps(steps),
+                run_id=run.id,
+            )
+            _ctx_update(
+                run,
+                candidate_procedure=candidate,
+                diagnostic_session_id=str(session.id),
+                diagnostic_decision={"allowed": True, "reasons": []},
+                candidate_hypothesis=selected.hypothesis,
+            )
+            transition(db, run, R.PLANNING, "approved browser procedure selected with customer attachment binding")
+            return
     transition(db, run, R.PLANNING, f"{len(hyps)} hypotheses")
 
 
@@ -637,11 +720,26 @@ def h_plan(db, run):
             _escalate(db, run, "Canonical remediation planning was blocked because the diagnostic gate did not pass")
             return
         article = db.get(KnowledgeArticle, uuid.UUID(ctx["candidate_procedure"]["article_id"]))
-        from .procedures import load_published_procedure
-
-        procedure = load_published_procedure(article)
         session = db.get(SupportSession, uuid.UUID(ctx["diagnostic_session_id"]))
-        plan = build_canonical_plan(db, run, article, procedure, session)
+        if ctx["candidate_procedure"].get("kind") == "browser":
+            from .browser_uploads import materialize_selected_attachment
+            from .procedures import load_published_browser_procedure
+
+            procedure = load_published_browser_procedure(article)
+            selected = ctx.get("selected_attachment") or {}
+            steps = materialize_selected_attachment(article.body or {}, selected.get("id"))
+            plan = build_canonical_browser_plan(db, run, article, steps, session)
+            _say(
+                db,
+                run,
+                "To apply this I need your permission to start a browser session. Please review and accept it in your portal.",
+                data={"session_id": str(session.id)},
+            )
+        else:
+            from .procedures import load_published_procedure
+
+            procedure = load_published_procedure(article)
+            plan = build_canonical_plan(db, run, article, procedure, session)
         transition(db, run, R.AWAITING_APPROVAL, f"canonical plan r{plan.revision}: {plan.summary}",
                    {"plan_id": str(plan.id), "steps": len(procedure.procedure)})
         _set_ticket(db, run, TS.AWAITING_APPROVAL, "waiting for exact-step approval")
@@ -800,6 +898,88 @@ def build_canonical_plan(db, run, article: KnowledgeArticle, procedure, session:
     _ctx_update(run, current_plan_id=str(plan.id))
     _say(db, run, f"The read-only checks passed. Please approve each exact step in the published procedure: {article.title}",
          data={"plan_id": str(plan.id), "procedure_hash": article.procedure_hash}, ticket_comment=False)
+    return plan
+
+
+def build_canonical_browser_plan(
+    db: Session,
+    run: AgentRun,
+    article: KnowledgeArticle,
+    steps: list[dict[str, Any]],
+    session: SupportSession,
+) -> AgentPlan:
+    """Persist a published browser template after its customer-owned binding is resolved."""
+    if article.procedure_hash is None:
+        raise ValueError("canonical procedure is missing its publication fingerprint")
+    phash = sha256_hex(canonical_json(steps))
+    rev = len(db.execute(select(AgentPlan.id).where(AgentPlan.run_id == run.id)).all()) + 1
+    candidate = run.context["candidate_procedure"]
+    plan = AgentPlan(
+        org_id=run.org_id,
+        run_id=run.id,
+        revision=rev,
+        summary=f"Apply approved procedure: {article.title}",
+        hypothesis=run.context.get("candidate_hypothesis") or article.title,
+        risks=candidate.get("risks", []),
+        plan_hash=phash,
+        status="proposed",
+        citations=[e for e in run.context.get("evidence", []) if e["id"] == candidate.get("evidence_id")],
+        procedure_article_id=article.id,
+        procedure_version=article.version,
+        procedure_hash=article.procedure_hash,
+    )
+    db.add(plan)
+    db.flush()
+    target = {"session_id": str(session.id), "device_id": None}
+    selected = run.context["selected_attachment"]
+    for ordinal, step in enumerate(steps):
+        params = validate_params(step["action"], step["params"])
+        decision = policy.evaluate(db, run.org_id, step["action"], params, session=_virtual_session(session, steps))
+        if decision.effect == "deny":
+            raise ValueError(f"policy denied canonical action {step['action']}")
+        ps = PlanStep(
+            org_id=run.org_id,
+            plan_id=plan.id,
+            ordinal=ordinal,
+            action=step["action"],
+            target=target,
+            params=params,
+            rationale=step["rationale"],
+            risk=decision.risk,
+            postconditions=step["postconditions"],
+        )
+        db.add(ps)
+        db.flush()
+        if decision.effect == "require_approval":
+            spec = ACTIONS[ps.action]
+            reason = ps.rationale
+            if ps.action == "browser.upload":
+                reason += (
+                    f" File: {selected['filename']} ({selected['size_bytes']} bytes, "
+                    f"SHA-256 {selected['sha256'][:12]}…)."
+                )
+            approvals.request(
+                db,
+                org_id=run.org_id,
+                run_id=run.id,
+                plan_id=plan.id,
+                step=ps,
+                plan_hash=phash,
+                ticket_id=run.ticket_id,
+                session_id=session.id,
+                reason=reason,
+                effects=spec.effects,
+                approver_roles=decision.approver_roles,
+                requested_for_user_id=_ticket(db, run).requester_id,
+            )
+    _ctx_update(run, current_plan_id=str(plan.id))
+    _say(
+        db,
+        run,
+        f"Please approve the exact published browser procedure: {article.title}",
+        data={"plan_id": str(plan.id), "procedure_hash": article.procedure_hash},
+        ticket_comment=False,
+    )
     return plan
 
 

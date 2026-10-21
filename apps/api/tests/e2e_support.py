@@ -12,7 +12,9 @@ import httpx
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 WORKER_PORT = int(os.environ.get("JOLTIQ_TEST_WORKER_PORT", "8199"))
 TESTAPP_PORT = int(os.environ.get("JOLTIQ_TEST_APP_PORT", "8399"))
-TESTAPP = f"http://127.0.0.1:{TESTAPP_PORT}"
+TEST_HOST = os.environ.get("JOLTIQ_TEST_HOST", "127.0.0.1")
+TESTAPP = f"http://{TEST_HOST}:{TESTAPP_PORT}"
+WORKER = f"http://{TEST_HOST}:{WORKER_PORT}"
 
 
 def _free(port: int) -> bool:
@@ -35,15 +37,15 @@ def _wait(url: str, timeout: float = 30) -> None:
 def start_services():
     procs = []
     py = sys.executable
-    if _free(TESTAPP_PORT):
+    if TEST_HOST == "127.0.0.1" and _free(TESTAPP_PORT):
         procs.append(subprocess.Popen([py, "-m", "uvicorn", "app:app", "--port", str(TESTAPP_PORT), "--log-level", "warning"],
                                       cwd=os.path.join(ROOT, "tests", "e2e", "testapp")))
-    if _free(WORKER_PORT):
+    if TEST_HOST == "127.0.0.1" and _free(WORKER_PORT):
         env = {**os.environ, "JOLTIQ_BROWSER_WORKER_TOKEN": "test-worker-token"}
         procs.append(subprocess.Popen([py, "-m", "uvicorn", "worker.app:app", "--port", str(WORKER_PORT), "--log-level", "warning"],
                                       cwd=os.path.join(ROOT, "services", "browser-worker"), env=env))
     _wait(f"{TESTAPP}/docs/index.json")
-    _wait(f"http://127.0.0.1:{WORKER_PORT}/healthz")
+    _wait(f"{WORKER}/healthz")
     return procs
 
 

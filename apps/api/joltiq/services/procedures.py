@@ -48,6 +48,10 @@ class Postcondition(StrictModel):
     params: dict[str, Any]
 
 
+class BrowserPostcondition(Postcondition):
+    description: str | None = Field(default=None, max_length=2000)
+
+
 class RemediationStep(StrictModel):
     action: str
     params: dict[str, Any]
@@ -123,7 +127,7 @@ class BrowserRemediationStep(StrictModel):
     action: str
     params: dict[str, Any]
     rationale: str = Field(min_length=1, max_length=2000)
-    postconditions: list[Postcondition]
+    postconditions: list[BrowserPostcondition]
 
     @model_validator(mode="after")
     def validate_action(self):
@@ -235,5 +239,15 @@ def load_published_procedure(article: KnowledgeArticle) -> ProcedureDefinition:
         raise ValueError("article is not a fingerprinted executable procedure")
     definition = validate_executable_body(article.body or {})
     if procedure_hash(definition) != article.procedure_hash:
+        raise ValueError("published procedure fingerprint mismatch")
+    return definition
+
+
+def load_published_browser_procedure(article: KnowledgeArticle) -> BrowserProcedureDefinition:
+    if article.status != "published" or not article.executable or not article.procedure_hash:
+        raise ValueError("article is not a fingerprinted executable procedure")
+    definition = validate_browser_executable_body(article.body or {})
+    actual = sha256_hex(canonical_json(definition.model_dump(mode="json", exclude_none=True)))
+    if actual != article.procedure_hash:
         raise ValueError("published procedure fingerprint mismatch")
     return definition

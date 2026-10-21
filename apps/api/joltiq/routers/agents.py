@@ -41,6 +41,7 @@ class ChatIn(BaseModel):
     message: str = Field(min_length=1, max_length=20_000)
     ticket_id: uuid.UUID | None = None
     subject: str | None = Field(default=None, max_length=300)
+    attachment_id: uuid.UUID | None = None
 
 
 @router.post("/agents/chat", status_code=201)
@@ -56,9 +57,18 @@ def chat(body: ChatIn, ctx: Ctx = Depends(perm("agents.run"))):
     if run is None or run.state in TERMINAL_RUN_STATES:
         if body.ticket_id and run is not None:
             ticket_svc.comment(ctx.db, t, body.message, author_id=ctx.p.user_id)
-        run = svc.start_run(ctx.db, ctx.org_id, ticket=t, started_by=ctx.p.user_id, first_message=body.message)
+        run = svc.start_run(
+            ctx.db,
+            ctx.org_id,
+            ticket=t,
+            started_by=ctx.p.user_id,
+            first_message=body.message,
+            attachment_id=body.attachment_id,
+        )
         resumed = True
     else:
+        if body.attachment_id:
+            svc.select_attachment_for_run(ctx.db, run, t, body.attachment_id)
         resumed = svc.customer_message(ctx.db, run, body.message, ctx.p.user_id)["resumed"]
         ticket_svc.comment(ctx.db, t, body.message, author_id=ctx.p.user_id)
     reply = None
@@ -116,12 +126,13 @@ def runs_for_ticket(ticket_id: uuid.UUID, ctx: Ctx = Depends(get_ctx)):
 
 class StartIn(BaseModel):
     ticket_id: uuid.UUID
+    attachment_id: uuid.UUID | None = None
 
 
 @router.post("/agents/runs", status_code=201)
 def start(body: StartIn, ctx: Ctx = Depends(perm("agents.run"))):
     t = ticket_for(ctx, body.ticket_id)
-    run = svc.start_run(ctx.db, ctx.org_id, ticket=t, started_by=ctx.p.user_id)
+    run = svc.start_run(ctx.db, ctx.org_id, ticket=t, started_by=ctx.p.user_id, attachment_id=body.attachment_id)
     return {"run_id": str(run.id), "state": run.state}
 
 

@@ -952,3 +952,36 @@ def test_typed_browser_procedure_refuses_missing_selection_and_hard_coded_attach
     }
     with pytest.raises(ValueError, match="attachment_binding"):
         publication_hash(body)
+
+
+def test_agent_run_freezes_only_an_accessible_same_ticket_attachment(owner):
+    """Catches cross-ticket binding and any later attempt to silently replace the selected file."""
+    from joltiq.db import session_scope
+    from joltiq.models import AgentRun
+
+    first = owner.post("/api/v1/tickets", json={"subject": "Upload first evidence"}).json()
+    second = owner.post("/api/v1/tickets", json={"subject": "Upload second evidence"}).json()
+    attachment = owner.post(
+        f"/api/v1/tickets/{first['id']}/attachments",
+        files={"file": ("evidence.txt", b"customer-selected evidence", "text/plain")},
+    ).json()
+
+    started = owner.post(
+        "/api/v1/agents/runs",
+        json={"ticket_id": first["id"], "attachment_id": attachment["id"]},
+    )
+    assert started.status_code == 201, started.text
+    with session_scope(uuid.UUID(owner.org_id)) as db:
+        run = db.get(AgentRun, uuid.UUID(started.json()["run_id"]))
+        assert run.context["selected_attachment"] == {
+            "id": attachment["id"],
+            "filename": "evidence.txt",
+            "size_bytes": len(b"customer-selected evidence"),
+            "sha256": hashlib.sha256(b"customer-selected evidence").hexdigest(),
+        }
+
+    refused = owner.post(
+        "/api/v1/agents/runs",
+        json={"ticket_id": second["id"], "attachment_id": attachment["id"]},
+    )
+    assert refused.status_code == 404
