@@ -31,6 +31,7 @@ from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from playwright.async_api import Browser, BrowserContext, Page, Route, async_playwright
+from playwright.async_api import Error as PlaywrightError
 from pydantic import BaseModel, Field
 
 log = logging.getLogger("joltiq.browser")
@@ -207,9 +208,27 @@ async def detect_auth(page: Page) -> dict[str, Any]:
     return {"auth_required": kind is not None, "kind": kind}
 
 
+def _navigation_replaced_context(error: PlaywrightError) -> bool:
+    message = str(error).lower()
+    return "execution context was destroyed" in message or "most likely because of a navigation" in message
+
+
 async def page_state(s: Session, include_snapshot: bool = True) -> dict[str, Any]:
     p = s.page
-    out: dict[str, Any] = {"url": p.url, "title": await p.title(), **(await detect_auth(p))}
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            out: dict[str, Any] = {"url": p.url, "title": await p.title(), **(await detect_auth(p))}
+            break
+        except PlaywrightError as error:
+            if not _navigation_replaced_context(error) or time.monotonic() >= deadline:
+                raise
+            try:
+                await p.wait_for_load_state("domcontentloaded", timeout=1000)
+            except PlaywrightError as wait_error:
+                if not _navigation_replaced_context(wait_error):
+                    raise
+            await asyncio.sleep(0.05)
     if include_snapshot:
         try:
             out["accessibility"] = (await p.locator("body").aria_snapshot(timeout=2000))[:8000]
