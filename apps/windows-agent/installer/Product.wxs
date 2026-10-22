@@ -15,6 +15,7 @@
       <Property Id="ARPCOMMENTS" Value="Externally releasable build — Authenticode verification is enforced by the release pipeline." />
       <Property Id="JOLTIQ_BUILD_CLASSIFICATION" Value="EXTERNAL_SIGNED" />
     <?endif?>
+    <Property Id="JOLTIQ_COMPUTER_USE_DRIVER" Value="NATIVE_WINDOWS_GUIDE_FIX" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="JoltIQ Companion">
@@ -26,6 +27,8 @@
     </StandardDirectory>
 
     <ComponentGroup Id="TrayFiles" Directory="INSTALLFOLDER">
+      <!-- The publish tree is build-gated to contain the native Core/Windows assemblies and
+           computer-use-capabilities.json before WiX receives it. -->
       <Files Include="$(var.PublishDir)tray\**" />
     </ComponentGroup>
 

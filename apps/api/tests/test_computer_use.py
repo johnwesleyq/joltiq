@@ -6,6 +6,7 @@ import base64
 import json
 import struct
 import zlib
+from types import SimpleNamespace
 
 import pytest
 from test_device_protocol import FakeDevice, _code
@@ -417,6 +418,24 @@ def test_planner_cannot_use_input_primitives():
 
     ids = {a["id"] for a in registry_for_prompt()}
     assert not ids & {"input.click", "input.type", "screen.capture", "url.open"}
+
+
+def test_guide_open_url_refusal_is_not_attributed_to_computer_toolset(monkeypatch):
+    from joltiq.services import computer_use as cu
+
+    captured = {}
+
+    def fake_refuse(_db, _run, _tid, _name, _inp, _narr, _why, *, computer):
+        captured["computer"] = computer
+
+    monkeypatch.setattr(cu, "_refuse", fake_refuse)
+    cu._execute(
+        None,
+        SimpleNamespace(mode="guide"),
+        {"id": "tool-open", "name": "open_url", "input": {"url": "https://example.com"}, "narration": "", "computer": False},
+    )
+
+    assert captured == {"computer": False}
 
 
 def test_bulk_import_tickets_csv_json_and_articles_zip(owner):

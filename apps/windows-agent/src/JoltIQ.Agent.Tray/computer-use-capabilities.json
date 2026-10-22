@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "native_driver": true,
+  "modes": ["guide", "fix"],
+  "capabilities": [
+    "screen.capture",
+    "input.click",
+    "input.drag",
+    "input.move",
+    "input.mouse",
+    "input.type",
+    "input.key",
+    "input.scroll",
+    "input.wait",
+    "input.cursor",
+    "guide.highlight",
+    "guide.clear",
+    "url.open"
+  ],
+  "guide_capabilities": ["screen.capture", "input.wait", "input.cursor", "guide.highlight", "guide.clear"],
+  "guide_input_authority": false,
+  "screenshot_upload_order": ["screenshot", "result"]
+}

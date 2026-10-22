@@ -1,0 +1,15 @@
+{
+  "captured_from": "C:\\Users\\admin\\j10final\\artifacts\\build-manifest.json",
+  "captured_on": "2026-10-22",
+  "host_class": "enrolled physical Windows 11 64-bit PC; not a disposable acceptance VM",
+  "distribution": "Internal",
+  "signed": false,
+  "timestamped": false,
+  "version": "1.0.0",
+  "msi": "JoltIQCompanion-1.0.0-x64.msi",
+  "msi_bytes": 83289883,
+  "sha256": "7a5951a52715cbdd16c22afad8e31c68ec4cedb1f7f5fe8cf8c25530ca25f3ae",
+  "native_computer_use": true,
+  "capabilities_manifest_sha256": "22a701b4f357909d9cf94415b54494cde39c03ca1a5dbd6356d21ff8ca201e12",
+  "artifact_retention": "The MSI and original build logs remain on the named physical PC. This checked-in record is an evidence index entry, not a redistributable artifact."
+}

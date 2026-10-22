@@ -700,6 +700,8 @@ def _execute(db: Session, run: ComputerUseRun, tu: dict) -> None:
             run.waiting_for = {**run.waiting_for, "computer": True}
         return
     if name == "open_url":
+        if run.mode == "guide":
+            return _refuse(db, run, tid, name, inp, narr, "Guide mode cannot open a URL. Point the customer to the control or switch to a separately approved Fix run.", computer=False)
         try:
             params = validate_params("url.open", {"url": str(inp.get("url", ""))})
         except ActionValidationError as e:

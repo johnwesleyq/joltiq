@@ -383,11 +383,11 @@ def _procedures_for(db, hits: list[dict]) -> list[dict]:
         body = art.body or {}
         try:
             if body.get("procedure_schema") == 2:
-                definition = load_published_procedure(art)
-                proc = [step.model_dump(mode="json") for step in definition.procedure]
+                desktop_definition = load_published_procedure(art)
+                proc = [step.model_dump(mode="json") for step in desktop_definition.procedure]
             elif body.get("procedure_schema") == 3:
-                definition = load_published_browser_procedure(art)
-                proc = [step.model_dump(mode="json") for step in definition.procedure]
+                browser_definition = load_published_browser_procedure(art)
+                proc = [step.model_dump(mode="json") for step in browser_definition.procedure]
             else:
                 if not art.procedure_hash or publication_hash(body) != art.procedure_hash:
                     raise ValueError("published procedure fingerprint mismatch")

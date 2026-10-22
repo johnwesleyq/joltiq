@@ -96,6 +96,7 @@ T("policy: native input requires a server-bound frame and Fix mode", () =>
     Assert(p.Evaluate("input.click", bound, fix, "run-fix", "fix").Allowed, "valid Fix input was refused");
     Assert(!p.Evaluate("input.click", J("{\"x\":10,\"y\":20}"), fix, "run-fix", "fix").Allowed, "unbound input was accepted");
     Assert(!p.Evaluate("input.click", bound, guide, "run-guide", "guide").Allowed, "Guide mode injected input");
+    Assert(!p.Evaluate("url.open", J("{\"url\":\"https://example.test/help\"}"), guide, "run-guide", "guide").Allowed, "Guide mode opened a URL");
 });
 T("policy: app/service allowlists", () =>
 {

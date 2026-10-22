@@ -1,6 +1,86 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+if (-not ('JoltIq.Build.NativeProcessRunner' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading;
+
+namespace JoltIq.Build
+{
+    public sealed class NativeProcessResult
+    {
+        public int ExitCode { get; set; }
+        public string[] Output { get; set; }
+    }
+
+    public static class NativeProcessRunner
+    {
+        public static NativeProcessResult Run(string filePath, string argumentLine)
+        {
+            var stdout = new ConcurrentQueue<string>();
+            var stderr = new ConcurrentQueue<string>();
+            var stdoutClosed = new ManualResetEventSlim(false);
+            var stderrClosed = new ManualResetEventSlim(false);
+            var process = new Process();
+            {
+                process.StartInfo = new ProcessStartInfo
+                {
+                    FileName = filePath,
+                    Arguments = argumentLine,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardInput = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+                process.OutputDataReceived += delegate(object sender, DataReceivedEventArgs args)
+                {
+                    if (args.Data == null) stdoutClosed.Set();
+                    else stdout.Enqueue(args.Data);
+                };
+                process.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs args)
+                {
+                    if (args.Data == null) stderrClosed.Set();
+                    else stderr.Enqueue(args.Data);
+                };
+                if (!process.Start()) throw new InvalidOperationException("Native build command runner did not start.");
+                process.StandardInput.Close();
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+                // The parameterless overload also waits for asynchronous stream
+                // readers, which never finish if a descendant inherited a pipe.
+                // Poll the process handle with the timed overload instead.
+                while (!process.WaitForExit(1000)) { }
+                var stdoutFinished = stdoutClosed.Wait(10000);
+                var stderrFinished = stderrClosed.Wait(10000);
+
+                var output = new List<string>();
+                output.AddRange(stdout.ToArray());
+                output.AddRange(stderr.ToArray());
+                var result = new NativeProcessResult { ExitCode = process.ExitCode, Output = output.ToArray() };
+
+                // Cancelling an asynchronous read and Process.Dispose can both wait
+                // forever when a descendant inherited the pipe handle after exit.
+                // Dispose only after both readers reported EOF. Otherwise allow the
+                // short-lived build host to release the orphaned reader naturally.
+                if (stdoutFinished && stderrFinished)
+                {
+                    process.Dispose();
+                    stdoutClosed.Dispose();
+                    stderrClosed.Dispose();
+                }
+                return result;
+            }
+        }
+    }
+}
+'@
+}
+
 function Assert-JoltIqBuildRequest {
     [CmdletBinding()]
     param(
@@ -41,25 +121,55 @@ function Assert-JoltIqCommandSucceeded {
     if ($ExitCode -ne 0) { throw "$Operation failed with exit code $ExitCode." }
 }
 
+function ConvertTo-JoltIqWindowsArgument {
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$Value)
+    if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') { return $Value }
+    $quoted = New-Object Text.StringBuilder
+    [void]$quoted.Append('"')
+    $slashes = 0
+    foreach ($character in $Value.ToCharArray()) {
+        if ($character -eq '\') {
+            $slashes++
+            continue
+        }
+        if ($character -eq '"') {
+            if ($slashes -gt 0) { [void]$quoted.Append(('\' * ($slashes * 2))) }
+            [void]$quoted.Append('\"')
+            $slashes = 0
+            continue
+        }
+        if ($slashes -gt 0) { [void]$quoted.Append(('\' * $slashes)) }
+        [void]$quoted.Append($character)
+        $slashes = 0
+    }
+    # Backslashes immediately before the closing quote must be doubled so the
+    # Windows command-line parser does not consume that quote.
+    if ($slashes -gt 0) { [void]$quoted.Append(('\' * ($slashes * 2))) }
+    [void]$quoted.Append('"')
+    return $quoted.ToString()
+}
+
 function Invoke-JoltIqNativeCommand {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$FilePath,
         [string[]]$Arguments = @()
     )
-    # Windows PowerShell 5.1 promotes native stderr to NativeCommandError. With the
-    # repository-wide Stop preference that aborts the wrapper before it can record the
-    # process exit code or persist its log, even when the native process succeeds.
-    $previousErrorActionPreference = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = 'Continue'
-        $output = @(& $FilePath @Arguments 2>&1)
-        $exitCode = $LASTEXITCODE
+    foreach ($value in @($FilePath) + @($Arguments)) {
+        if ([string]$value -match "`0") { throw 'Native build command values cannot contain NUL.' }
     }
-    finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
-    [pscustomobject]@{ Output = $output; ExitCode = $exitCode }
+    # Do not let Windows PowerShell own native stdout/stderr. Build tools can leave
+    # inherited pipeline handles open, and PowerShell 5.1 can promote redirected
+    # native stderr to a terminating error. Launch an isolated runner through the
+    # .NET process API and drain both streams asynchronously. Construct argv with
+    # the documented Windows quoting rules so PowerShell and cmd.exe never parse
+    # build values and trailing backslashes remain exact.
+    $argumentLine = (@($Arguments | ForEach-Object { ConvertTo-JoltIqWindowsArgument -Value ([string]$_) }) -join ' ')
+    # Keep the asynchronous callbacks entirely inside managed code. PowerShell
+    # scriptblock callbacks execute on threads without a runspace under Windows
+    # PowerShell 5.1, which can silently discard output and change the result.
+    [JoltIq.Build.NativeProcessRunner]::Run($FilePath, $argumentLine)
 }
 
 function Assert-JoltIqCleanBuildOutput {
@@ -136,4 +246,38 @@ function Assert-JoltIqInstallerClassification {
     if ($ArpComments -notmatch '(?i)external') { throw 'External installer classification is not visible in installed-product metadata.' }
 }
 
-Export-ModuleMember -Function Assert-JoltIqBuildRequest, Assert-JoltIqPackageVersion, Resolve-JoltIqOutputDirectory, Assert-JoltIqCommandSucceeded, Invoke-JoltIqNativeCommand, Assert-JoltIqCleanBuildOutput, Assert-JoltIqFile, Write-JoltIqChecksum, Assert-JoltIqChecksum, Assert-JoltIqSignatureEvidence, Assert-JoltIqAuthenticodeFile, Assert-JoltIqInstallerClassification
+function Assert-JoltIqComputerUsePackage {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$PublishDirectory,
+        [Parameter(Mandatory)][string]$ManifestPath
+    )
+    foreach ($relative in @('JoltIQCompanion.exe', 'JoltIQ.Agent.Core.dll', 'JoltIQ.Agent.Windows.dll')) {
+        Assert-JoltIqFile -Path (Join-Path $PublishDirectory $relative) -Purpose "native computer-use package file $relative"
+    }
+    Assert-JoltIqFile -Path $ManifestPath -Purpose 'computer-use capability manifest'
+    try { $manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json }
+    catch { throw "Computer-use capability manifest is invalid JSON: $($_.Exception.Message)" }
+    if ($manifest.schema_version -ne 1 -or $manifest.native_driver -ne $true) { throw 'Published tray does not declare the native Windows computer-use driver.' }
+    foreach ($mode in @('guide', 'fix')) {
+        if (@($manifest.modes) -notcontains $mode) { throw "Published tray is missing computer-use mode: $mode" }
+    }
+    $required = @('screen.capture', 'input.click', 'input.drag', 'input.move', 'input.mouse', 'input.type', 'input.key', 'input.scroll', 'input.wait', 'input.cursor', 'guide.highlight', 'guide.clear', 'url.open')
+    foreach ($capability in $required) {
+        if (@($manifest.capabilities) -notcontains $capability) { throw "Published tray is missing computer-use capability: $capability" }
+    }
+    if ($manifest.guide_input_authority -ne $false) { throw 'Guide mode package must declare zero native input authority.' }
+    $expectedGuide = @('screen.capture', 'input.wait', 'input.cursor', 'guide.highlight', 'guide.clear')
+    if (@($manifest.guide_capabilities).Count -ne $expectedGuide.Count) { throw 'Guide capability declaration is incomplete.' }
+    foreach ($capability in $expectedGuide) {
+        if (@($manifest.guide_capabilities) -notcontains $capability) { throw "Guide mode package is missing capability: $capability" }
+    }
+    if (@($manifest.guide_capabilities) -contains 'url.open' -or @($manifest.guide_capabilities | Where-Object { $_ -like 'input.*' -and $_ -notin @('input.wait', 'input.cursor') }).Count -gt 0) {
+        throw 'Guide mode package declares active input or URL-launch authority.'
+    }
+    if (@($manifest.screenshot_upload_order).Count -ne 2 -or $manifest.screenshot_upload_order[0] -ne 'screenshot' -or $manifest.screenshot_upload_order[1] -ne 'result') {
+        throw 'Published tray must declare screenshot-before-result evidence ordering.'
+    }
+}
+
+Export-ModuleMember -Function Assert-JoltIqBuildRequest, Assert-JoltIqPackageVersion, Resolve-JoltIqOutputDirectory, Assert-JoltIqCommandSucceeded, Invoke-JoltIqNativeCommand, Assert-JoltIqCleanBuildOutput, Assert-JoltIqFile, Write-JoltIqChecksum, Assert-JoltIqChecksum, Assert-JoltIqSignatureEvidence, Assert-JoltIqAuthenticodeFile, Assert-JoltIqInstallerClassification, Assert-JoltIqComputerUsePackage

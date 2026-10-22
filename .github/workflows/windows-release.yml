@@ -12,7 +12,44 @@ permissions:
   contents: read
 
 jobs:
+  api-gate:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env: { POSTGRES_PASSWORD: postgres }
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U postgres" --health-interval 5s --health-retries 20
+      redis: { image: "redis:7.4-alpine", ports: ["6379:6379"] }
+    defaults: { run: { working-directory: apps/api } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: "8.0.x" }
+      - run: pip install -r requirements.lock && pip install -e .
+      - run: python -m playwright install --with-deps chromium
+      - run: psql postgresql://postgres:postgres@localhost:5432/postgres -c "create database joltiq_test"
+      - run: ruff check joltiq tests
+      - run: mypy joltiq
+      - run: pytest -q
+
+  web-gate:
+    runs-on: ubuntu-24.04
+    defaults: { run: { working-directory: apps/web } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22", cache: npm, cache-dependency-path: apps/web/package-lock.json }
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run build
+      - run: npm audit --omit=dev --audit-level=high
+
   signed-windows-release:
+    needs: [api-gate, web-gate]
     runs-on: windows-latest
     timeout-minutes: 40
     environment: windows-signing
@@ -54,12 +91,13 @@ jobs:
           Import-Module ./scripts/BuildGate.psm1 -Force
           Assert-JoltIqAuthenticodeFile -Path ./artifacts/publish/tray/JoltIQCompanion.exe -RequireTimestamp
           Assert-JoltIqAuthenticodeFile -Path ./artifacts/publish/broker/JoltIQBroker.exe -RequireTimestamp
+          Assert-JoltIqComputerUsePackage -PublishDirectory ./artifacts/publish/tray -ManifestPath ./artifacts/publish/tray/computer-use-capabilities.json
           $msi = @(Get-ChildItem ./artifacts -Filter *.msi)
           if ($msi.Count -ne 1) { throw "Expected exactly one release MSI; found $($msi.Count)." }
           Assert-JoltIqAuthenticodeFile -Path $msi[0].FullName -RequireTimestamp
           Assert-JoltIqChecksum -Artifact $msi[0].FullName -Manifest ./artifacts/SHA256SUMS.txt
           $manifest = Get-Content ./artifacts/build-manifest.json -Raw | ConvertFrom-Json
-          if ($manifest.distribution -ne 'External' -or $manifest.signed -ne $true -or $manifest.timestamped -ne $true) { throw "Release manifest is not externally releasable." }
+          if ($manifest.distribution -ne 'External' -or $manifest.signed -ne $true -or $manifest.timestamped -ne $true -or $manifest.native_computer_use -ne $true -or -not $manifest.capabilities_manifest_sha256) { throw "Release manifest is not externally releasable." }
       - uses: actions/upload-artifact@v4
         with:
           name: joltiq-companion-signed-${{ inputs.version }}
@@ -67,6 +105,7 @@ jobs:
             apps/windows-agent/artifacts/*.msi
             apps/windows-agent/artifacts/SHA256SUMS.txt
             apps/windows-agent/artifacts/build-manifest.json
+            apps/windows-agent/artifacts/publish/tray/computer-use-capabilities.json
             apps/windows-agent/artifacts/publish/tray/JoltIQCompanion.exe
             apps/windows-agent/artifacts/publish/broker/JoltIQBroker.exe
           if-no-files-found: error

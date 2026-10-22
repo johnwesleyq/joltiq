@@ -12,11 +12,12 @@ The native Windows implementation has passed focused and full automated tests on
 
 | Evidence | Status | Meaning |
 |---|---|---|
-| Native Windows xUnit suite | Passed: 71/71 before this harness increment | Real Windows capture, input, overlay, provider, policy, restart, and STOP-related unit/integration coverage passed on the physical PC. |
-| Core self-test | Passed: 25/25 before this harness increment | Durable command/evidence ordering, recovery, and local policy contracts passed. |
+| Native Windows xUnit suite | Passed: 72/72 | Real Windows capture, input, overlay, provider, policy, restart, and STOP-related unit/integration coverage passed on the physical PC. |
+| Core self-test | Passed: 25/25 | Durable command/evidence ordering, recovery, and local policy contracts passed. |
 | Guide/Fix API suites | Passed | Consent, immutable mode, Guide translation, device protocol, replay, and switch-to-Fix orchestration passed. |
 | Web typecheck/lint/build/smoke | Passed | The two-mode customer controls and persistent Stop/control rail built and ran in a real browser. |
-| Computer-use harness contract | Passed on physical Windows: contract validator and BuildGate 11/11 | Catalog completeness, PowerShell 5.1 compatibility, fail-closed evidence validation, secret rejection, and build classification gates passed. |
+| Computer-use harness and packaging contract | Passed on physical Windows: contract validators and BuildGate 15/15 | Catalog completeness, PowerShell 5.1 compatibility, fail-closed evidence validation, secret rejection, native capability packaging, and build classification gates passed in the final physical-PC rerun. |
+| Internal Windows package | Physical-PC artifact recorded | `JoltIQCompanion-1.0.0-x64.msi`, 83,289,883 bytes, SHA-256 `7a5951a52715cbdd16c22afad8e31c68ec4cedb1f7f5fe8cf8c25530ca25f3ae`; unsigned and internal-only. The build manifest record is linked below. |
 | Disposable Windows 11 aggregate | Missing | Requires every Windows 11 case and repetition from `computer-use-cases.json`. |
 | Disposable Windows 10 aggregate | Missing | Requires every Windows 10 case and applicable failure case. |
 | Signed production MSI | Missing | Internal unsigned builds are not customer-release artifacts. |
@@ -29,6 +30,8 @@ The native Windows implementation has passed focused and full automated tests on
 - Validator: `apps/windows-agent/scripts/acceptance/EvidenceBundle.psm1`
 - Lab procedure: `docs/operations/windows-general-computer-use-acceptance.md`
 - Expected aggregate: `windows-computer-use-acceptance.json` at the lab evidence root
+- Physical Task 10 build-manifest record: `docs/operations/evidence/windows-task10-build-manifest.json`
+- Original physical-PC artifacts/logs: `C:\Users\admin\j10final\artifacts` (not a release distribution location)
 
 No behavioral bundle or aggregate is linked here yet. Add only validator-approved bundles generated on named, freshly reverted disposable VM snapshots. Do not label the physical-PC test folder as a clean-VM aggregate.
 

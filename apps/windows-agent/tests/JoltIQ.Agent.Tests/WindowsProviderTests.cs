@@ -47,6 +47,26 @@ public class WindowsProviderTests
     }
 
     [Fact]
+    public void ComputerUse_PackageManifestMatchesTheDependencyBackedProvider()
+    {
+        using var manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "computer-use-capabilities.json")));
+        var declared = manifest.RootElement.GetProperty("capabilities").EnumerateArray().Select(value => value.GetString()!).ToHashSet();
+        var guide = manifest.RootElement.GetProperty("guide_capabilities").EnumerateArray().Select(value => value.GetString()!).ToHashSet();
+        var provider = new WindowsActionProvider(
+            desktopCapture: new FakeCapture(),
+            desktopInput: new FakeDesktopInput(),
+            sessionResolver: _ => FixSession(),
+            showGuide: _ => { },
+            clearGuide: () => { },
+            urlLauncher: _ => true);
+
+        Assert.Empty(declared.Except(provider.Capabilities));
+        Assert.Equal(new[] { "guide.clear", "guide.highlight", "input.cursor", "input.wait", "screen.capture" }, guide.Order());
+        Assert.False(manifest.RootElement.GetProperty("guide_input_authority").GetBoolean());
+        Assert.Equal(new[] { "screenshot", "result" }, manifest.RootElement.GetProperty("screenshot_upload_order").EnumerateArray().Select(value => value.GetString()));
+    }
+
+    [Fact]
     public async Task ComputerUse_CaptureReturnsPngAndExactDisplayMetadata()
     {
         var capture = new FakeCapture();

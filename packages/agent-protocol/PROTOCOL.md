@@ -45,7 +45,29 @@ Action ids, parameters and risk levels are defined in `apps/api/joltiq/services/
 `POST /agent/v1/heartbeat` (facts, version → update info), `POST /agent/v1/unenroll`.
 
 ## 7. Computer use (v1 extension)
-Issued only by a computer-use run on a session the person accepted on the device. Actions: `screen.capture`, `input.click`, `input.drag`, `input.move`, `input.mouse`, `input.type`, `input.key`, `input.scroll`, `input.wait`, `input.cursor`, `url.open`. Coordinates are in the pixel space of the last screenshot the device sent.
-* For each command: `POST /agent/v1/commands/{id}/screenshot` (raw JPEG/PNG, signed) with the screen **after** the action, then `POST /agent/v1/commands/{id}/result` `{status, result: {ok, width, height, text?}}`.
-* `GET /agent/v1/computer-use/active` lists the active run, its goal and any pause (`approval`, `question`, `secure_input`). The companion shows it to the person and answers with `POST /agent/v1/computer-use/{id}/respond` `{approved?, answer?, done?}`. A goal still `pending_approval` can also be approved or declined here.
-* The device must refuse secret-looking text and lock/log-out/shutdown key combos locally (`apps/desktop-agent/joltiq_agent/policy.py`).
+
+Computer use has an immutable mode: `guide` or `fix`. Portal goal approval is necessary but does not start capture. The server first sends a signed `computer_use.begin` envelope containing the exact `computer_use_run_id`, mode, goal, session and expiry. The Windows tray displays those exact values and posts its second accept/decline decision to `POST /agent/v1/computer-use/{run_id}/local-consent`. A local grant authorizes only that run and mode. `computer_use.end`, STOP, expiry, session end or process restart clears it unless the durable journal is resuming an already-executed result.
+
+Every computer-use `action` envelope carries the matching `computer_use_run_id` and `computer_use_mode`. `screen.capture` returns PNG evidence plus:
+
+- monotonically increasing `frame_generation`;
+- SHA-256 `layout_hash` for the virtual-display arrangement;
+- scaled image dimensions, virtual-screen bounds and coordinate scale;
+- display metadata sufficient to map the signed screenshot back to the current desktop.
+
+Mutating `input.*` commands also carry the exact server-accepted `frame_generation` and `layout_hash`; model-supplied bindings are discarded. Immediately before native input, the companion rechecks the logged-in user, interactive desktop, display layout, current UI Automation target/focus, local grant and STOP token. A stale frame, changed layout/focus/user, lock/UAC/secure desktop, RDP/shared session, password/OTP/card/private-key target, prohibited chord or unknown focus is refused locally.
+
+Fix capabilities are `screen.capture`, `input.click`, `input.drag`, `input.move`, `input.mouse`, `input.type`, `input.key`, `input.scroll`, `input.wait`, `input.cursor`, and `url.open`. Guide capabilities are `screen.capture`, `guide.highlight`, `guide.clear`, and `input.wait`; Guide has structurally zero keyboard/mouse injection authority. The highlight is click-through, no-activation and bounded to the signed frame.
+
+For a command with screenshot evidence, the companion completes these durable steps in order:
+
+1. Execute once and persist the terminal result plus a DPAPI-protected image reference/digest.
+2. `POST /agent/v1/commands/{id}/screenshot` with signed raw PNG/JPEG bytes.
+3. Only after that succeeds, `POST /agent/v1/commands/{id}/result` with the redacted terminal result.
+4. Delete local evidence only after server acknowledgement.
+
+Restart or redelivery resumes the outbox; it never repeats journaled native input to recreate evidence. Missing/corrupt protected evidence produces a failed/uncertain terminal outcome and stops the run.
+
+`GET /agent/v1/computer-use/active` returns the active run and any customer pause. `POST /agent/v1/computer-use/{id}/respond` accepts exactly one applicable response (`approved`, `answer`, `done`, or `switch_to_fix`). `done` clears the Guide overlay and requires a fresh capture before model continuation. `switch_to_fix` ends Guide and creates a distinct pending Fix run; it does not widen the old grant and requires fresh portal and native consent.
+
+STOP cancels locally before network notification, releases held keys/buttons in `finally`, blocks the next queued input, and reports any effect already started. The healthy-endpoint target is 500 ms p95 and 2 seconds maximum. No computer-use action adds shell, arbitrary registry/service/file, installer, credential access or UAC bypass authority.

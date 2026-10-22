@@ -22,6 +22,7 @@ jobs:
       - run: python -m playwright install --with-deps chromium
       - run: psql postgresql://postgres:postgres@localhost:5432/postgres -c "create database joltiq_test"
       - run: ruff check joltiq tests
+      - run: mypy joltiq
       - run: pip-audit -r requirements.lock || true   # report-only; triage findings in SECURITY.md
       - run: pytest -q --junitxml=../../test-results/api.xml
       - uses: actions/upload-artifact@v4
@@ -36,6 +37,7 @@ jobs:
         with: { node-version: "22", cache: npm, cache-dependency-path: apps/web/package-lock.json }
       - run: npm ci
       - run: npm run typecheck
+      - run: npm run lint
       - run: npm run build
       - run: npm audit --omit=dev --audit-level=high
   windows-agent:
@@ -48,6 +50,11 @@ jobs:
         with: { dotnet-version: "8.0.x" }
       - shell: pwsh
         run: ./scripts/tests/BuildGate.Tests.ps1
+      - name: Validate Outlook and general computer-use acceptance contracts
+        shell: powershell
+        run: |
+          ./scripts/test-on-windows.ps1 -ValidateHarness
+          ./scripts/test-on-windows.ps1 -ValidateComputerUseHarness
       - name: Build previous internal package for upgrade and rollback checks
         shell: pwsh
         run: ./scripts/build.ps1 -Version 0.0.1 -Distribution Internal -SkipTests -OutputDirectory ./artifacts-previous
@@ -80,6 +87,7 @@ jobs:
             apps/windows-agent/artifacts/*.msi
             apps/windows-agent/artifacts/SHA256SUMS.txt
             apps/windows-agent/artifacts/build-manifest.json
+            apps/windows-agent/artifacts/publish/tray/computer-use-capabilities.json
             apps/windows-agent/artifacts/INTERNAL-ONLY.txt
             apps/windows-agent/artifacts/installer-lifecycle.json
           if-no-files-found: error

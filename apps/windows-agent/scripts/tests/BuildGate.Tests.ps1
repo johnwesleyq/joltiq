@@ -56,6 +56,87 @@ Test 'native stderr is captured even when the caller stops on PowerShell errors'
     }
     finally { Remove-Item -LiteralPath $fixture -Force -ErrorAction SilentlyContinue }
 }
+Test 'native command capture uses an isolated asynchronous process rather than a PowerShell pipeline' {
+    $module = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\BuildGate.psm1') -Raw
+    if ($module -notmatch 'Diagnostics' -or $module -notmatch 'BeginOutputReadLine\(\)') {
+        throw 'native command capture must use the asynchronous .NET process API'
+    }
+    if ($module -match '\$output\s*=\s*@\(&\s+\$FilePath') {
+        throw 'native command capture must not wait on an inherited PowerShell pipeline'
+    }
+    if ($module -match '&\s+\$FilePath\s+@Arguments\s+1>') {
+        throw 'Windows PowerShell must not own native stdout or stderr redirection'
+    }
+    if ($module -match '(?m)^\s*(?:\$\w+\s*=\s*)?Start-Process\b') {
+        throw 'native command capture must not rely on the Windows PowerShell 5.1 Start-Process exit-code object'
+    }
+    if ($module -match '\$env:ComSpec|\.cmd["'']') {
+        throw 'native command capture must not route untrusted values through cmd.exe'
+    }
+    if ($module -match 'Task\]::WaitAll\(' -or $module -match 'ReadToEndAsync\(\)') {
+        throw 'native command capture must never wait forever for inherited pipe handles'
+    }
+    if ($module -match 'process\.WaitForExit\(\);' -or $module -notmatch 'process\.WaitForExit\(1000\)') {
+        throw 'native command capture must poll process exit without the asynchronous-reader wait in parameterless WaitForExit'
+    }
+    if ($module -notmatch 'stdoutClosed\.Wait\(10000\)' -or
+        $module -notmatch 'stderrClosed\.Wait\(10000\)' -or
+        $module -notmatch 'if \(stdoutFinished && stderrFinished\)') {
+        throw 'native command capture must bound output draining and dispose only readers that reached EOF'
+    }
+    if ($module -match 'CancelOutputRead\(\)' -or $module -match 'CancelErrorRead\(\)') {
+        throw 'native command capture must not block while cancelling a stale inherited pipe read'
+    }
+    if ($module -notmatch 'NativeProcessRunner' -or $module -match '\[Diagnostics\.DataReceivedEventHandler\]\s*\{') {
+        throw 'native output callbacks must remain in managed code and never require a PowerShell runspace'
+    }
+}
+Test 'native command capture preserves Unicode, metacharacters, quotes, and trailing slashes' {
+    $temp = Join-Path ([IO.Path]::GetTempPath()) ('joltiq-argv-' + [guid]::NewGuid().ToString('N'))
+    try {
+        New-Item -ItemType Directory -Path $temp | Out-Null
+        $fixture = Join-Path $temp 'capture argv.ps1'
+        $resultPath = Join-Path $temp 'result.json'
+        @(
+            'param([string]$OutputPath, [Parameter(ValueFromRemainingArguments=$true)][string[]]$Values)',
+            '$Values | ConvertTo-Json | Set-Content -LiteralPath $OutputPath -Encoding UTF8'
+        ) | Set-Content -LiteralPath $fixture -Encoding UTF8
+        $values = @('Unicode-測試', 'space value', 'C:\path with space\', 'amp&value', 'percent%TEMP%value', 'paren(value)', 'quote"value')
+        $captured = Invoke-JoltIqNativeCommand -FilePath 'powershell.exe' -Arguments (@('-NoProfile', '-File', $fixture, $resultPath) + $values)
+        if ($captured.ExitCode -ne 0) { throw "argv fixture failed: $($captured.Output -join [Environment]::NewLine)" }
+        # Windows PowerShell 5.1 emits a top-level JSON array as one Object[]
+        # pipeline object. Cast it explicitly so the comparison validates argv
+        # values rather than comparing a nested System.Object[] wrapper.
+        $actual = [string[]](Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json)
+        if (($actual -join "`n") -ne ($values -join "`n")) { throw "argv changed across isolated runner: $($actual -join ' | ')" }
+        $oddExecutable = Join-Path $temp 'where Unicode 測試.exe'
+        Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\where.exe') -Destination $oddExecutable
+        $oddPath = Invoke-JoltIqNativeCommand -FilePath $oddExecutable -Arguments @('powershell.exe')
+        if ($oddPath.ExitCode -ne 0) { throw "Unicode/metacharacter executable path failed: $($oddPath.Output -join [Environment]::NewLine)" }
+    }
+    finally { Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+Test 'build disables reusable dotnet workers so captured output cannot hang' {
+    $buildScript = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\build.ps1') -Raw
+    $expectedSettings = @{
+        MSBUILDDISABLENODEREUSE = '1'
+        DOTNET_CLI_USE_MSBUILD_SERVER = '0'
+    }
+    foreach ($setting in $expectedSettings.GetEnumerator()) {
+        $expectedLine = '$env:' + $setting.Key + " = '$($setting.Value)'"
+        if ($buildScript -notmatch [regex]::Escape($expectedLine)) {
+            throw "build.ps1 must set $($setting.Key) to $($setting.Value) before invoking dotnet"
+        }
+    }
+    if ($buildScript -notmatch [regex]::Escape('-p:UseSharedCompilation=false')) {
+        throw 'build.ps1 must disable the reusable compiler server for captured dotnet commands'
+    }
+    $shutdown = $buildScript.IndexOf('dotnet build-server shutdown')
+    $firstCapturedBuild = $buildScript.IndexOf('Invoke-CheckedDotnet "build ')
+    if ($shutdown -lt 0 -or $firstCapturedBuild -lt 0 -or $shutdown -gt $firstCapturedBuild) {
+        throw 'build.ps1 must shut down stale dotnet build servers before the first captured build'
+    }
+}
 Test 'missing package inputs and checksum mismatches fail the gate' {
     $temp = Join-Path ([IO.Path]::GetTempPath()) ('joltiq-build-gate-' + [guid]::NewGuid().ToString('N'))
     try {
@@ -109,6 +190,23 @@ Test 'general computer-use harness is complete under Windows PowerShell 5.1' ({
         throw 'general computer-use evidence module self-test failed under Windows PowerShell 5.1'
     }
 }.GetNewClosure())
+Test 'published tray advertises the native computer-use contract and fails closed' {
+    $temp = Join-Path ([IO.Path]::GetTempPath()) ('joltiq-capabilities-' + [guid]::NewGuid().ToString('N'))
+    try {
+        New-Item -ItemType Directory -Path $temp | Out-Null
+        'fixture' | Set-Content -LiteralPath (Join-Path $temp 'JoltIQCompanion.exe')
+        'fixture' | Set-Content -LiteralPath (Join-Path $temp 'JoltIQ.Agent.Core.dll')
+        'fixture' | Set-Content -LiteralPath (Join-Path $temp 'JoltIQ.Agent.Windows.dll')
+        $manifest = Join-Path $temp 'computer-use-capabilities.json'
+        @{ schema_version = 1; native_driver = $true; modes = @('guide', 'fix'); capabilities = @('screen.capture'); guide_capabilities = @('screen.capture'); guide_input_authority = $false; screenshot_upload_order = @('screenshot', 'result') } |
+            ConvertTo-Json | Set-Content -LiteralPath $manifest
+        Throws { Assert-JoltIqComputerUsePackage -PublishDirectory $temp -ManifestPath $manifest }
+        @{ schema_version = 1; native_driver = $true; modes = @('guide', 'fix'); capabilities = @('screen.capture', 'input.click', 'input.drag', 'input.move', 'input.mouse', 'input.type', 'input.key', 'input.scroll', 'input.wait', 'input.cursor', 'guide.highlight', 'guide.clear', 'url.open'); guide_capabilities = @('screen.capture', 'input.wait', 'input.cursor', 'guide.highlight', 'guide.clear'); guide_input_authority = $false; screenshot_upload_order = @('screenshot', 'result') } |
+            ConvertTo-Json | Set-Content -LiteralPath $manifest
+        Assert-JoltIqComputerUsePackage -PublishDirectory $temp -ManifestPath $manifest
+    }
+    finally { Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue }
+}
 
 Write-Host "$passed passed; $failed failed"
 if ($failed -ne 0) { exit 1 }

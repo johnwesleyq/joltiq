@@ -68,6 +68,7 @@ public sealed class LocalPolicy
         }
         var mutatingInput = action.StartsWith("input.", StringComparison.Ordinal) && action is not ("input.wait" or "input.cursor");
         if (mutatingInput && session.ComputerUseMode != "fix") return No("input is disabled unless the customer selected Fix mode");
+        if (action == "url.open" && session.ComputerUseMode != "fix") return No("opening a URL is disabled unless the customer selected Fix mode");
         if (action.StartsWith("guide.", StringComparison.Ordinal) && session.ComputerUseMode != "guide")
             return No("guide overlay is disabled unless the customer selected Guide mode");
 

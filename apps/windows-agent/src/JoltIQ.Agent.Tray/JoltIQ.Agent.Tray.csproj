@@ -12,5 +12,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\JoltIQ.Agent.Windows\JoltIQ.Agent.Windows.csproj" />
+    <Content Include="computer-use-capabilities.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Always" />
   </ItemGroup>
 </Project>

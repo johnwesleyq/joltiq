@@ -14,6 +14,9 @@
 - [ ] Monitoring: Prometheus scrape, alerts routed, OTLP traces flowing, log retention set.
 - [ ] Windows CI: Windows projects compile with warnings as errors; Core and Windows xUnit suites pass; installer lifecycle evidence is attached.
 - [ ] Windows companion: exact MSI SHA-256 recorded and **signed** with an authorized certificate and trusted timestamp. Signature and timestamp independently verified before upload. Unsigned builds remain internal-only.
+- [x] Windows internal packaging proof: physical Windows 11 build produced `JoltIQCompanion-1.0.0-x64.msi` (83,289,883 bytes), SHA-256 `7a5951a52715cbdd16c22afad8e31c68ec4cedb1f7f5fe8cf8c25530ca25f3ae`; build manifest classifies it as unsigned/internal-only.
+- [ ] Windows general computer use: published tray contains `JoltIQ.Agent.Core.dll`, `JoltIQ.Agent.Windows.dll`, and the validated `computer-use-capabilities.json`; Guide declares zero input authority and screenshot-before-result ordering.
+- [ ] Windows general computer-use acceptance: all 35 required executions pass from named clean Windows 10/11 snapshots, including Guide/Fix happy paths, protected targets, identity/display/focus changes, three STOP races, delivery/replay, restart recovery, and fresh consent on Guide → Fix. Attach a passing `windows-computer-use-acceptance.json`.
 - [ ] Windows Outlook PDF acceptance: all 59 required runs pass from clean snapshots, including five Windows 11 fixture happy paths, one Windows 10 path, one licensed classic-Outlook path, every failure case, and a passing `windows-acceptance.json`. Only claim OS versions actually evidenced.
 - [ ] Windows evidence is reviewed for secret/PII leakage, source commit, harness commit, procedure hash, device/session identity, STOP timing, final ticket state, and actual desktop/registry/event-log state.
 - [ ] Rollback plan: previous image tags pinned. Migrations reviewed for backward compatibility.
