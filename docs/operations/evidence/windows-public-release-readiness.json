@@ -57,7 +57,10 @@
     },
     "independent_security_review": {
       "status": "blocked",
-      "evidence": [],
+      "evidence": [
+        "docs/security/windows-independent-review-scope.md",
+        "docs/security/windows-independent-review-evidence-template.md"
+      ],
       "blockers": [
         "No independent reviewer or penetration-testing firm has delivered a report covering the tested commit and release artifacts."
       ]
