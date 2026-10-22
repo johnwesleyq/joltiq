@@ -270,6 +270,9 @@ public sealed class WindowsActionProvider : IActionProvider
             return RestartResult(false, wasRunning, closeRequested, false, false, false, "application could not be started safely");
         }
         var settleDeadline = DateTime.UtcNow.Add(_restartSettle);
+        var warmupMilliseconds = Math.Min(500d, Math.Max(0d, _restartSettle.TotalMilliseconds / 2d));
+        if (warmupMilliseconds > 0)
+            await Task.Delay(TimeSpan.FromMilliseconds(warmupMilliseconds), ct);
         var responding = false;
         do
         {

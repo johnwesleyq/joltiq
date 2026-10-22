@@ -6,7 +6,14 @@ using System.Text.Json.Nodes;
 
 namespace JoltIQ.Agent.Windows;
 
-public sealed record InteractiveSessionFact(int SessionId, string UserName, string? Sid, bool Active, bool Unlocked, bool IsTraySession);
+public sealed record InteractiveSessionFact(
+    int SessionId,
+    string UserName,
+    string? Sid,
+    bool Active,
+    bool Unlocked,
+    bool IsTraySession,
+    bool Remote);
 
 /// <summary>Inspects Windows interactive sessions without impersonating another user.</summary>
 public class InteractiveSessionInspector
@@ -20,21 +27,22 @@ public class InteractiveSessionInspector
         var traySession = Process.GetCurrentProcess().SessionId;
         var traySid = WindowsIdentity.GetCurrent().User?.Value;
         if (!WTSEnumerateSessions(IntPtr.Zero, 0, 1, out var buffer, out var count))
-            return new[] { new InteractiveSessionFact(traySession, Environment.UserName, traySid, true, IsInputDesktopUnlocked(), true) };
+            return new[] { new InteractiveSessionFact(traySession, Environment.UserName, traySid, true, IsInputDesktopUnlocked(), true, IsRemoteSession()) };
         try
         {
             var size = Marshal.SizeOf<WtsSessionInfo>();
             for (var i = 0; i < count; i++)
             {
                 var item = Marshal.PtrToStructure<WtsSessionInfo>(IntPtr.Add(buffer, i * size));
-                if (item.State is not (WtsConnectState.Active or WtsConnectState.Connected)) continue;
+                if (item.State is not (WtsConnectState.Active or WtsConnectState.Connected or WtsConnectState.Disconnected)) continue;
                 var user = QueryString(item.SessionId, WtsInfoClass.UserName);
                 var domain = QueryString(item.SessionId, WtsInfoClass.DomainName);
                 if (string.IsNullOrWhiteSpace(user)) continue;
                 var account = string.IsNullOrWhiteSpace(domain) ? user : $"{domain}\\{user}";
                 string? sid = item.SessionId == traySession ? traySid : TranslateSid(account);
                 result.Add(new(item.SessionId, account, sid, item.State == WtsConnectState.Active,
-                    item.SessionId == traySession && IsInputDesktopUnlocked(), item.SessionId == traySession));
+                    item.SessionId == traySession && IsInputDesktopUnlocked(), item.SessionId == traySession,
+                    QueryUShort(item.SessionId, WtsInfoClass.ClientProtocolType) != 0));
             }
         }
         finally { WTSFreeMemory(buffer); }
@@ -50,6 +58,8 @@ public class InteractiveSessionInspector
         if (_enrolledSid is null) reasons.Add("enrolled_user_unknown");
         if (active.Count == 0) reasons.Add("no_active_user");
         if (active.Count > 1) reasons.Add("multiple_active_users");
+        if (sessions.Count > 1) reasons.Add("multiple_interactive_users");
+        if (sessions.Any(x => x.Remote)) reasons.Add("remote_session");
         if (tray is null || !tray.Active) reasons.Add("tray_user_not_active");
         if (tray is not null && !tray.Unlocked) reasons.Add("screen_locked");
         if (active.Count == 1 && active[0].Sid != _enrolledSid) reasons.Add("enrolled_user_mismatch");
@@ -79,6 +89,13 @@ public class InteractiveSessionInspector
         finally { WTSFreeMemory(p); }
     }
 
+    private static ushort QueryUShort(int sessionId, WtsInfoClass info)
+    {
+        if (!WTSQuerySessionInformation(IntPtr.Zero, sessionId, info, out var p, out var bytes) || bytes < sizeof(ushort)) return 0;
+        try { return unchecked((ushort)Marshal.ReadInt16(p)); }
+        finally { WTSFreeMemory(p); }
+    }
+
     private static bool IsInputDesktopUnlocked()
     {
         var desktop = OpenInputDesktop(0, false, 0x0001);
@@ -93,10 +110,23 @@ public class InteractiveSessionInspector
         finally { CloseDesktop(desktop); }
     }
 
+    private static bool IsRemoteSession() => GetSystemMetrics(0x1000) != 0;
+
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct WtsSessionInfo { public int SessionId; public string WinStationName; public WtsConnectState State; }
     private enum WtsConnectState { Active, Connected, ConnectQuery, Shadow, Disconnected, Idle, Listen, Reset, Down, Init }
-    private enum WtsInfoClass { InitialProgram, ApplicationName, WorkingDirectory, OemId, SessionId, UserName, WinStationName, DomainName }
+    private enum WtsInfoClass
+    {
+        InitialProgram = 0,
+        ApplicationName = 1,
+        WorkingDirectory = 2,
+        OemId = 3,
+        SessionId = 4,
+        UserName = 5,
+        WinStationName = 6,
+        DomainName = 7,
+        ClientProtocolType = 16,
+    }
 
     [DllImport("wtsapi32.dll", SetLastError = true)] private static extern bool WTSEnumerateSessions(IntPtr server, int reserved, int version, out IntPtr sessions, out int count);
     [DllImport("wtsapi32.dll")] private static extern void WTSFreeMemory(IntPtr memory);
@@ -104,4 +134,5 @@ public class InteractiveSessionInspector
     [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool CloseDesktop(IntPtr desktop);
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool GetUserObjectInformation(IntPtr obj, int index, StringBuilder? info, uint length, out uint needed);
+    [DllImport("user32.dll")] private static extern int GetSystemMetrics(int index);
 }
