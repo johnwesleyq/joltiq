@@ -20,10 +20,10 @@ from conftest import invite_and_join, register
 pytestmark = pytest.mark.mocked
 
 
-def drain():
+def drain(kinds=None):
     from joltiq.services.jobs import drain as d
 
-    return d()
+    return d(kinds)
 
 
 # ---------------- Freshdesk (fake transport) ----------------
@@ -66,7 +66,7 @@ def test_freshdesk_connect_test_pull_push_and_idempotency(owner):
         assert i["credential"]["fingerprint"] and "fd_api_key_123" not in json.dumps(i)
         assert owner.post(f"/api/v1/integrations/{i['id']}/test").json()["result"]["ok"] is True
         assert owner.post(f"/api/v1/integrations/{i['id']}/sync").json()["queued"] is True
-        drain()
+        drain(["integration.sync"])
         tickets = owner.get("/api/v1/tickets", params={"q": "printer"}).json()["items"]
         assert len(tickets) == 1 and tickets[0]["external_ref"] == "freshdesk:101"
         # Second pull does not duplicate.
@@ -78,7 +78,7 @@ def test_freshdesk_connect_test_pull_push_and_idempotency(owner):
         assert len(owner.get("/api/v1/tickets", params={"q": "printer"}).json()["items"]) == 1
         # Push a comment back as a note (idempotent per comment).
         owner.post(f"/api/v1/tickets/{tickets[0]['id']}/comments", json={"body": "Restarted the spooler remotely."})
-        drain()
+        drain(["integration.sync"])
         assert fake.notes and fake.notes[-1]["body"] == "Restarted the spooler remotely."
         hist = owner.get(f"/api/v1/integrations/{i['id']}").json()["history"]
         assert any(h["entity"] == "note" and h["status"] == "ok" for h in hist)
