@@ -52,17 +52,20 @@
       "blockers": [
         "No disposable Windows 10 x64 VM and named clean snapshot are registered.",
         "No disposable Windows 11 x64 VM and named clean snapshot are registered.",
-        "The required licensed Microsoft 365 classic-Outlook disposable-profile case has not been run."
+        "The required licensed Microsoft 365 classic-Outlook disposable-profile case has not been run.",
+        "A supported customer-controlled local computer-use model gateway is not implemented; external computer-use models are now refused by default and always refused by production safety checks."
       ]
     },
     "independent_security_review": {
       "status": "blocked",
       "evidence": [
         "docs/security/windows-independent-review-scope.md",
-        "docs/security/windows-independent-review-evidence-template.md"
+        "docs/security/windows-independent-review-evidence-template.md",
+        "docs/security/windows-internal-security-preflight-2026-10-22.md"
       ],
       "blockers": [
-        "No independent reviewer or penetration-testing firm has delivered a report covering the tested commit and release artifacts."
+        "No independent reviewer or penetration-testing firm has delivered a report covering the tested commit and release artifacts.",
+        "The 2026-10-22 internal security preflight found unresolved Critical and Important product findings; public launch remains blocked until they are fixed, retested, and covered by the independent review."
       ]
     }
   }

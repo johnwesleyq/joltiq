@@ -45,6 +45,8 @@ def available_providers(db: Session, org_id: uuid.UUID, task: str) -> list[tuple
             DEFAULT_MODELS[prov].get(TASK_TIER.get(task, "default"), DEFAULT_MODELS[prov]["default"])
         out.append((prov, model, cfg, key))
     s = get_settings()
+    if task == "computer_use" and not s.allow_external_computer_use_models:
+        out = []
     fixture_cfg = cfgs.get("local_fixture")
     if s.enable_local_fixture_providers and s.env != "production" and (not out or (fixture_cfg and fixture_cfg.enabled)):
         out.append(("local_fixture", "local-rules-v1", fixture_cfg, None))
@@ -131,7 +133,7 @@ def computer_turn(db: Session, org_id: uuid.UUID, *, system: str, messages: list
     check_entitlement(db, org_id, "ai_usd", adding=0.0)
     candidates = [c for c in available_providers(db, org_id, "computer_use") if c[0] in computer.SUPPORTED_PROVIDERS]
     if not candidates:
-        raise Unavailable("Computer use needs an approved Anthropic API key. An admin can add one under Admin → AI models.",
+        raise Unavailable("Computer use needs a customer-controlled local model gateway. External computer-use models are disabled by default.",
                           code="computer_use_not_configured")
     errors: list[str] = []
     for prov, model, cfg, key in candidates:

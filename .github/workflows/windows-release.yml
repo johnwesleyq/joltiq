@@ -97,10 +97,10 @@ jobs:
           Assert-JoltIqAuthenticodeFile -Path $msi[0].FullName -RequireTimestamp
           Assert-JoltIqChecksum -Artifact $msi[0].FullName -Manifest ./artifacts/SHA256SUMS.txt
           $manifest = Get-Content ./artifacts/build-manifest.json -Raw | ConvertFrom-Json
-          if ($manifest.distribution -ne 'External' -or $manifest.signed -ne $true -or $manifest.timestamped -ne $true -or $manifest.native_computer_use -ne $true -or -not $manifest.capabilities_manifest_sha256) { throw "Release manifest is not externally releasable." }
+          if ($manifest.distribution -ne 'External' -or $manifest.signed -ne $true -or $manifest.timestamped -ne $true -or $manifest.native_computer_use -ne $true -or -not $manifest.capabilities_manifest_sha256) { throw "Signed candidate manifest is incomplete." }
       - uses: actions/upload-artifact@v4
         with:
-          name: joltiq-companion-signed-${{ inputs.version }}
+          name: joltiq-companion-signed-candidate-${{ inputs.version }}
           path: |
             apps/windows-agent/artifacts/*.msi
             apps/windows-agent/artifacts/SHA256SUMS.txt

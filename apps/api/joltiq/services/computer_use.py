@@ -215,7 +215,7 @@ def start(
     from .ai.router import available_providers
 
     if not [c for c in available_providers(db, s.org_id, "computer_use") if c[0] in SUPPORTED_PROVIDERS]:
-        raise Conflict("Computer use needs an approved Anthropic API key. An admin can add one under Admin → AI models.",
+        raise Conflict("Computer use needs a customer-controlled local model gateway. External computer-use models are disabled by default.",
                        code="computer_use_not_configured")
     if mode not in ("guide", "fix"):
         raise AppError("Mode must be guide or fix", code="validation_error")

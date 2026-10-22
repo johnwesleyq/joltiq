@@ -75,6 +75,22 @@ class ReleaseReadinessValidatorTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must name at least one blocker", result.stderr)
 
+    def test_rejects_arbitrary_strings_as_passed_gate_evidence(self) -> None:
+        manifest = valid_manifest()
+        manifest["public_launch_ready"] = True
+        for gate in manifest["gates"].values():
+            gate.update(status="passed", evidence=["does-not-exist"], blockers=[])
+        result = self.run_validator(manifest)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("passed evidence must be typed attestations", result.stderr)
+
+    def test_rejects_non_iso_generation_time(self) -> None:
+        manifest = valid_manifest()
+        manifest["generated_at"] = "not-a-date"
+        result = self.run_validator(manifest)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("generated_at must be an ISO-8601 UTC timestamp", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

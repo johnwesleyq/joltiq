@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
     # When true, a deterministic local model fixture is registered. Never enabled in production.
     enable_local_fixture_providers: bool = True
+    # Development-only escape hatch. Production computer use must use a customer-controlled local model gateway.
+    allow_external_computer_use_models: bool = False
 
     # Research providers
     brave_search_api_key: str | None = None
@@ -94,6 +96,8 @@ class Settings(BaseSettings):
                 raise RuntimeError(f"Refusing to start in production with dev secrets: {bad or ['encryption_key']}")
             if self.enable_local_fixture_providers:
                 raise RuntimeError("Local fixture providers must be disabled in production")
+            if self.allow_external_computer_use_models:
+                raise RuntimeError("Production refuses external computer-use models")
             if not self.cookie_secure:
                 raise RuntimeError("cookie_secure must be true in production")
 
