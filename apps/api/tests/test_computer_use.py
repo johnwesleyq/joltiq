@@ -55,7 +55,10 @@ class CUDevice(FakeDevice):
             elif b["type"] == "action":
                 log.append((b["action"], b["params"]))
                 assert self.post(f"/commands/{b['command_id']}/screenshot", raw=png(), ctype="image/png").status_code == 200
-                r = self.post(f"/commands/{b['command_id']}/result", {"status": "done", "result": {"ok": True, "width": 1280, "height": 800}})
+                r = self.post(f"/commands/{b['command_id']}/result", {"status": "done", "result": {
+                    "ok": True, "width": 1280, "height": 800,
+                    "frame_generation": 17, "layout_hash": "a" * 64,
+                }})
                 assert r.status_code == 200, r.text
                 n += 1
         return n
@@ -82,6 +85,25 @@ def _pump(d, owner, rid, log, until=("waiting_customer", "completed", "failed", 
         if run["state"] in until:
             return run
     return run
+
+
+def test_frame_binding_is_required_and_copied_from_latest_device_screenshot(app, owner):
+    from joltiq.services.actions.registry import ActionValidationError, validate_params
+
+    with pytest.raises(ActionValidationError, match="frame_generation"):
+        validate_params("input.click", {"x": 10, "y": 20, "button": "left", "count": 1})
+
+    d, sid = _setup(app, owner)
+    rid = owner.post(
+        f"/api/v1/sessions/{sid}/computer-use",
+        json={"goal": "Open notepad, type a note and save it", "mode": "fix"},
+    ).json()["id"]
+    log: list = []
+    _pump(d, owner, rid, log)
+
+    mutating_inputs = [params for action, params in log if action.startswith("input.") and action not in ("input.wait", "input.cursor")]
+    assert mutating_inputs
+    assert all(p["frame_generation"] == 17 and p["layout_hash"] == "a" * 64 for p in mutating_inputs)
 
 
 def test_customer_selects_guide_or_fix_mode(app, owner):
@@ -151,7 +173,14 @@ def test_full_run_with_approval_pause_and_screens(app, owner):
     assert run["state"] == "waiting_customer" and run["waiting_for"]["kind"] == "approval"
     assert "Save the file" in run["waiting_for"]["text"] and run["live_model"] is False
     assert [a for a, _ in log] == ["screen.capture", "input.click", "input.type"]
-    assert log[1][1] == {"x": 640, "y": 400, "button": "left", "count": 1}
+    assert log[1][1] == {
+        "x": 640,
+        "y": 400,
+        "button": "left",
+        "count": 1,
+        "frame_generation": 17,
+        "layout_hash": "a" * 64,
+    }
     # The device sees the pause too, and can answer it.
     act = d.get("/computer-use/active").json()["runs"]
     assert act[0]["waiting_for"]["kind"] == "approval"

@@ -18,11 +18,12 @@ public sealed class LocalPolicy
 
     public static readonly IReadOnlySet<string> ReadOnlyActions = new HashSet<string>
         { "system.info", "process.list", "app.info", "disk.usage", "network.diagnostics", "eventlog.query", "outlook.pdf_crash.inspect",
-          "office.addin.verify_restored", "service.status" };
+          "office.addin.verify_restored", "service.status", "screen.capture", "input.wait", "input.cursor" };
 
     public static readonly IReadOnlySet<string> AllActions = new HashSet<string>(ReadOnlyActions)
         { "file.inspect", "config.read", "app.restart", "office.addin.set_load_behavior", "office.addin.restore_load_behavior",
-          "service.restart", "ui.invoke", "ui.set_text" };
+          "service.restart", "ui.invoke", "ui.set_text", "input.click", "input.drag", "input.move", "input.mouse", "input.type",
+          "input.key", "input.scroll", "url.open" };
 
     /// <summary>Applications the companion may restart or drive via UI Automation. Admin-extensible via local config.</summary>
     public HashSet<string> AllowedApps { get; } = new(StringComparer.OrdinalIgnoreCase)
@@ -53,9 +54,24 @@ public sealed class LocalPolicy
         int? I(string k) => p.ValueKind == JsonValueKind.Object && p.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : null;
         bool Has(string k) => p.ValueKind == JsonValueKind.Object && p.TryGetProperty(k, out _);
 
+        var mutatingInput = action.StartsWith("input.", StringComparison.Ordinal) && action is not ("input.wait" or "input.cursor");
+        if (mutatingInput && !string.Equals(session.ComputerUseMode, "fix", StringComparison.Ordinal))
+            return No("input is disabled unless the customer selected Fix mode");
+
         switch (action)
         {
             case "system.info" or "disk.usage":
+                return Ok();
+            case "screen.capture":
+                return I("max_long_edge") is null or >= 640 and <= 1920 ? Ok() : No("max_long_edge out of range");
+            case "input.wait":
+                return I("seconds") is >= 1 and <= 30 ? Ok() : No("seconds out of range");
+            case "input.cursor":
+                return Ok();
+            case "input.click" or "input.drag" or "input.move" or "input.mouse" or "input.type" or "input.key" or "input.scroll":
+                if (I("frame_generation") is not > 0 || S("layout_hash") is not { Length: 64 } hash ||
+                    !hash.All(c => char.IsAsciiHexDigit(c) && !char.IsUpper(c)))
+                    return No("valid frame_generation and layout_hash are required");
                 return Ok();
             case "process.list":
                 return S("name_filter") is { } nf && !ProcessName.IsMatch(nf) ? No("bad name_filter") : Ok();
@@ -133,6 +149,7 @@ public sealed class LocalSession
 {
     public required string SessionId { get; init; }
     public bool Active { get; set; }
+    public string? ComputerUseMode { get; set; }
     public long? ExpiresAt { get; init; }
     public bool Expired => ExpiresAt is { } e && e < DateTimeOffset.UtcNow.ToUnixTimeSeconds();
     public CancellationTokenSource Cancel { get; } = new();

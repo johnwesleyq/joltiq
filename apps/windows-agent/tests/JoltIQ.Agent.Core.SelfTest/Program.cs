@@ -73,6 +73,28 @@ T("policy: no shell or unknown actions", () =>
     foreach (var a in new[] { "shell.exec", "powershell", "file.write", "registry.write", "delete.anything", "credential.read" })
         Assert(!p.Evaluate(a, J("{}"), active).Allowed, a);
 });
+T("policy: native input requires a server-bound frame and Fix mode", () =>
+{
+    var p = new LocalPolicy();
+    var fix = new LocalSession
+    {
+        SessionId = "fix",
+        Active = true,
+        ComputerUseMode = "fix",
+        ExpiresAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 60,
+    };
+    var guide = new LocalSession
+    {
+        SessionId = "guide",
+        Active = true,
+        ComputerUseMode = "guide",
+        ExpiresAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 60,
+    };
+    var bound = J("{\"x\":10,\"y\":20,\"frame_generation\":7,\"layout_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}");
+    Assert(p.Evaluate("input.click", bound, fix).Allowed, "valid Fix input was refused");
+    Assert(!p.Evaluate("input.click", J("{\"x\":10,\"y\":20}"), fix).Allowed, "unbound input was accepted");
+    Assert(!p.Evaluate("input.click", bound, guide).Allowed, "Guide mode injected input");
+});
 T("policy: app/service allowlists", () =>
 {
     var p = new LocalPolicy();

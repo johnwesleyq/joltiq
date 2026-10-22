@@ -25,6 +25,10 @@ class ActionSpec:
 
 
 _XY = {"x": {"type": "integer", "min": 0, "max": 10000}, "y": {"type": "integer", "min": 0, "max": 10000}}
+_FRAME_BINDING = {
+    "frame_generation": {"type": "integer", "min": 1, "max": 2**63 - 1, "required": True},
+    "layout_hash": {"type": "string", "pattern": r"^[a-f0-9]{64}$", "required": True},
+}
 _COMBO = r"^[A-Za-z0-9_+\- ]{1,60}$"
 def _CU_SPECS(rows: list[tuple[str, R, str, dict[str, dict[str, Any]], str]]) -> list[tuple[str, R, str, dict[str, dict[str, Any]], str]]:  # noqa: N802
     return rows
@@ -104,21 +108,21 @@ ACTIONS: dict[str, ActionSpec] = {a.id: a for a in [
         ("screen.capture", R.READ_ONLY, "Capture the screen (scaled; secret fields are not masked — sent only to approved AI providers).",
          {"max_long_edge": {"type": "integer", "min": 640, "max": 1920}}, "None (read-only)."),
         ("input.click", R.SENSITIVE, "Click at a screen coordinate.",
-         {**_XY, "button": {"type": "string", "enum": ["left", "right", "middle"]}, "count": {"type": "integer", "min": 1, "max": 3},
+         {**_XY, **_FRAME_BINDING, "button": {"type": "string", "enum": ["left", "right", "middle"]}, "count": {"type": "integer", "min": 1, "max": 3},
           "modifiers": {"type": "string", "pattern": _COMBO}}, "Clicks on the user's screen."),
         ("input.drag", R.SENSITIVE, "Press, drag and release the left mouse button.",
-         {**_XY, "to_x": {"type": "integer", "min": 0, "max": 10000, "required": True},
+         {**_XY, **_FRAME_BINDING, "to_x": {"type": "integer", "min": 0, "max": 10000, "required": True},
           "to_y": {"type": "integer", "min": 0, "max": 10000, "required": True}}, "Drags on the user's screen."),
-        ("input.move", R.LOW_RISK, "Move the mouse pointer.", _XY, "Moves the pointer."),
-        ("input.mouse", R.SENSITIVE, "Press or release the left mouse button.", {"state": {"type": "string", "enum": ["down", "up"], "required": True}},
+        ("input.move", R.LOW_RISK, "Move the mouse pointer.", {**_XY, **_FRAME_BINDING}, "Moves the pointer."),
+        ("input.mouse", R.SENSITIVE, "Press or release the left mouse button.", {**_FRAME_BINDING, "state": {"type": "string", "enum": ["down", "up"], "required": True}},
          "Presses/releases the mouse button."),
         ("input.type", R.SENSITIVE, "Type non-secret text at the keyboard focus (secrets are refused server- and device-side).",
-         {"text": {"type": "string", "max": 2000, "required": True}}, "Types text on the user's computer."),
+         {**_FRAME_BINDING, "text": {"type": "string", "max": 2000, "required": True}}, "Types text on the user's computer."),
         ("input.key", R.SENSITIVE, "Press a key or key combination (e.g. Return, ctrl+s).",
-         {"combo": {"type": "string", "pattern": _COMBO, "required": True}, "repeat": {"type": "integer", "min": 1, "max": 50},
+         {**_FRAME_BINDING, "combo": {"type": "string", "pattern": _COMBO, "required": True}, "repeat": {"type": "integer", "min": 1, "max": 50},
           "hold_seconds": {"type": "integer", "min": 0, "max": 10}}, "Presses keys on the user's computer."),
         ("input.scroll", R.LOW_RISK, "Scroll at a position.",
-         {"x": {"type": "integer", "min": 0, "max": 10000}, "y": {"type": "integer", "min": 0, "max": 10000},
+         {**_FRAME_BINDING, "x": {"type": "integer", "min": 0, "max": 10000}, "y": {"type": "integer", "min": 0, "max": 10000},
           "direction": {"type": "string", "enum": ["up", "down", "left", "right"], "required": True},
           "amount": {"type": "integer", "min": 1, "max": 30}}, "Scrolls."),
         ("input.wait", R.READ_ONLY, "Wait, then capture the screen.", {"seconds": {"type": "integer", "min": 1, "max": 30, "required": True}}, "None."),

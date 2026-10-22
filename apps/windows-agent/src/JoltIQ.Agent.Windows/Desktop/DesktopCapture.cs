@@ -83,7 +83,7 @@ public sealed class DesktopCapture(
             throw new InvalidOperationException("Windows returned invalid display geometry");
     }
 
-    private static string HashLayout(DesktopLayout layout)
+    internal static string HashLayout(DesktopLayout layout)
     {
         var value = new StringBuilder()
             .Append(layout.VirtualBounds.Left).Append('|')

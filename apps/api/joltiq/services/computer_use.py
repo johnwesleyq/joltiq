@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 import uuid
 from typing import Any
 
@@ -399,8 +400,16 @@ def on_device_result(db: Session, cmd: DeviceCommand) -> bool:
         st.screenshot_key = key
     if key:
         run.last_screenshot_key = key
-    if res.get("width") and res.get("height"):
-        run.display = {"width": int(res["width"]), "height": int(res["height"])}
+    generation = res.get("frame_generation")
+    layout_hash = res.get("layout_hash")
+    if (ok and key and res.get("width") and res.get("height") and isinstance(generation, int) and generation > 0
+            and isinstance(layout_hash, str) and re.fullmatch(r"[a-f0-9]{64}", layout_hash)):
+        run.display = {
+            "width": int(res["width"]),
+            "height": int(res["height"]),
+            "frame_generation": generation,
+            "layout_hash": layout_hash,
+        }
     run.pending_command_id, run.waiting_for, run.state = None, None, "running"
     tid = w.get("tool_use_id")
     if tid is None:  # the opening screenshot
@@ -565,6 +574,23 @@ def _map(name: str, inp: dict) -> tuple[str, dict]:
     raise AppError(f"unsupported computer action {name}", code="unsupported_action")
 
 
+def _bind_latest_frame(run: ComputerUseRun, action: str, params: dict) -> dict:
+    """Bind native input to device-authored metadata from the last accepted screenshot.
+
+    Model-supplied frame fields are deliberately discarded. The model can select an action and
+    screenshot-relative coordinates, but only the server can say which concrete frame it targets.
+    """
+    if not action.startswith("input.") or action in ("input.wait", "input.cursor"):
+        return params
+    display = run.display or {}
+    generation = display.get("frame_generation")
+    layout_hash = display.get("layout_hash")
+    if not isinstance(generation, int) or generation < 1 or not isinstance(layout_hash, str):
+        raise AppError("No accepted screenshot is available for this input action", code="stale_frame")
+    clean = {k: v for k, v in params.items() if k not in ("frame_generation", "layout_hash")}
+    return {**clean, "frame_generation": generation, "layout_hash": layout_hash}
+
+
 def _execute(db: Session, run: ComputerUseRun, tu: dict) -> None:
     from .actions.registry import ActionValidationError, validate_params
 
@@ -572,6 +598,7 @@ def _execute(db: Session, run: ComputerUseRun, tu: dict) -> None:
     if tu.get("computer"):
         try:
             action, params = _map(name, inp)
+            params = _bind_latest_frame(run, action, params)
             params = validate_params(action, params)
         except (AppError, ActionValidationError, ValueError, TypeError) as e:
             return _refuse(db, run, tid, name, inp, narr, f"Invalid action: {e}", computer=True)
