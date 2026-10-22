@@ -1,6 +1,8 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot '..\BuildGate.psm1') -Force
+$windowsPowerShellEvidenceModule = Join-Path $PSScriptRoot '..\acceptance\EvidenceBundle.psm1'
+$windowsPowerShellAcceptanceCatalog = Join-Path $PSScriptRoot '..\acceptance\cases.json'
 
 $passed = 0
 $failed = 0
@@ -79,6 +81,15 @@ Test 'installer classification never presents unsigned output as external-ready'
     Throws { Assert-JoltIqInstallerClassification -Distribution External -SignatureStatus 'NotSigned' -InternalMarkerPresent:$false -ArpComments 'External release' }
     Assert-JoltIqInstallerClassification -Distribution External -SignatureStatus 'Valid' -InternalMarkerPresent:$false -ArpComments 'Externally releasable build'
 }
+Test 'acceptance harness loads its catalog under Windows PowerShell 5.1' ({
+    if ($PSVersionTable.PSVersion.Major -ne 5) { throw 'this compatibility gate must run under Windows PowerShell 5.1' }
+    Import-Module $windowsPowerShellEvidenceModule -Force
+    $catalog = Get-JoltIqCatalog $windowsPowerShellAcceptanceCatalog
+    if (-not $catalog.cases) { throw 'acceptance catalog did not load any cases' }
+    if (-not (Test-JoltIqEvidenceModule -CatalogPath $windowsPowerShellAcceptanceCatalog)) {
+        throw 'acceptance evidence module self-test failed under Windows PowerShell 5.1'
+    }
+}.GetNewClosure())
 
 Write-Host "$passed passed; $failed failed"
 if ($failed -ne 0) { exit 1 }

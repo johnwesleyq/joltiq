@@ -28,7 +28,23 @@ function Protect-JoltIqEvidenceFile {
 function Get-JoltIqCatalog {
     param([Parameter(Mandatory)][string]$CatalogPath)
     if (-not (Test-Path -LiteralPath $CatalogPath -PathType Leaf)) { throw "Acceptance catalog not found: $CatalogPath" }
-    Get-Content -LiteralPath $CatalogPath -Raw | ConvertFrom-Json -Depth 30
+    Get-Content -LiteralPath $CatalogPath -Raw | ConvertFrom-Json
+}
+
+function Get-JoltIqRelativePath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Path
+    )
+    $separator = [string][IO.Path]::DirectorySeparatorChar
+    $rootFull = [IO.Path]::GetFullPath($Root)
+    if (-not $rootFull.EndsWith($separator)) { $rootFull += $separator }
+    $pathFull = [IO.Path]::GetFullPath($Path)
+    if (-not $pathFull.StartsWith($rootFull, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Evidence file is outside bundle root: $pathFull"
+    }
+    return $pathFull.Substring($rootFull.Length).Replace('\', '/')
 }
 
 function New-JoltIqEvidenceBundle {
@@ -75,7 +91,7 @@ function Test-JoltIqEvidenceBundle {
     function ReadJson([string]$relative) {
         $path = Join-Path $Bundle $relative
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
-        try { return Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -Depth 50 }
+        try { return Get-Content -LiteralPath $path -Raw | ConvertFrom-Json }
         catch { $errors.Add("invalid JSON: $relative"); return $null }
     }
     function GetProp($object, [string]$name) {
@@ -160,7 +176,7 @@ function Test-JoltIqEvidenceBundle {
         $manifest = [ordered]@{ schema_version = 1; case_id = $caseId; run_id = (Split-Path $Bundle -Leaf); validated_at = (Get-Date).ToUniversalTime().ToString('o'); files = @() }
         foreach ($file in $files | Sort-Object FullName) {
             if ($file.Name -eq 'manifest.json') { continue }
-            $manifest.files += [ordered]@{ path = [IO.Path]::GetRelativePath($Bundle, $file.FullName).Replace('\', '/'); sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
+            $manifest.files += [ordered]@{ path = Get-JoltIqRelativePath -Root $Bundle -Path $file.FullName; sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
         }
         $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $Bundle 'manifest.json') -Encoding utf8
     }

@@ -34,9 +34,9 @@ This index deliberately separates implementation from execution evidence. A sour
 | Python dependency audit | **CLEARED:** upgraded `certifi` to `2026.10.19`; the complete API/browser suite passed with 152 passed and 2 expected skips, and `pip-audit -r requirements.lock` reported no known vulnerabilities. |
 | Web | `npm run typecheck`, `npm run build`, and `npm audit --omit=dev --audit-level=high` — passed; audit reported zero vulnerabilities. |
 | Companion Core | .NET 8 SDK container: **20 passed, 0 failed**. The final security self-review added coverage proving a reused command ID with altered signed parameters is refused instead of receiving cached success. |
-| Acceptance harness contract | .NET 8 SDK container: catalog, complete synthetic bundle, missing-evidence rejection, and secret-evidence rejection all passed. This validates the harness, not Windows behavior. |
+| Acceptance harness contract | Physical Windows PowerShell 5.1: catalog, complete synthetic bundle, every missing-evidence rejection, and secret-evidence rejection all passed after correcting two PowerShell 5.1 compatibility defects. This validates the harness contract on Windows, not the 59-run Windows behavior matrix. |
 | Physical Windows build gate | `powershell -executionpolicy bypass -file scripts/build.ps1` completed on Windows 11 Pro x64 build 26200 using .NET SDK 8.0.426. Every project built with zero warnings/errors; Core self-tests passed **20/20**; native xUnit passed **40/40** in 7 seconds; all four acceptance-harness contract checks passed; self-contained win-x64 tray/broker publishing and WiX v5 MSI packaging passed. |
-| Build-gate regression suite | `powershell -executionpolicy bypass -file scripts/tests/BuildGate.Tests.ps1` — **9 passed, 0 failed**, including native stderr capture when the caller uses stop-on-error behavior. |
+| Build-gate regression suite | `powershell -executionpolicy bypass -file scripts/tests/BuildGate.Tests.ps1` — **10 passed, 0 failed** on physical Windows under Windows PowerShell 5.1. This includes native stderr capture plus a regression that loads and self-tests the acceptance evidence module under the production shell. |
 | Physical Windows repeatability | Native xUnit was also rerun with `--no-build`: **40/40 passed**. |
 | Internal MSI | `JoltIQCompanion-1.0.0-x64.msi`, 83,256,954 bytes. Independent `Get-FileHash` matched the build output and manifest: `ec3b2eaa1a4c6a5fd3e206b47cc2b654ce3bad25e8fb0c08879d6fcde5fedc0e`. Manifest: `distribution=Internal`, `signed=false`, `timestamped=false`. |
 | Windows acceptance | Not run: the physical PC is not a disposable snapshot-reset VM, the 59-case aggregate was not executed, and the licensed real-Outlook case remains outstanding. |
@@ -57,8 +57,9 @@ Every accepted run must provide the 14 evidence classes required by the catalog.
 | File | SHA-256 |
 |---|---|
 | `apps/windows-agent/scripts/acceptance/cases.json` | `ddf4561b984811d05f0b79ad21a6fbaf7dc4a50a56a7eb39f90e7a086a066bea` |
-| `apps/windows-agent/scripts/acceptance/EvidenceBundle.psm1` | `45a88a87c54c9978ad94c31873d2b42a2ba43458482bcc500a454e7ff8137228` |
+| `apps/windows-agent/scripts/acceptance/EvidenceBundle.psm1` | `de41a6bd8deb02f362a67a1b0a49324823a36287f71d0979d278e9b6261a2891` |
 | `apps/windows-agent/scripts/acceptance/Invoke-OutlookPdfMvp.ps1` | `75c64fe92317e9c7300823dbdd682e1c2f14279c49e647218a4beefc73a32302` |
+| `apps/windows-agent/scripts/tests/BuildGate.Tests.ps1` | `56cbcc216afd276b6badcbbb56e9084caabdca5dd2693f4b9772d0e3d27faec5` |
 | `apps/windows-agent/scripts/build.ps1` | `248a9c26052b1a05b5b204ac8494d3facaedfe976fab3166fd9868be57faafab` |
 | `apps/windows-agent/scripts/test-on-windows.ps1` | `6debc5f4b8179bf9fc3e85d9dc788bc7785fa503d160f429ed2e93bc19cbfda3` |
 | `.github/workflows/ci.yml` | `e75d89b53e3bb1e8f10727daa8ee0301d6fa43fbe8a25e13f94c4881af8f37bc` |
