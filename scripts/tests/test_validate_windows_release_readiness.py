@@ -62,6 +62,13 @@ class ReleaseReadinessValidatorTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("all four gates", result.stderr)
 
+    def test_schema_v1_can_never_promote_a_public_release(self) -> None:
+        manifest = valid_manifest()
+        manifest["public_launch_ready"] = True
+        result = self.run_validator(manifest)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("schema_version 1 cannot promote", result.stderr)
+
     def test_rejects_passed_gate_without_evidence(self) -> None:
         manifest = valid_manifest()
         manifest["gates"]["authenticode_signing"] = {

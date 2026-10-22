@@ -6,9 +6,9 @@ The machine-readable source of truth is `docs/operations/evidence/windows-public
 python3 scripts/validate_windows_release_readiness.py docs/operations/evidence/windows-public-release-readiness.json
 ```
 
-`public_launch_ready` may be `true` only when all four gates below are `passed` and reference their evidence. Engineering tests, a physical-PC build, a self-signed certificate, an internal review, or a partially completed case catalog cannot satisfy a public-release gate.
+Schema version 1 is monitoring-only and always refuses `public_launch_ready: true`. A future schema version 2 may promote only after it independently verifies all four gates below against trusted signing and lab-controller sources. Engineering tests, a physical-PC build, a self-signed certificate, an internal review, or a partially completed case catalog cannot satisfy a public-release gate.
 
-Passed evidence must be a repository-contained JSON attestation whose file digest, source commit, and common release-artifact SHA-256 are recorded in the readiness manifest. The validator also requires gate-specific facts: valid timestamped signatures for tray, broker, and MSI; clean-snapshot disposable lifecycle operations; separate snapshot-reset Windows 10 and Windows 11 acceptance aggregates; and an identified independent assessor's signed approval with zero unresolved release blockers.
+The current typed attestations are useful inventory, but they are not trusted promotion proof because their claims can be hand-authored. Schema version 2 must verify the actual artifacts and Authenticode timestamp, exact Git commit, installer transitions and hashes, lab-controller-signed VM/snapshot/revert receipts, complete OS-specific catalogs, decoded/redacted image evidence, and the independent assessor's signed report before promotion becomes possible.
 
 ## Current prerequisite inventory
 

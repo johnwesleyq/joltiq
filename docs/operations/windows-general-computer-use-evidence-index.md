@@ -4,7 +4,7 @@ Last updated: 2026-10-22
 
 ## Current verdict
 
-**Public launch is blocked.** Production signing, installer lifecycle evidence, disposable Windows 10/11 behavioral matrices, the supported local computer-use model gateway, remediation of the internal security-preflight findings, and an independent security decision are all still required.
+**Public launch is blocked.** Readiness schema version 1 cannot promote a release. Production signing, a trusted schema-version-2 verifier, hardened installer lifecycle evidence, lab-controller-attested disposable Windows 10/11 matrices, decoded/redacted image evidence, the supported local computer-use model gateway, remediation of every internal security-preflight finding, and an independent security decision are all still required.
 
 The consolidated fail-closed public-launch status is recorded in `docs/operations/evidence/windows-public-release-readiness.json` and explained in `docs/operations/windows-public-release-gates.md`.
 

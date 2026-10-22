@@ -151,6 +151,10 @@ def validate(manifest: Any, repo_root: Path | None = None) -> list[str]:
         return ["manifest must be a JSON object"]
     if manifest.get("schema_version") != 1:
         errors.append("schema_version must equal 1")
+    if manifest.get("schema_version") == 1 and manifest.get("public_launch_ready") is True:
+        errors.append(
+            "schema_version 1 cannot promote a public release; a trusted schema_version 2 verifier is required"
+        )
     if not _is_utc_timestamp(manifest.get("generated_at")):
         errors.append("generated_at must be an ISO-8601 UTC timestamp ending in Z")
     if not COMMIT_RE.fullmatch(str(manifest.get("source_commit", ""))):
@@ -203,7 +207,7 @@ def validate(manifest: Any, repo_root: Path | None = None) -> list[str]:
     )
     if manifest.get("public_launch_ready") is True and not all_passed:
         errors.append("public_launch_ready requires all four gates to be passed")
-    if manifest.get("public_launch_ready") is False and all_passed:
+    if manifest.get("schema_version") != 1 and manifest.get("public_launch_ready") is False and all_passed:
         errors.append("public_launch_ready must be true when all four gates are passed")
     return errors
 
