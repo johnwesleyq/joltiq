@@ -5,9 +5,11 @@
 [CmdletBinding(DefaultParameterSetName = 'Validate')]
 param(
     [Parameter(ParameterSetName = 'Validate')][switch]$ValidateHarness,
+    [Parameter(ParameterSetName = 'ValidateComputerUse')][switch]$ValidateComputerUseHarness,
     [Parameter(ParameterSetName = 'List')][switch]$List,
     [Parameter(ParameterSetName = 'Lifecycle', Mandatory)][switch]$InstallerLifecycle,
     [Parameter(ParameterSetName = 'Run', Mandatory)][string]$CaseId,
+    [Parameter(ParameterSetName = 'Run')][switch]$GeneralComputerUse,
     [Parameter(ParameterSetName = 'Run')][string]$RunId = (Get-Date -Format 'yyyyMMdd-HHmmss'),
     [Parameter(ParameterSetName = 'Run')][string]$SnapshotName,
     [Parameter(ParameterSetName = 'Run')][switch]$Finalize,
@@ -24,9 +26,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $runner = Join-Path $PSScriptRoot 'acceptance\Invoke-OutlookPdfMvp.ps1'
+$computerUseRunner = Join-Path $PSScriptRoot 'acceptance\Invoke-GeneralComputerUse.ps1'
 $gate = Join-Path $PSScriptRoot 'BuildGate.psm1'
 
 if ($List) { & $runner -List; exit $LASTEXITCODE }
+if ($ValidateComputerUseHarness) { & $computerUseRunner -ValidateHarness; exit $LASTEXITCODE }
 if ($ValidateHarness -or $PSCmdlet.ParameterSetName -eq 'Validate') { & $runner -ValidateHarness; exit $LASTEXITCODE }
 
 if ($InstallerLifecycle) {
@@ -127,9 +131,11 @@ $arguments = @{ CaseId = $CaseId; RunId = $RunId; EvidenceRoot = $EvidenceRoot }
 if ($SnapshotName) { $arguments.SnapshotName = $SnapshotName }
 if ($Msi) { $arguments.Msi = $Msi }
 if ($ServerCommit) { $arguments.ServerCommit = $ServerCommit }
-if ($OutlookVersion) { $arguments.OutlookVersion = $OutlookVersion }
-if ($OutlookLicenseConfirmed) { $arguments.OutlookLicenseConfirmed = $true }
-if ($DisposableProfile) { $arguments.DisposableProfile = $true }
+if (-not $GeneralComputerUse) {
+    if ($OutlookVersion) { $arguments.OutlookVersion = $OutlookVersion }
+    if ($OutlookLicenseConfirmed) { $arguments.OutlookLicenseConfirmed = $true }
+    if ($DisposableProfile) { $arguments.DisposableProfile = $true }
+}
 if ($Finalize) { $arguments.Finalize = $true }
-& $runner @arguments
+if ($GeneralComputerUse) { & $computerUseRunner @arguments } else { & $runner @arguments }
 exit $LASTEXITCODE

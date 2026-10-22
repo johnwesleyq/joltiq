@@ -3,6 +3,7 @@ $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot '..\BuildGate.psm1') -Force
 $windowsPowerShellEvidenceModule = Join-Path $PSScriptRoot '..\acceptance\EvidenceBundle.psm1'
 $windowsPowerShellAcceptanceCatalog = Join-Path $PSScriptRoot '..\acceptance\cases.json'
+$windowsPowerShellComputerUseCatalog = Join-Path $PSScriptRoot '..\acceptance\computer-use-cases.json'
 
 $passed = 0
 $failed = 0
@@ -88,6 +89,24 @@ Test 'acceptance harness loads its catalog under Windows PowerShell 5.1' ({
     if (-not $catalog.cases) { throw 'acceptance catalog did not load any cases' }
     if (-not (Test-JoltIqEvidenceModule -CatalogPath $windowsPowerShellAcceptanceCatalog)) {
         throw 'acceptance evidence module self-test failed under Windows PowerShell 5.1'
+    }
+}.GetNewClosure())
+Test 'general computer-use harness is complete under Windows PowerShell 5.1' ({
+    if ($PSVersionTable.PSVersion.Major -ne 5) { throw 'this compatibility gate must run under Windows PowerShell 5.1' }
+    Import-Module $windowsPowerShellEvidenceModule -Force
+    $catalog = Get-JoltIqCatalog $windowsPowerShellComputerUseCatalog
+    $required = @(
+        'notepad-guide-win11', 'notepad-fix-win11', 'notepad-guide-win10', 'notepad-fix-win10',
+        'multi-monitor-dpi', 'layout-change', 'screen-lock', 'uac-secure-desktop', 'password-target', 'otp-target',
+        'focus-theft', 'enrolled-user-mismatch', 'local-decline', 'portal-decline', 'stop-queued',
+        'stop-before-native-input', 'stop-during-drag', 'offline-command', 'expired-command', 'duplicate-command',
+        'tray-restart', 'unsupported-secure-desktop', 'guide-input-refusal', 'switch-to-fix-fresh-consent'
+    )
+    foreach ($id in $required) {
+        if ($catalog.cases.id -notcontains $id) { throw "computer-use catalog missing required case: $id" }
+    }
+    if (-not (Test-JoltIqComputerUseEvidenceModule -CatalogPath $windowsPowerShellComputerUseCatalog)) {
+        throw 'general computer-use evidence module self-test failed under Windows PowerShell 5.1'
     }
 }.GetNewClosure())
 

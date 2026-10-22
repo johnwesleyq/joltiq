@@ -64,6 +64,116 @@ function New-JoltIqEvidenceBundle {
     return $bundle
 }
 
+function Test-JoltIqComputerUseEvidenceBundle {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Bundle,
+        [Parameter(Mandatory)][string]$CatalogPath,
+        [switch]$ThrowOnFailure
+    )
+    $catalog = Get-JoltIqCatalog $CatalogPath
+    $errors = [System.Collections.Generic.List[string]]::new()
+    foreach ($relative in $catalog.required_evidence) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Bundle $relative) -PathType Leaf)) { $errors.Add("missing evidence: $relative") }
+    }
+    $caseId = Split-Path (Split-Path $Bundle -Parent) -Leaf
+    $case = $catalog.cases | Where-Object id -eq $caseId | Select-Object -First 1
+    if (-not $case) { $errors.Add("bundle case is not in catalog: $caseId") }
+
+    $files = @(Get-ChildItem -LiteralPath $Bundle -File -Recurse -ErrorAction SilentlyContinue)
+    foreach ($file in $files) {
+        if ($file.Extension -notin @('.json', '.jsonl', '.txt')) { continue }
+        $raw = Get-Content -LiteralPath $file.FullName -Raw
+        if ($raw -match $script:SecretPattern) { $errors.Add("secret-like content in $($file.Name)") }
+        if ($raw -match $script:ForbiddenContentPattern) { $errors.Add("forbidden customer content in $($file.Name)") }
+    }
+
+    function ReadJson([string]$relative) {
+        $path = Join-Path $Bundle $relative
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+        try { return Get-Content -LiteralPath $path -Raw | ConvertFrom-Json }
+        catch { $errors.Add("invalid JSON: $relative"); return $null }
+    }
+    function GetProp($object, [string]$name) {
+        if ($null -ne $object -and $object.PSObject.Properties.Match($name).Count -gt 0) { return $object.$name }
+        return $null
+    }
+
+    $environment = ReadJson 'environment.json'
+    foreach ($name in @('os_caption', 'display_version', 'os_build', 'architecture', 'agent_version', 'server_commit', 'harness_commit', 'fixture_version')) {
+        if ($environment -and -not (GetProp $environment $name)) { $errors.Add("environment.json missing $name") }
+    }
+    if ($environment -and (GetProp $environment 'architecture') -ne '64-bit') { $errors.Add('only 64-bit Windows evidence is accepted') }
+    if ($environment -and ((GetProp $environment 'server_commit') -notmatch '^[0-9a-fA-F]{7,64}$' -or (GetProp $environment 'harness_commit') -notmatch '^[0-9a-fA-F]{7,64}$')) {
+        $errors.Add('environment.json requires exact hexadecimal server and harness commits')
+    }
+    if ($environment -and ((GetProp $environment 'os_build') -notmatch '^\d+$' -or (GetProp $environment 'agent_version') -in @('unknown', 'not-installed') -or (GetProp $environment 'fixture_version') -notmatch '^\d+\.\d+\.\d+')) {
+        $errors.Add('environment.json requires exact OS, agent, and fixture versions')
+    }
+    $snapshot = ReadJson 'snapshot.json'
+    if ($snapshot -and (-not (GetProp $snapshot 'name') -or (GetProp $snapshot 'clean') -ne $true -or -not (GetProp $snapshot 'reverted_at'))) {
+        $errors.Add('snapshot preflight must name a freshly reverted clean snapshot')
+    }
+    $installer = ReadJson 'installer.json'
+    if ($installer -and ((GetProp $installer 'installed') -ne $true -or -not (GetProp $installer 'version') -or -not (GetProp $installer 'signature_status'))) {
+        $errors.Add('installer evidence must contain install state, version, and signature status')
+    }
+    $session = ReadJson 'session.json'
+    if ($session -and (-not (GetProp $session 'session_id') -or -not (GetProp $session 'run_id') -or (GetProp $session 'mode') -notin @('guide', 'fix') -or (GetProp $session 'portal_consent_recorded') -ne $true -or (GetProp $session 'native_consent_recorded') -ne $true -or (GetProp $session 'goal_hash') -notmatch '^[0-9a-fA-F]{64}$' -or -not (GetProp $session 'final_state'))) {
+        $errors.Add('session evidence must bind one consented Guide/Fix run to a hashed goal and final state')
+    }
+    if ($session -and $case -and (GetProp $session 'mode') -ne $case.mode) { $errors.Add('session mode does not match the acceptance case') }
+    $commands = ReadJson 'commands.json'
+    $commandItems = GetProp $commands 'commands'
+    if ($commands -and ((GetProp $commands 'signature_checks_passed') -ne $true -or (GetProp $commands 'unsigned_commands_accepted') -ne 0 -or -not $commandItems -or @($commandItems | Where-Object { -not (GetProp $_ 'command_id') -or -not (GetProp $_ 'status') -or -not (GetProp $_ 'action') }).Count -gt 0)) {
+        $errors.Add('command evidence requires signed command IDs, actions, statuses, and zero unsigned acceptance')
+    }
+    $audit = ReadJson 'audit.json'
+    if ($audit -and ((GetProp $audit 'chain_valid') -ne $true -or -not (GetProp $audit 'entries'))) { $errors.Add('audit chain evidence is missing or invalid') }
+    $frames = ReadJson 'frames/index.json'
+    $frameItems = GetProp $frames 'items'
+    if ($frames -and (-not $frameItems -or @($frameItems).Count -lt 1)) { $errors.Add('at least one indexed, redacted computer-use frame is required') }
+    if ($frameItems) {
+        foreach ($item in @($frameItems)) {
+            $frameFile = GetProp $item 'file'
+            if (-not $frameFile -or $frameFile -notmatch '^[a-zA-Z0-9][a-zA-Z0-9._-]*\.(png|jpe?g)$' -or -not (Test-Path -LiteralPath (Join-Path $Bundle "frames/$frameFile") -PathType Leaf) -or (GetProp $item 'redacted') -ne $true -or -not (GetProp $item 'frame_generation') -or (GetProp $item 'layout_hash') -notmatch '^[0-9a-fA-F]{64}$' -or -not (GetProp $item 'width') -or -not (GetProp $item 'height')) {
+                $errors.Add('frame index requires an existing redacted image with generation, layout hash, and dimensions')
+            }
+        }
+    }
+    $stop = ReadJson 'stop-timing.json'
+    if ($stop -and $stop.PSObject.Properties.Match('applicable').Count -eq 0) {
+        $errors.Add('STOP timing must explicitly state whether it is applicable')
+    } elseif ($stop -and $case -and [bool]$case.stop_required -and ((GetProp $stop 'applicable') -ne $true -or (GetProp $stop 'target_p95_ms') -ne 500 -or (GetProp $stop 'maximum_ms') -ne 2000 -or -not (GetProp $stop 'observed_ms') -or (GetProp $stop 'within_target') -ne $true)) {
+        $errors.Add('STOP case must prove measured cancellation within the 500 ms p95 and 2 second maximum contract')
+    }
+    $input = ReadJson 'input.json'
+    if ($input -and ((GetProp $input 'forbidden_actions_executed') -ne 0 -or (GetProp $input 'guide_input_executed') -ne 0 -or (GetProp $input 'held_input_released') -ne $true -or $input.PSObject.Properties.Match('requested').Count -eq 0 -or $input.PSObject.Properties.Match('executed').Count -eq 0 -or $input.PSObject.Properties.Match('refused').Count -eq 0)) {
+        $errors.Add('input evidence must enumerate requested/executed/refused actions, prove releases, and show zero forbidden or Guide input')
+    }
+    $desktop = ReadJson 'desktop.json'
+    if ($desktop -and (-not (GetProp $desktop 'final_process_state') -or -not (GetProp $desktop 'final_desktop_state') -or (GetProp $desktop 'customer_content_collected') -ne $false -or (GetProp $desktop 'secrets_collected') -ne $false)) {
+        $errors.Add('final desktop evidence is incomplete or indicates customer content or secrets were collected')
+    }
+    $result = ReadJson 'result.json'
+    if ($result -and ((GetProp $result 'case_id') -ne $caseId -or (GetProp $result 'expected') -ne $case.expected -or (GetProp $result 'passed') -ne $true -or (GetProp $result 'server_device_ticket_agree') -ne $true)) {
+        $errors.Add('result does not prove expected state and server/device/ticket agreement')
+    }
+
+    $valid = $errors.Count -eq 0
+    if ($valid) {
+        $manifest = [ordered]@{ schema_version = 1; acceptance_kind = 'computer_use'; case_id = $caseId; run_id = (Split-Path $Bundle -Leaf); validated_at = (Get-Date).ToUniversalTime().ToString('o'); files = @() }
+        foreach ($file in $files | Sort-Object FullName) {
+            if ($file.Name -eq 'manifest.json') { continue }
+            $manifest.files += [ordered]@{ path = Get-JoltIqRelativePath -Root $Bundle -Path $file.FullName; sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
+        }
+        $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $Bundle 'manifest.json') -Encoding utf8
+    }
+    $answer = [pscustomobject]@{ valid = $valid; errors = @($errors); bundle = $Bundle }
+    if (-not $valid -and $ThrowOnFailure) { throw ($errors -join [Environment]::NewLine) }
+    return $answer
+}
+
 function Test-JoltIqEvidenceBundle {
     [CmdletBinding()]
     param(
@@ -72,6 +182,9 @@ function Test-JoltIqEvidenceBundle {
         [switch]$ThrowOnFailure
     )
     $catalog = Get-JoltIqCatalog $CatalogPath
+    if ($catalog.PSObject.Properties.Match('acceptance_kind').Count -gt 0 -and $catalog.acceptance_kind -eq 'computer_use') {
+        return Test-JoltIqComputerUseEvidenceBundle -Bundle $Bundle -CatalogPath $CatalogPath -ThrowOnFailure:$ThrowOnFailure
+    }
     $errors = [System.Collections.Generic.List[string]]::new()
     foreach ($relative in $catalog.required_evidence) {
         if (-not (Test-Path -LiteralPath (Join-Path $Bundle $relative) -PathType Leaf)) { $errors.Add("missing evidence: $relative") }
@@ -204,7 +317,8 @@ function Update-JoltIqAggregate {
         if ($actualCount -lt $requiredCount) { $missing += "$($case.id): $actualCount/$requiredCount valid runs" }
     }
     $aggregate = [ordered]@{ schema_version = 1; generated_at = (Get-Date).ToUniversalTime().ToString('o'); passed = ($missing.Count -eq 0 -and @($runs | Where-Object { -not $_.valid }).Count -eq 0); missing = $missing; runs = $runs }
-    $aggregate | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $Root 'windows-acceptance.json') -Encoding utf8
+    $aggregateName = if ($catalog.PSObject.Properties.Match('acceptance_kind').Count -gt 0 -and $catalog.acceptance_kind -eq 'computer_use') { 'windows-computer-use-acceptance.json' } else { 'windows-acceptance.json' }
+    $aggregate | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $Root $aggregateName) -Encoding utf8
     return [pscustomobject]$aggregate
 }
 
@@ -272,4 +386,63 @@ function Test-JoltIqEvidenceModule {
     finally { Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
-Export-ModuleMember -Function Protect-JoltIqEvidenceText, Protect-JoltIqEvidenceFile, Get-JoltIqCatalog, New-JoltIqEvidenceBundle, Test-JoltIqEvidenceBundle, Update-JoltIqAggregate, Test-JoltIqEvidenceModule
+function Test-JoltIqComputerUseEvidenceModule {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$CatalogPath)
+    $temp = Join-Path ([IO.Path]::GetTempPath()) ("joltiq-computer-use-selftest-" + [guid]::NewGuid().ToString('N'))
+    try {
+        $catalog = Get-JoltIqCatalog $CatalogPath
+        if ($catalog.acceptance_kind -ne 'computer_use' -or @($catalog.required_evidence).Count -lt 12) { throw 'computer-use evidence contract is incomplete' }
+        $sample = Join-Path $temp 'notepad-guide-win11/run-1'
+        New-Item -ItemType Directory -Path (Join-Path $sample 'frames') -Force | Out-Null
+        foreach ($relative in $catalog.required_evidence) {
+            $path = Join-Path $sample $relative
+            New-Item -ItemType Directory -Path (Split-Path $path -Parent) -Force | Out-Null
+            '{}' | Set-Content -LiteralPath $path
+        }
+        @{ os_caption = 'Windows 11 Pro'; display_version = '24H2'; os_build = '26100'; architecture = '64-bit'; agent_version = '1.2.3'; server_commit = 'abcdef1'; harness_commit = '1234567'; fixture_version = '1.0.0' } | ConvertTo-Json | Set-Content (Join-Path $sample 'environment.json')
+        @{ name = 'win11-clean'; clean = $true; reverted_at = '2026-10-22T00:00:00Z' } | ConvertTo-Json | Set-Content (Join-Path $sample 'snapshot.json')
+        @{ installed = $true; version = '1.2.3'; signature_status = 'Valid' } | ConvertTo-Json | Set-Content (Join-Path $sample 'installer.json')
+        @{ session_id = 's1'; run_id = 'r1'; mode = 'guide'; portal_consent_recorded = $true; native_consent_recorded = $true; goal_hash = ('a' * 64); final_state = 'finished' } | ConvertTo-Json | Set-Content (Join-Path $sample 'session.json')
+        @{ signature_checks_passed = $true; unsigned_commands_accepted = 0; commands = @(@{ command_id = 'c1'; action = 'screen.capture'; status = 'completed' }) } | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $sample 'commands.json')
+        @{ chain_valid = $true; entries = @(@{ id = 'a1' }) } | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $sample 'audit.json')
+        @{ items = @(@{ file = '01-redacted.png'; redacted = $true; frame_generation = 1; layout_hash = ('b' * 64); width = 1280; height = 720 }) } | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $sample 'frames/index.json')
+        'redacted fixture frame' | Set-Content (Join-Path $sample 'frames/01-redacted.png')
+        @{ applicable = $false } | ConvertTo-Json | Set-Content (Join-Path $sample 'stop-timing.json')
+        @{ requested = @('guide.highlight'); executed = @('guide.highlight'); refused = @(); forbidden_actions_executed = 0; guide_input_executed = 0; held_input_released = $true } | ConvertTo-Json | Set-Content (Join-Path $sample 'input.json')
+        @{ final_process_state = 'notepad_running'; final_desktop_state = 'clean'; customer_content_collected = $false; secrets_collected = $false } | ConvertTo-Json | Set-Content (Join-Path $sample 'desktop.json')
+        @{ case_id = 'notepad-guide-win11'; expected = 'guided_verified'; passed = $true; server_device_ticket_agree = $true } | ConvertTo-Json | Set-Content (Join-Path $sample 'result.json')
+        $complete = Test-JoltIqComputerUseEvidenceBundle -Bundle $sample -CatalogPath $CatalogPath
+        if (-not $complete.valid) { throw "complete computer-use evidence did not validate: $($complete.errors -join '; ')" }
+
+        foreach ($relative in $catalog.required_evidence | Where-Object { $_ -match '\.(json|jsonl)$' }) { '{}' | Set-Content -LiteralPath (Join-Path $sample $relative) }
+        $empty = Test-JoltIqComputerUseEvidenceBundle -Bundle $sample -CatalogPath $CatalogPath
+        foreach ($expectedError in @(
+            'environment.json missing os_caption',
+            'environment.json requires exact hexadecimal server and harness commits',
+            'environment.json requires exact OS, agent, and fixture versions',
+            'snapshot preflight must name a freshly reverted clean snapshot',
+            'installer evidence must contain install state, version, and signature status',
+            'session evidence must bind one consented Guide/Fix run to a hashed goal and final state',
+            'command evidence requires signed command IDs, actions, statuses, and zero unsigned acceptance',
+            'audit chain evidence is missing or invalid',
+            'at least one indexed, redacted computer-use frame is required',
+            'STOP timing must explicitly state whether it is applicable',
+            'input evidence must enumerate requested/executed/refused actions, prove releases, and show zero forbidden or Guide input',
+            'final desktop evidence is incomplete or indicates customer content or secrets were collected',
+            'result does not prove expected state and server/device/ticket agreement'
+        )) {
+            if ($empty.errors -notcontains $expectedError) { throw "computer-use validator did not enforce: $expectedError" }
+        }
+        Remove-Item -LiteralPath (Join-Path $sample 'audit.json')
+        $missing = Test-JoltIqComputerUseEvidenceBundle -Bundle $sample -CatalogPath $CatalogPath
+        if ($missing.valid -or -not ($missing.errors -contains 'missing evidence: audit.json')) { throw 'missing computer-use evidence did not fail closed' }
+        'Authorization: Bearer should-never-be-saved' | Set-Content -LiteralPath (Join-Path $sample 'companion.jsonl')
+        $secret = Test-JoltIqComputerUseEvidenceBundle -Bundle $sample -CatalogPath $CatalogPath
+        if (-not ($secret.errors -contains 'secret-like content in companion.jsonl')) { throw 'computer-use secret scanner did not fail closed' }
+        return $true
+    }
+    finally { Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Export-ModuleMember -Function Protect-JoltIqEvidenceText, Protect-JoltIqEvidenceFile, Get-JoltIqCatalog, New-JoltIqEvidenceBundle, Test-JoltIqEvidenceBundle, Test-JoltIqComputerUseEvidenceBundle, Update-JoltIqAggregate, Test-JoltIqEvidenceModule, Test-JoltIqComputerUseEvidenceModule
