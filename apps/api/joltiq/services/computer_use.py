@@ -297,12 +297,24 @@ def _begin(db: Session, run: ComputerUseRun) -> None:
 
 
 def respond(db: Session, run: ComputerUseRun, *, user_id, approved: bool | None = None, answer: str | None = None, done: bool = False,
-            via: str = "portal") -> ComputerUseRun:
+            switch_to_fix: bool = False, via: str = "portal") -> ComputerUseRun:
     """The customer answered a pause: approval decision, question answer, or 'I finished typing the secret'."""
     if run.state != "waiting_customer" or not run.waiting_for:
         raise Conflict("Nothing is waiting for an answer", code="invalid_state")
     w = run.waiting_for
-    if w["kind"] == "approval":
+    if w["kind"] == "guide_action":
+        if run.mode != "guide" or done == switch_to_fix:
+            raise AppError("Choose I did it or Switch to Fix", code="validation_error")
+        if switch_to_fix:
+            # A Guide grant can never be widened. Request a new, exact Fix grant from the PC.
+            run.mode = "fix"
+            run.local_consent_state = "pending"
+            run.waiting_for = None
+            _request_local_consent(db, run, user_id)
+            _event(db, run, "mode_change_requested", {"mode": "fix"})
+            return run
+        text = "The customer completed the highlighted step. Capture the screen and verify it before continuing."
+    elif w["kind"] == "approval":
         if approved is None:
             raise AppError("approved is required", code="validation_error")
         text = "Approved by the customer. Go ahead." if approved else "Denied by the customer. Do not do this; find another way or finish."
@@ -319,7 +331,7 @@ def respond(db: Session, run: ComputerUseRun, *, user_id, approved: bool | None 
         st.params = {**st.params, "response": text[:300], "via": via}
     audit.record(db, org_id=run.org_id, actor_kind="user", actor_id=user_id, action=f"computer_use.{w['kind']}_answered", resource_type="computer_use_run",
                  resource_id=run.id, data={"approved": approved, "via": via})
-    run.results = [*run.results, _text_result(w["tool_use_id"], text, computer=False)]
+    run.results = [*run.results, _text_result(w["tool_use_id"], text, computer=bool(w.get("computer")))]
     run.waiting_for, run.state = None, "running"
     _event(db, run, "customer_responded", {"kind": w["kind"], "approved": approved})
     _continue(db, run)
@@ -419,6 +431,14 @@ def on_device_result(db: Session, cmd: DeviceCommand) -> bool:
             {"type": "text", "text": f"GOAL: {run.goal}\n\nHere is the customer's screen now ({(run.display or {}).get('width')}x"
                                      f"{(run.display or {}).get('height')} pixels; use these coordinates).{os_line}{recall(db, run)}"},
             *([{"type": "image_ref", "key": key}] if key else [])]}]
+    elif cmd.action == "guide.highlight" and ok:
+        run.state = "waiting_customer"
+        run.waiting_for = {
+            "kind": "guide_action", "tool_use_id": tid, "step_id": str(st.id) if st else None,
+            "computer": True, "text": "Follow the highlight, then choose I did it or Switch to Fix.",
+        }
+        _event(db, run, "customer_needed", {"kind": "guide_action"})
+        return True
     else:
         note = "OK" if ok else f"Error: {st.error if st else cmd.status}"
         if res.get("text"):
@@ -591,6 +611,16 @@ def _bind_latest_frame(run: ComputerUseRun, action: str, params: dict) -> dict:
     return {**clean, "frame_generation": generation, "layout_hash": layout_hash}
 
 
+def _guide_instruction(name: str, inp: dict) -> str:
+    labels = {
+        "left_click": "Click the highlighted control.", "double_click": "Double-click the highlighted control.",
+        "right_click": "Right-click the highlighted control.", "type": "Type the requested text in the active field.",
+        "key": f"Press {inp.get('text') or 'the requested key'}.", "scroll": "Scroll in the requested direction.",
+        "left_click_drag": "Drag from the highlighted location as described.",
+    }
+    return labels.get(name, "Complete the highlighted step.")
+
+
 def _execute(db: Session, run: ComputerUseRun, tu: dict) -> None:
     from .actions.registry import ActionValidationError, validate_params
 
@@ -599,6 +629,16 @@ def _execute(db: Session, run: ComputerUseRun, tu: dict) -> None:
         try:
             action, params = _map(name, inp)
             params = _bind_latest_frame(run, action, params)
+            if run.mode == "guide" and action.startswith("input.") and action not in ("input.wait", "input.cursor"):
+                display = run.display or {}
+                frame_width, frame_height = int(display.get("width") or 1280), int(display.get("height") or 800)
+                action, params = "guide.highlight", {
+                    "frame_generation": params["frame_generation"], "layout_hash": params["layout_hash"],
+                    "x": int(params.get("x", frame_width // 2)), "y": int(params.get("y", frame_height // 2)),
+                    "width": 72, "height": 44, "frame_width": frame_width, "frame_height": frame_height,
+                    "instruction": (narr or _guide_instruction(name, inp))[:500],
+                    "expected_control_label": str(inp.get("text") or name.replace("_", " "))[:200],
+                }
             params = validate_params(action, params)
         except (AppError, ActionValidationError, ValueError, TypeError) as e:
             return _refuse(db, run, tid, name, inp, narr, f"Invalid action: {e}", computer=True)

@@ -13,6 +13,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\JoltIQ.Agent.Windows\JoltIQ.Agent.Windows.csproj" />
+    <ProjectReference Include="..\..\src\JoltIQ.Agent.Tray\JoltIQ.Agent.Tray.csproj" />
     <ProjectReference Include="..\JoltIQ.Agent.FixtureApp\JoltIQ.Agent.FixtureApp.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
   <Target Name="CopyFixtureApp" AfterTargets="Build">

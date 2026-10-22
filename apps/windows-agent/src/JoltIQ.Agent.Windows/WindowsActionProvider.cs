@@ -56,6 +56,7 @@ public sealed class WindowsActionProvider : IActionProvider
         {
             "system.info", "process.list", "app.info", "disk.usage", "network.diagnostics", "eventlog.query", "service.status",
             "outlook.pdf_crash.inspect", "file.inspect", "config.read", "app.restart", "service.restart", "ui.invoke", "ui.set_text",
+            "guide.highlight", "guide.clear",
         };
         if (_addins.Available)
             capabilities.AddRange(new[] { "office.addin.set_load_behavior", "office.addin.restore_load_behavior", "office.addin.verify_restored" });

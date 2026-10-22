@@ -12,7 +12,9 @@ public sealed record ActionExecutionContext(
     string SessionId,
     string UserSid,
     string? ProcedureHash,
-    string? ParametersHash = null);
+    string? ParametersHash = null,
+    string? ComputerUseRunId = null,
+    string? ComputerUseMode = null);
 
 /// <summary>Complete typed state for the single registry value an approved action may change.</summary>
 public sealed record RegistryValueSnapshot(
@@ -61,7 +63,9 @@ public sealed record CommandJournalEntry(
     DateTimeOffset? CompletedAt = null,
     DateTimeOffset? AcknowledgedAt = null,
     string? ParametersHash = null,
-    CommandEvidenceReference? Evidence = null);
+    CommandEvidenceReference? Evidence = null,
+    string? ComputerUseRunId = null,
+    string? ComputerUseMode = null);
 
 public sealed record PendingCommandReport(
     string CommandId,
@@ -135,7 +139,8 @@ public class PersistentCommandJournal : ICommandJournal
         if (candidate.Commands.ContainsKey(context.CommandId)) return false;
         candidate.Commands[context.CommandId] = new CommandJournalEntry(
             context.CommandId, context.DeviceId, context.SessionId, context.UserSid, context.ProcedureHash,
-            action, LocalCommandState.Running, _now(), ParametersHash: context.ParametersHash);
+            action, LocalCommandState.Running, _now(), ParametersHash: context.ParametersHash,
+            ComputerUseRunId: context.ComputerUseRunId, ComputerUseMode: context.ComputerUseMode);
         return true;
     });
 

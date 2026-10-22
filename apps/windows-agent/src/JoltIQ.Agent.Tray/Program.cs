@@ -32,6 +32,8 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
     private AgentRuntime? _runtime;
     private CancellationTokenSource? _cts;
     private SessionBanner? _banner;
+    private GuideOverlay? _guideOverlay;
+    private GuideControlBar? _guideControls;
     private string? _activeSession;
     private readonly HotkeyWindow _hotkey;
 
@@ -153,6 +155,45 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
 
     public void ActionPerformed(string sessionId, string summary) => _ui.Post(_ => _banner?.SetLast(summary), null);
 
+    public Task<bool> AskComputerUseConsentAsync(ComputerUseConsentRequest request, TimeSpan timeout, CancellationToken ct)
+    {
+        var tcs = new TaskCompletionSource<bool>();
+        _ui.Post(_ =>
+        {
+            using var dlg = new ComputerUseConsentForm(request, timeout);
+            tcs.TrySetResult(dlg.ShowDialog() == DialogResult.Yes);
+        }, null);
+        return tcs.Task;
+    }
+
+    public void ComputerUseStarted(ComputerUseGrant grant, Func<GuideResponse, Task> respond, Action stopRequested) => _ui.Post(_ =>
+    {
+        _guideControls?.Close();
+        if (grant.Mode == "guide")
+        {
+            _guideControls = new GuideControlBar(grant.Goal, respond, stopRequested);
+            _guideControls.Show();
+        }
+        _icon.ShowBalloonTip(4000, $"JoltIQ {grant.Mode} started", grant.Goal, ToolTipIcon.Info);
+    }, null);
+
+    public void ComputerUseEnded(string runId, string reason) => _ui.Post(_ =>
+    {
+        _guideOverlay?.Close(); _guideOverlay = null;
+        _guideControls?.Close(); _guideControls = null;
+    }, null);
+
+    public void ShowGuide(GuideInstruction instruction) => _ui.Post(_ =>
+    {
+        _guideOverlay ??= new GuideOverlay();
+        _guideOverlay.SetInstruction(instruction);
+    }, null);
+
+    public void ClearGuide() => _ui.Post(_ =>
+    {
+        _guideOverlay?.Close(); _guideOverlay = null;
+    }, null);
+
     protected override void ExitThreadCore()
     {
         StopActive("exit");
@@ -160,6 +201,27 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
         _icon.Visible = false;
         _hotkey.Dispose();
         base.ExitThreadCore();
+    }
+}
+
+internal sealed class ComputerUseConsentForm : Form
+{
+    public ComputerUseConsentForm(ComputerUseConsentRequest request, TimeSpan timeout)
+    {
+        Text = $"JoltIQ — allow {request.Mode}?"; TopMost = true; FormBorderStyle = FormBorderStyle.FixedDialog;
+        StartPosition = FormStartPosition.CenterScreen; Width = 600; Height = 330; MaximizeBox = MinimizeBox = false;
+        var permission = request.Mode == "guide"
+            ? "Guide mode can see the screen and point out what to click. It cannot click or type."
+            : "Fix mode can see the screen, click, type non-secret text, and open web pages for this goal.";
+        Controls.Add(new Label { Text = $"Requested goal:\n\n{request.Goal}\n\n{permission}\n\nThis permission applies only to this exact request.",
+            Left = 20, Top = 18, Width = 545, Height = 210, Font = new Font("Segoe UI", 10) });
+        var allow = new Button { Text = $"Allow {request.Mode}", DialogResult = DialogResult.Yes, Width = 140, Left = 285, Top = 240 };
+        var deny = new Button { Text = "Decline", DialogResult = DialogResult.No, Width = 120, Left = 440, Top = 240 };
+        Controls.AddRange(new Control[] { allow, deny });
+        AcceptButton = deny; CancelButton = deny;
+        var timer = new System.Windows.Forms.Timer { Interval = (int)timeout.TotalMilliseconds };
+        timer.Tick += (_, _) => { timer.Stop(); DialogResult = DialogResult.No; };
+        timer.Start();
     }
 }
 

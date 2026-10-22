@@ -209,6 +209,7 @@ class DeviceRespondIn(BaseModel):
     approved: bool | None = None
     answer: str | None = Field(default=None, max_length=1000)
     done: bool = False
+    switch_to_fix: bool = False
 
 
 class DeviceRunConsentIn(BaseModel):
@@ -255,10 +256,28 @@ def device_cu_respond(rid: uuid.UUID, body: DeviceRespondIn, dd=Depends(device_a
     s = db.get(SupportSession, run.session_id) if run else None
     if not run or not s or s.device_id != d.id:
         raise NotFound("run not found")
+    choices = int(body.approved is not None) + int(bool(body.answer)) + int(body.done) + int(body.switch_to_fix)
+    if choices != 1:
+        raise AppError("Provide exactly one response", code="validation_error")
     if run.state == "pending_approval":
         computer_use.approve_goal(db, run, user_id=None, approved=bool(body.approved))
     else:
-        computer_use.respond(db, run, user_id=None, approved=body.approved, answer=body.answer, done=body.done, via="device")
+        computer_use.respond(db, run, user_id=None, approved=body.approved, answer=body.answer, done=body.done,
+                             switch_to_fix=body.switch_to_fix, via="device")
+    return computer_use.ser(run)
+
+
+@agent_router.post("/computer-use/{rid}/stop")
+def device_cu_stop(rid: uuid.UUID, dd=Depends(device_auth)):
+    from ..models import ComputerUseRun
+    from ..services import computer_use
+
+    db, d = dd
+    run = db.get(ComputerUseRun, rid)
+    s = db.get(SupportSession, run.session_id) if run else None
+    if not run or not s or s.device_id != d.id:
+        raise NotFound("run not found")
+    computer_use.stop(db, run, user_id=None, reason="Stopped on the customer computer")
     return computer_use.ser(run)
 
 

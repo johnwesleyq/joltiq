@@ -37,14 +37,13 @@ PROTOCOL_VERSION = "1"
 MAX_SKEW = 120
 ENROLL_TTL_MIN = 15
 COMMAND_TTL_S = 120
-DESKTOP_ACTIONS = [a.id for a in ACTIONS.values() if a.channel == "desktop" and not a.computer_use]
-_TEST_DESKTOP_ACTIONS = [a.id for a in ACTIONS.values() if a.channel == "desktop"]
+DESKTOP_ACTIONS = [a.id for a in ACTIONS.values() if a.channel == "desktop"]
 MIN_AGENT_VERSION = "1.0.0"
 
 
 def accepted_desktop_actions() -> list[str]:
-    """Production MVP excludes screen-driving; tests retain coverage of the dormant implementation."""
-    return _TEST_DESKTOP_ACTIONS if get_settings().env == "test" else DESKTOP_ACTIONS
+    """Actions the signed companion protocol may advertise; per-run consent still gates computer use."""
+    return DESKTOP_ACTIONS
 
 
 @lru_cache
@@ -185,13 +184,26 @@ def authenticate_device(db: Session, *, device_id: str, ts: str, nonce: str, cou
 # ---------------- commands ----------------
 def queue_command(db: Session, device: Device, *, action: str, params: dict, session: SupportSession | None, execution_id=None,
                   procedure_hash: str | None = None) -> DeviceCommand:
-    if ACTIONS.get(action) is None or (ACTIONS[action].computer_use and get_settings().env != "test"):
-        raise AppError("Windows MVP does not dispatch screen-control actions", code="unsupported_action")
+    if ACTIONS.get(action) is None:
+        raise AppError("Unknown desktop action", code="unsupported_action")
     clean = validate_params(action, params)
     if action not in (device.capabilities or []):
         raise AppError(f"Device agent does not support {action}", code="unsupported_action")
     if session is not None and not (session.consent or {}).get("device_local_consent"):
         raise Conflict("Waiting for the user to accept the session on their computer", code="device_consent_pending")
+    computer_use_run = None
+    if ACTIONS[action].computer_use:
+        from ..models import ComputerUseRun
+
+        computer_use_run = db.get(ComputerUseRun, execution_id) if execution_id else None
+        if (
+            not computer_use_run
+            or not session
+            or computer_use_run.session_id != session.id
+            or computer_use_run.state not in ("running", "waiting_device")
+            or computer_use_run.local_consent_state != "approved"
+        ):
+            raise Conflict("Computer-use action has no active run grant", code="computer_use_grant_missing")
     cmd = DeviceCommand(org_id=device.org_id, device_id=device.id, session_id=session.id if session else None, execution_id=execution_id,
                         action=action, params=clean, status="queued", expires_at=utcnow() + timedelta(seconds=COMMAND_TTL_S))
     db.add(cmd)
@@ -202,6 +214,9 @@ def queue_command(db: Session, device: Device, *, action: str, params: dict, ses
                "nonce": new_token(12), "risk": ACTIONS[action].risk}
     if procedure_hash:
         payload["procedure_hash"] = procedure_hash
+    if computer_use_run:
+        payload["computer_use_run_id"] = str(computer_use_run.id)
+        payload["computer_use_mode"] = computer_use_run.mode
     cmd.envelope = sign_envelope(payload)
     return cmd
 
@@ -227,6 +242,31 @@ def pending_for(db: Session, device: Device) -> list[dict]:
     for s in db.execute(select(SupportSession).where(SupportSession.device_id == device.id, SupportSession.state == "terminated",
                                                      SupportSession.terminated_at > now - timedelta(minutes=5))).scalars():
         out.append(sign_envelope({"type": "session.end", "session_id": str(s.id), "issued_at": int(now.timestamp()), "nonce": new_token(12)}))
+    from ..models import ComputerUseRun
+
+    session_ids = select(SupportSession.id).where(SupportSession.device_id == device.id)
+    for run in db.execute(select(ComputerUseRun).where(
+        ComputerUseRun.session_id.in_(session_ids),
+        ComputerUseRun.state == "waiting_local_consent",
+        ComputerUseRun.local_consent_state == "pending",
+    )).scalars():
+        out.append(sign_envelope({
+            "type": "computer_use.begin", "session_id": str(run.session_id),
+            "computer_use_run_id": str(run.id), "device_id": str(device.id),
+            "mode": run.mode, "goal": run.goal,
+            "issued_at": int(now.timestamp()), "expires_at": int((now + timedelta(seconds=COMMAND_TTL_S)).timestamp()),
+            "nonce": new_token(12),
+        }))
+    for run in db.execute(select(ComputerUseRun).where(
+        ComputerUseRun.session_id.in_(session_ids), ComputerUseRun.finished_at.is_not(None),
+        ComputerUseRun.finished_at > now - timedelta(minutes=5),
+    )).scalars():
+        out.append(sign_envelope({
+            "type": "computer_use.end", "session_id": str(run.session_id),
+            "computer_use_run_id": str(run.id), "device_id": str(device.id),
+            "mode": run.mode, "issued_at": int(now.timestamp()), "expires_at": int((now + timedelta(seconds=COMMAND_TTL_S)).timestamp()),
+            "nonce": new_token(12),
+        }))
     for cmd in db.execute(select(DeviceCommand).where(DeviceCommand.device_id == device.id, DeviceCommand.status == "queued")
                           .order_by(DeviceCommand.created_at).limit(10)).scalars():
         if cmd.expires_at < now:

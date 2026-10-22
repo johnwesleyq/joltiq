@@ -31,9 +31,18 @@ public interface IUserInteraction
     void SessionEnded(string sessionId, string reason);
     void ActionPerformed(string sessionId, string summary);
     string CurrentUserDisplayName { get; }
+    Task<bool> AskComputerUseConsentAsync(ComputerUseConsentRequest request, TimeSpan timeout, CancellationToken ct) => Task.FromResult(false);
+    void ComputerUseStarted(ComputerUseGrant grant, Func<GuideResponse, Task> respond, Action stopRequested) { }
+    void ComputerUseEnded(string runId, string reason) { }
+    void ShowGuide(GuideInstruction instruction) { }
+    void ClearGuide() { }
 }
 
 public sealed record NativeConsentRequest(string Title, string Body, string? AddinName, string? AddinProgId, string ActiveMessage);
+public sealed record ComputerUseConsentRequest(string RunId, string SessionId, string Mode, string Goal);
+public sealed record ComputerUseGrant(string RunId, string SessionId, string Mode, string Goal);
+public sealed record GuideInstruction(int X, int Y, int Width, int Height, int FrameWidth, int FrameHeight, string Instruction, string ExpectedControlLabel);
+public enum GuideResponse { Done, SwitchToFix }
 public sealed record RuntimeLogEntry(DateTimeOffset At, string Level, string Message);
 public sealed record StopTiming(string SessionId, DateTimeOffset RequestedAt, long MonotonicTimestamp);
 
@@ -162,6 +171,12 @@ public sealed class AgentRuntime
             case "session.end":
                 if (sessionId is not null && _sessions.TryGetValue(sessionId, out var s)) EndLocal(s, "ended by server");
                 break;
+            case "computer_use.begin":
+                await BeginComputerUseAsync(b, sessionId, exp, ct);
+                break;
+            case "computer_use.end":
+                EndComputerUse(b, sessionId, "ended by server");
+                break;
             case "action":
                 await RunActionAsync(b, sessionId, ct);
                 break;
@@ -169,6 +184,65 @@ public sealed class AgentRuntime
                 L("warn", $"unknown envelope type {type}");
                 break;
         }
+    }
+
+    private async Task BeginComputerUseAsync(JsonElement envelope, string? sessionId, long? exp, CancellationToken ct)
+    {
+        if (sessionId is null || !_sessions.TryGetValue(sessionId, out var session) || !session.Active || session.Expired)
+        {
+            L("warn", "computer-use grant refused: no active locally-consented support session");
+            return;
+        }
+        var runId = envelope.TryGetProperty("computer_use_run_id", out var runEl) ? runEl.GetString() : null;
+        var mode = envelope.TryGetProperty("mode", out var modeEl) ? modeEl.GetString() : null;
+        var goal = envelope.TryGetProperty("goal", out var goalEl) ? goalEl.GetString() : null;
+        if (string.IsNullOrWhiteSpace(runId) || mode is not ("guide" or "fix") || string.IsNullOrWhiteSpace(goal) ||
+            goal.Length > 2000 || exp is null)
+        {
+            L("warn", "computer-use begin refused: invalid run, mode, goal, or expiry");
+            return;
+        }
+        if (session.ComputerUseRunId == runId && session.ComputerUseMode == mode) return;
+        var request = new ComputerUseConsentRequest(runId, sessionId, mode, goal);
+        var accepted = await _ui.AskComputerUseConsentAsync(request, ConsentTimeout, ct);
+        if (accepted)
+        {
+            session.ComputerUseRunId = runId;
+            session.ComputerUseMode = mode;
+            _ui.ComputerUseStarted(new(runId, sessionId, mode, goal),
+                response => RespondToGuideAsync(runId, response), () => _ = StopComputerUseAsync(runId));
+        }
+        await _client.SendAsync(HttpMethod.Post, $"/computer-use/{runId}/local-consent", new { accepted }, ct);
+        L("info", $"computer-use run {runId} ({mode}) {(accepted ? "accepted" : "declined")} locally");
+    }
+
+    private void EndComputerUse(JsonElement envelope, string? sessionId, string reason)
+    {
+        var runId = envelope.TryGetProperty("computer_use_run_id", out var runEl) ? runEl.GetString() : null;
+        if (runId is null || sessionId is null || !_sessions.TryGetValue(sessionId, out var session) || session.ComputerUseRunId != runId) return;
+        session.ComputerUseRunId = null;
+        session.ComputerUseMode = null;
+        _ui.ClearGuide();
+        _ui.ComputerUseEnded(runId, reason);
+    }
+
+    private Task RespondToGuideAsync(string runId, GuideResponse response)
+    {
+        object body = response == GuideResponse.Done ? new { done = true } : new { switch_to_fix = true };
+        return _client.SendAsync(HttpMethod.Post, $"/computer-use/{runId}/respond", body, CancellationToken.None);
+    }
+
+    private async Task StopComputerUseAsync(string runId)
+    {
+        foreach (var session in _sessions.Values.Where(s => s.ComputerUseRunId == runId))
+        {
+            session.ComputerUseRunId = null;
+            session.ComputerUseMode = null;
+        }
+        _ui.ClearGuide();
+        _ui.ComputerUseEnded(runId, "stopped by user");
+        try { await _client.SendAsync(HttpMethod.Post, $"/computer-use/{runId}/stop", new { }, CancellationToken.None); }
+        catch (Exception e) { L("warn", $"computer-use stop notification failed: {e.Message}"); }
     }
 
     private async Task BeginSessionAsync(string sessionId, long? exp, JsonElement envelope, CancellationToken ct)
@@ -218,6 +292,8 @@ public sealed class AgentRuntime
             s.Cancel.Cancel();
         }
         _ui.SessionEnded(s.SessionId, reason);
+        if (s.ComputerUseRunId is { } runId) _ui.ComputerUseEnded(runId, reason);
+        _ui.ClearGuide();
         L("info", $"session {s.SessionId} ended: {reason}");
     }
 
@@ -227,6 +303,8 @@ public sealed class AgentRuntime
         var action = b.GetProperty("action").GetString()!;
         var p = b.GetProperty("params");
         LocalSession? s = sessionId is not null && _sessions.TryGetValue(sessionId, out var ss) ? ss : null;
+        var computerUseRunId = b.TryGetProperty("computer_use_run_id", out var runEl) && runEl.ValueKind == JsonValueKind.String ? runEl.GetString() : null;
+        var computerUseMode = b.TryGetProperty("computer_use_mode", out var modeEl) && modeEl.ValueKind == JsonValueKind.String ? modeEl.GetString() : null;
         var executionContext = new ActionExecutionContext(
             cid,
             _client.State.DeviceId ?? "",
@@ -235,20 +313,22 @@ public sealed class AgentRuntime
             b.TryGetProperty("procedure_hash", out var procedureHash) && procedureHash.ValueKind == JsonValueKind.String
                 ? procedureHash.GetString()
                 : null,
-            HashParameters(p));
+            HashParameters(p),
+            computerUseRunId,
+            computerUseMode);
         if (!_journal.MarkRunning(executionContext, action))
         {
             L("critical", $"command {cid} could not enter the durable running state; it was not executed");
             return;
         }
-        var verdict = _policy.Evaluate(action, p, s);
+        var verdict = _policy.Evaluate(action, p, s, computerUseRunId, computerUseMode);
         if (!verdict.Allowed)
         {
             L("warn", $"action {action} refused by local policy: {verdict.Reason}");
             await CompleteAndReportAsync(cid, "rejected", new JsonObject { ["ok"] = false, ["error"] = $"refused by device policy: {verdict.Reason}" }, ct);
             return;
         }
-        if (!_provider.Capabilities.Contains(action))
+        if (!action.StartsWith("guide.", StringComparison.Ordinal) && !_provider.Capabilities.Contains(action))
         {
             await CompleteAndReportAsync(cid, "rejected", new JsonObject { ["ok"] = false, ["error"] = "not supported on this device" }, ct);
             return;
@@ -264,7 +344,12 @@ public sealed class AgentRuntime
             lock (s.DispatchGate)
             {
                 linked.Token.ThrowIfCancellationRequested();
-                execution = _provider.ExecuteAsync(action, p, linked.Token, executionContext);
+                execution = action switch
+                {
+                    "guide.highlight" => ShowGuideAsync(p),
+                    "guide.clear" => ClearGuideAsync(),
+                    _ => _provider.ExecuteAsync(action, p, linked.Token, executionContext),
+                };
             }
             var actionResult = await execution;
             result = actionResult.Data;
@@ -285,6 +370,21 @@ public sealed class AgentRuntime
             status = "failed";
         }
         await CompleteAndReportAsync(cid, status, result, ct, evidence);
+    }
+
+    private Task<ActionResult> ShowGuideAsync(JsonElement p)
+    {
+        _ui.ShowGuide(new(
+            p.GetProperty("x").GetInt32(), p.GetProperty("y").GetInt32(), p.GetProperty("width").GetInt32(), p.GetProperty("height").GetInt32(),
+            p.GetProperty("frame_width").GetInt32(), p.GetProperty("frame_height").GetInt32(),
+            p.GetProperty("instruction").GetString()!, p.GetProperty("expected_control_label").GetString()!));
+        return Task.FromResult(new ActionResult(new JsonObject { ["ok"] = true, ["shown"] = true }));
+    }
+
+    private Task<ActionResult> ClearGuideAsync()
+    {
+        _ui.ClearGuide();
+        return Task.FromResult(new ActionResult(new JsonObject { ["ok"] = true }));
     }
 
     private async Task CompleteAndReportAsync(
@@ -364,6 +464,8 @@ public sealed class AgentRuntime
             : null;
         return entry.DeviceId == envelope.GetProperty("device_id").GetString() && entry.SessionId == (sessionId ?? "") &&
                entry.Action == envelope.GetProperty("action").GetString() && entry.ProcedureHash == procedureHash &&
+               entry.ComputerUseRunId == (envelope.TryGetProperty("computer_use_run_id", out var runId) ? runId.GetString() : null) &&
+               entry.ComputerUseMode == (envelope.TryGetProperty("computer_use_mode", out var mode) ? mode.GetString() : null) &&
                entry.ParametersHash is not null && entry.ParametersHash == HashParameters(envelope.GetProperty("params"));
     }
 

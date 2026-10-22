@@ -162,6 +162,62 @@ def test_portal_approval_waits_for_native_run_consent(app, owner):
     assert not [e for e in d.envelopes() if e["type"] == "action"]
 
 
+def test_guide_begin_and_actions_are_bound_to_exact_signed_run(app, owner):
+    from joltiq.services.actions.registry import ActionValidationError, registry_for_prompt, validate_params
+
+    clean = validate_params("guide.highlight", {
+        "frame_generation": 17,
+        "layout_hash": "a" * 64,
+        "x": 320,
+        "y": 240,
+        "width": 180,
+        "height": 44,
+        "frame_width": 1280,
+        "frame_height": 800,
+        "instruction": "Click Windows Settings.",
+        "expected_control_label": "Settings",
+    })
+    assert clean["expected_control_label"] == "Settings"
+    with pytest.raises(ActionValidationError):
+        validate_params("guide.highlight", {**clean, "instruction": "x" * 501})
+    assert "guide.highlight" not in {a["id"] for a in registry_for_prompt()}
+
+    d, sid = _setup(app, owner)
+    created = owner.post(
+        f"/api/v1/sessions/{sid}/computer-use",
+        json={"goal": "Show me how to open Windows Settings", "mode": "guide"},
+    )
+    assert created.status_code == 201, created.text
+    rid = created.json()["id"]
+
+    envelopes = d.envelopes()
+    begin = next(e for e in envelopes if e["type"] == "computer_use.begin")
+    assert begin["computer_use_run_id"] == rid
+    assert begin["session_id"] == sid
+    assert begin["mode"] == "guide"
+    assert begin["goal"] == "Show me how to open Windows Settings"
+    assert not [e for e in envelopes if e["type"] == "action"]
+
+    accepted = d.post(f"/computer-use/{rid}/local-consent", {"accepted": True})
+    assert accepted.status_code == 200, accepted.text
+    action = next(e for e in d.envelopes() if e["type"] == "action")
+    assert action["computer_use_run_id"] == rid
+    assert action["computer_use_mode"] == "guide"
+
+
+def test_device_guide_response_requires_exactly_one_declared_choice(app, owner):
+    d, sid = _setup(app, owner)
+    rid = owner.post(
+        f"/api/v1/sessions/{sid}/computer-use",
+        json={"goal": "Show me Windows Settings", "mode": "guide"},
+    ).json()["id"]
+    assert d.post(f"/computer-use/{rid}/respond", {}).status_code == 400
+    assert d.post(
+        f"/computer-use/{rid}/respond",
+        {"done": True, "switch_to_fix": True},
+    ).status_code == 400
+
+
 def test_full_run_with_approval_pause_and_screens(app, owner):
     d, sid = _setup(app, owner)
     r = owner.post(f"/api/v1/sessions/{sid}/computer-use", json={"goal": "Open notepad, type a note and save it"})

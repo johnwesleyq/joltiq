@@ -18,7 +18,7 @@ public sealed class LocalPolicy
 
     public static readonly IReadOnlySet<string> ReadOnlyActions = new HashSet<string>
         { "system.info", "process.list", "app.info", "disk.usage", "network.diagnostics", "eventlog.query", "outlook.pdf_crash.inspect",
-          "office.addin.verify_restored", "service.status", "screen.capture", "input.wait", "input.cursor" };
+          "office.addin.verify_restored", "service.status", "screen.capture", "input.wait", "input.cursor", "guide.highlight", "guide.clear" };
 
     public static readonly IReadOnlySet<string> AllActions = new HashSet<string>(ReadOnlyActions)
         { "file.inspect", "config.read", "app.restart", "office.addin.set_load_behavior", "office.addin.restore_load_behavior",
@@ -46,6 +46,9 @@ public sealed class LocalPolicy
     public sealed record Verdict(bool Allowed, string Reason);
 
     public Verdict Evaluate(string action, JsonElement p, LocalSession? session)
+        => Evaluate(action, p, session, null, null);
+
+    public Verdict Evaluate(string action, JsonElement p, LocalSession? session, string? computerUseRunId, string? computerUseMode)
     {
         if (!AllActions.Contains(action)) return new(false, $"action '{action}' is not allowlisted on this device");
         if (session is null || !session.Active) return new(false, "no active, locally-consented session");
@@ -54,9 +57,19 @@ public sealed class LocalPolicy
         int? I(string k) => p.ValueKind == JsonValueKind.Object && p.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : null;
         bool Has(string k) => p.ValueKind == JsonValueKind.Object && p.TryGetProperty(k, out _);
 
+        var computerUseAction = action == "screen.capture" || action == "url.open" || action.StartsWith("input.", StringComparison.Ordinal) ||
+                                action.StartsWith("guide.", StringComparison.Ordinal);
+        if (computerUseAction)
+        {
+            if (string.IsNullOrEmpty(session.ComputerUseRunId) || session.ComputerUseRunId != computerUseRunId)
+                return No("action is not bound to the locally approved computer-use run");
+            if (session.ComputerUseMode is not ("guide" or "fix") || session.ComputerUseMode != computerUseMode)
+                return No("action mode does not match the local grant");
+        }
         var mutatingInput = action.StartsWith("input.", StringComparison.Ordinal) && action is not ("input.wait" or "input.cursor");
-        if (mutatingInput && !string.Equals(session.ComputerUseMode, "fix", StringComparison.Ordinal))
-            return No("input is disabled unless the customer selected Fix mode");
+        if (mutatingInput && session.ComputerUseMode != "fix") return No("input is disabled unless the customer selected Fix mode");
+        if (action.StartsWith("guide.", StringComparison.Ordinal) && session.ComputerUseMode != "guide")
+            return No("guide overlay is disabled unless the customer selected Guide mode");
 
         switch (action)
         {
@@ -68,6 +81,17 @@ public sealed class LocalPolicy
                 return I("seconds") is >= 1 and <= 30 ? Ok() : No("seconds out of range");
             case "input.cursor":
                 return Ok();
+            case "guide.clear":
+                return Ok();
+            case "guide.highlight":
+                if (I("frame_generation") is not > 0 || S("layout_hash") is not { Length: 64 } gh ||
+                    !gh.All(c => char.IsAsciiHexDigit(c) && !char.IsUpper(c))) return No("valid frame binding is required");
+                if (I("x") is not (>= 0 and <= 10000) || I("y") is not (>= 0 and <= 10000) ||
+                    I("width") is not (>= 1 and <= 10000) || I("height") is not (>= 1 and <= 10000) ||
+                    I("frame_width") is not (>= 1 and <= 10000) || I("frame_height") is not (>= 1 and <= 10000))
+                    return No("guide geometry is out of range");
+                return S("instruction") is { Length: > 0 and <= 500 } && S("expected_control_label") is { Length: > 0 and <= 200 }
+                    ? Ok() : No("guide text is invalid");
             case "input.click" or "input.drag" or "input.move" or "input.mouse" or "input.type" or "input.key" or "input.scroll":
                 if (I("frame_generation") is not > 0 || S("layout_hash") is not { Length: 64 } hash ||
                     !hash.All(c => char.IsAsciiHexDigit(c) && !char.IsUpper(c)))
@@ -149,6 +173,7 @@ public sealed class LocalSession
 {
     public required string SessionId { get; init; }
     public bool Active { get; set; }
+    public string? ComputerUseRunId { get; set; }
     public string? ComputerUseMode { get; set; }
     public long? ExpiresAt { get; init; }
     public bool Expired => ExpiresAt is { } e && e < DateTimeOffset.UtcNow.ToUnixTimeSeconds();

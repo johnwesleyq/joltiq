@@ -80,6 +80,7 @@ T("policy: native input requires a server-bound frame and Fix mode", () =>
     {
         SessionId = "fix",
         Active = true,
+        ComputerUseRunId = "run-fix",
         ComputerUseMode = "fix",
         ExpiresAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 60,
     };
@@ -87,13 +88,14 @@ T("policy: native input requires a server-bound frame and Fix mode", () =>
     {
         SessionId = "guide",
         Active = true,
+        ComputerUseRunId = "run-guide",
         ComputerUseMode = "guide",
         ExpiresAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 60,
     };
     var bound = J("{\"x\":10,\"y\":20,\"frame_generation\":7,\"layout_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}");
-    Assert(p.Evaluate("input.click", bound, fix).Allowed, "valid Fix input was refused");
-    Assert(!p.Evaluate("input.click", J("{\"x\":10,\"y\":20}"), fix).Allowed, "unbound input was accepted");
-    Assert(!p.Evaluate("input.click", bound, guide).Allowed, "Guide mode injected input");
+    Assert(p.Evaluate("input.click", bound, fix, "run-fix", "fix").Allowed, "valid Fix input was refused");
+    Assert(!p.Evaluate("input.click", J("{\"x\":10,\"y\":20}"), fix, "run-fix", "fix").Allowed, "unbound input was accepted");
+    Assert(!p.Evaluate("input.click", bound, guide, "run-guide", "guide").Allowed, "Guide mode injected input");
 });
 T("policy: app/service allowlists", () =>
 {
