@@ -46,7 +46,7 @@ public sealed class GuideOverlayTests
     [Fact]
     public void Provider_AdvertisesVisualOnlyGuideActions()
     {
-        var provider = new WindowsActionProvider();
+        var provider = new WindowsActionProvider(showGuide: _ => { }, clearGuide: () => { });
 
         Assert.Contains("guide.highlight", provider.Capabilities);
         Assert.Contains("guide.clear", provider.Capabilities);

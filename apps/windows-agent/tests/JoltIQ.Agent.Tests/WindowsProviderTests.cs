@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using JoltIQ.Agent.Core;
 using JoltIQ.Agent.Windows;
+using JoltIQ.Agent.Windows.Desktop;
 using Microsoft.Win32;
 using Xunit;
 
@@ -17,6 +18,126 @@ public class WindowsProviderTests
     private const string TestManagedAddinPath = @"Software\Microsoft\Office\16.0\Outlook\Resiliency\AddinList";
     private readonly WindowsActionProvider _p = new();
     private static JsonElement J(string s) => JsonDocument.Parse(s).RootElement;
+
+    [Fact]
+    public void ComputerUse_CapabilitiesRequireTheirNativeDependencies()
+    {
+        var unavailable = new WindowsActionProvider();
+        Assert.DoesNotContain("screen.capture", unavailable.Capabilities);
+        Assert.DoesNotContain("input.click", unavailable.Capabilities);
+        Assert.DoesNotContain("url.open", unavailable.Capabilities);
+        Assert.DoesNotContain("guide.highlight", unavailable.Capabilities);
+
+        var capture = new FakeCapture();
+        var input = new FakeDesktopInput();
+        var available = new WindowsActionProvider(
+            desktopCapture: capture,
+            desktopInput: input,
+            sessionResolver: _ => FixSession(),
+            showGuide: _ => { },
+            clearGuide: () => { },
+            urlLauncher: _ => true);
+
+        Assert.Contains("screen.capture", available.Capabilities);
+        Assert.Contains("input.click", available.Capabilities);
+        Assert.Contains("input.type", available.Capabilities);
+        Assert.Contains("url.open", available.Capabilities);
+        Assert.Contains("guide.highlight", available.Capabilities);
+        Assert.Contains("guide.clear", available.Capabilities);
+    }
+
+    [Fact]
+    public async Task ComputerUse_CaptureReturnsPngAndExactDisplayMetadata()
+    {
+        var capture = new FakeCapture();
+        var provider = new WindowsActionProvider(desktopCapture: capture);
+
+        var result = await provider.ExecuteAsync("screen.capture", J("{\"max_long_edge\":1280}"), default, ComputerUseContext());
+
+        Assert.Equal("image/png", result.ScreenshotMediaType);
+        Assert.Equal(FakeCapture.Png, result.Screenshot);
+        Assert.Equal(1280, capture.LastMaxLongEdge);
+        Assert.Equal(800, result["width"]!.GetValue<int>());
+        Assert.Equal(600, result["height"]!.GetValue<int>());
+        Assert.Equal(-100, result["virtual_bounds"]!["left"]!.GetValue<int>());
+        Assert.Equal("layout-hash", result["layout_hash"]!.GetValue<string>());
+        Assert.Equal(1, result["frame_generation"]!.GetValue<long>());
+        Assert.Single(result["displays"]!.AsArray());
+    }
+
+    [Fact]
+    public async Task ComputerUse_SuccessfulInputReturnsAPostActionFrame()
+    {
+        var capture = new FakeCapture();
+        var input = new FakeDesktopInput();
+        var session = FixSession();
+        var provider = new WindowsActionProvider(
+            desktopCapture: capture,
+            desktopInput: input,
+            sessionResolver: id => id == session.SessionId ? session : null);
+        await provider.ExecuteAsync("screen.capture", J("{}"), default, ComputerUseContext());
+
+        var result = await provider.ExecuteAsync("input.click",
+            J("{\"x\":10,\"y\":20,\"button\":\"left\",\"count\":1,\"frame_generation\":1,\"layout_hash\":\"layout-hash\"}"),
+            default, ComputerUseContext());
+
+        Assert.Equal(new[] { "click:10,20:left:1" }, input.Events);
+        Assert.Equal(2, capture.Count);
+        Assert.Equal(2, result["frame_generation"]!.GetValue<long>());
+        Assert.Equal(FakeCapture.Png, result.Screenshot);
+    }
+
+    [Fact]
+    public async Task ComputerUse_BlockedInputDoesNotCaptureOrClaimSuccess()
+    {
+        var capture = new FakeCapture();
+        var input = new FakeDesktopInput { Refuse = true };
+        var provider = new WindowsActionProvider(
+            desktopCapture: capture,
+            desktopInput: input,
+            sessionResolver: _ => FixSession());
+
+        await Assert.ThrowsAsync<DesktopInputRefusedException>(() => provider.ExecuteAsync("input.type",
+            J("{\"text\":\"hello\",\"frame_generation\":1,\"layout_hash\":\"layout-hash\"}"),
+            default, ComputerUseContext()));
+        Assert.Equal(0, capture.Count);
+    }
+
+    [Fact]
+    public async Task ComputerUse_GuideUsesOnlyTheVisualBridge()
+    {
+        var input = new FakeDesktopInput();
+        GuideInstruction? shown = null;
+        var cleared = false;
+        var provider = new WindowsActionProvider(
+            desktopInput: input,
+            sessionResolver: _ => FixSession("guide"),
+            showGuide: value => shown = value,
+            clearGuide: () => cleared = true);
+
+        await provider.ExecuteAsync("guide.highlight",
+            J("{\"x\":10,\"y\":20,\"width\":100,\"height\":40,\"frame_width\":800,\"frame_height\":600,\"instruction\":\"Click Settings\",\"expected_control_label\":\"Settings\"}"),
+            default, ComputerUseContext("guide"));
+        await provider.ExecuteAsync("guide.clear", J("{}"), default, ComputerUseContext("guide"));
+
+        Assert.Equal("Click Settings", shown?.Instruction);
+        Assert.True(cleared);
+        Assert.Empty(input.Events);
+    }
+
+    [Fact]
+    public async Task ComputerUse_UrlOpenAcceptsOnlyHttpAndHttps()
+    {
+        var opened = new List<Uri>();
+        var provider = new WindowsActionProvider(urlLauncher: uri => { opened.Add(uri); return true; });
+
+        var refused = await provider.ExecuteAsync("url.open", J("{\"url\":\"file:///C:/Windows/win.ini\"}"), default, ComputerUseContext());
+        var accepted = await provider.ExecuteAsync("url.open", J("{\"url\":\"https://example.test/help\"}"), default, ComputerUseContext());
+
+        Assert.False(refused["ok"]!.GetValue<bool>());
+        Assert.True(accepted["ok"]!.GetValue<bool>());
+        Assert.Equal("https://example.test/help", Assert.Single(opened).AbsoluteUri);
+    }
 
     private sealed class MemoryJournal : ICommandJournal
     {
@@ -496,5 +617,59 @@ public class WindowsProviderTests
             Assert.Throws<InvalidDataException>(() => new DpapiCommandJournal(DataProtectionScope.CurrentUser, dir));
         }
         finally { if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true); }
+    }
+
+    private static LocalSession FixSession(string mode = "fix") => new()
+    {
+        SessionId = "session-1",
+        Active = true,
+        ComputerUseRunId = "run-1",
+        ComputerUseMode = mode,
+        ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(5).ToUnixTimeSeconds(),
+    };
+
+    private static ActionExecutionContext ComputerUseContext(string mode = "fix") => new(
+        "command-1", "device-1", "session-1", Sid, null, null, "run-1", mode);
+
+    private sealed class FakeCapture : IDesktopCapture
+    {
+        public static readonly byte[] Png = [137, 80, 78, 71, 13, 10, 26, 10];
+        public int Count { get; private set; }
+        public int LastMaxLongEdge { get; private set; }
+
+        public Task<DesktopFrame> CaptureAsync(int maxLongEdge, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            Count++;
+            LastMaxLongEdge = maxLongEdge;
+            var bounds = new DesktopRectangle(-100, 0, 1600, 1200);
+            var displays = new[] { new DesktopDisplay("primary", -100, 0, 1600, 1200, 96, 96, true) };
+            return Task.FromResult(new DesktopFrame(Png, 800, 600, bounds, 2, 2, "layout-hash", Count, displays));
+        }
+    }
+
+    private sealed class FakeDesktopInput : IDesktopInput
+    {
+        public List<string> Events { get; } = [];
+        public bool Refuse { get; init; }
+
+        private Task Add(string value)
+        {
+            if (Refuse) throw new DesktopInputRefusedException("test refusal");
+            Events.Add(value);
+            return Task.CompletedTask;
+        }
+
+        public Task ClickAsync(int x, int y, string button, int count, string? modifiers, long frameGeneration, string layoutHash, LocalSession session, CancellationToken ct) =>
+            Add($"click:{x},{y}:{button}:{count}");
+        public Task DragAsync(int x, int y, int toX, int toY, long frameGeneration, string layoutHash, LocalSession session, CancellationToken ct) =>
+            Add($"drag:{x},{y}:{toX},{toY}");
+        public Task MoveAsync(int x, int y, long frameGeneration, string layoutHash, LocalSession session, CancellationToken ct) => Add($"move:{x},{y}");
+        public Task MouseAsync(string state, long frameGeneration, string layoutHash, LocalSession session, CancellationToken ct) => Add($"mouse:{state}");
+        public Task TypeAsync(string text, long frameGeneration, string layoutHash, LocalSession session, CancellationToken ct) => Add($"type:{text}");
+        public Task KeyAsync(string combo, int repeat, TimeSpan hold, long frameGeneration, string layoutHash, LocalSession session, CancellationToken ct) => Add($"key:{combo}:{repeat}");
+        public Task ScrollAsync(int x, int y, string direction, int amount, long frameGeneration, string layoutHash, LocalSession session, CancellationToken ct) =>
+            Add($"scroll:{x},{y}:{direction}:{amount}");
+        public DesktopPoint Cursor() => new(10, 20);
     }
 }

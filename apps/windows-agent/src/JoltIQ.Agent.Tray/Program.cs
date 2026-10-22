@@ -1,7 +1,9 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using JoltIQ.Agent.Core;
 using JoltIQ.Agent.Windows;
+using JoltIQ.Agent.Windows.Desktop;
 
 namespace JoltIQ.Agent.Tray;
 
@@ -67,7 +69,7 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
         var journal = new DpapiCommandJournal(keyStore);
         _client = new AgentClient(_cfg.ServerUrl, keyStore);
         if (!_client.Enrolled) return;
-        var provider = new WindowsActionProvider(_client.State.EnrolledUserSid, journal, ActionHost.InteractiveTray);
+        var provider = CreateProvider(_client.State.EnrolledUserSid, journal);
         _runtime = new AgentRuntime(_client, provider, this, journal);
         _cts = new CancellationTokenSource();
         _ = Task.Run(() => _runtime.RunAsync(_cts.Token));
@@ -86,7 +88,7 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
             var journal = new DpapiCommandJournal(keyStore);
             _client = new AgentClient(f.ServerUrl, keyStore);
             var sid = WindowsIdentity.GetCurrent().User?.Value ?? throw new InvalidOperationException("Cannot identify the enrolling Windows user");
-            var prov = new WindowsActionProvider(sid, journal, ActionHost.InteractiveTray);
+            var prov = CreateProvider(sid, journal);
             _client.EnrollAsync(f.Code, Environment.MachineName, "Windows", Environment.OSVersion.Version.ToString(), prov.Capabilities, sid).GetAwaiter().GetResult();
             MessageBox.Show("This device is enrolled. Support sessions always ask for your permission first.", "JoltIQ", MessageBoxButtons.OK, MessageBoxIcon.Information);
             Start();
@@ -193,6 +195,34 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
     {
         _guideOverlay?.Close(); _guideOverlay = null;
     }, null);
+
+    private WindowsActionProvider CreateProvider(string? enrolledUserSid, ICommandJournal journal)
+    {
+        if (string.IsNullOrWhiteSpace(enrolledUserSid))
+            return new WindowsActionProvider(enrolledUserSid, journal, ActionHost.InteractiveTray);
+        var source = new WindowsDesktopPixelSource();
+        var guard = new DesktopSessionGuard(new InteractiveSessionInspector(enrolledUserSid));
+        var capture = new DesktopCapture(source, guard);
+        WindowsActionProvider? provider = null;
+        var input = new DesktopInput(
+            () => provider?.LatestFrame,
+            source,
+            guard,
+            new WindowsInputTargetInspector(),
+            new NativeInput(),
+            () => _client?.Enrolled == true);
+        provider = new WindowsActionProvider(
+            enrolledUserSid,
+            journal,
+            ActionHost.InteractiveTray,
+            desktopCapture: capture,
+            desktopInput: input,
+            sessionResolver: sessionId => sessionId is not null && _runtime?.Sessions.TryGetValue(sessionId, out var session) == true ? session : null,
+            showGuide: ShowGuide,
+            clearGuide: ClearGuide,
+            urlLauncher: uri => Process.Start(new ProcessStartInfo(uri.AbsoluteUri) { UseShellExecute = true }) is not null);
+        return provider;
+    }
 
     protected override void ExitThreadCore()
     {

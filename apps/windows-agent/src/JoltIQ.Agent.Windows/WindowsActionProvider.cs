@@ -11,6 +11,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Windows.Automation;
 using JoltIQ.Agent.Core;
+using JoltIQ.Agent.Windows.Desktop;
 using Microsoft.Win32;
 
 namespace JoltIQ.Agent.Windows;
@@ -39,6 +40,13 @@ public sealed class WindowsActionProvider : IActionProvider
     private readonly OfficeAddinManager _addins;
     private readonly TimeSpan _restartTimeout;
     private readonly TimeSpan _restartSettle;
+    private readonly IDesktopCapture? _desktopCapture;
+    private readonly IDesktopInput? _desktopInput;
+    private readonly Func<string?, LocalSession?>? _sessionResolver;
+    private readonly Action<GuideInstruction>? _showGuide;
+    private readonly Action? _clearGuide;
+    private readonly Func<Uri, bool>? _urlLauncher;
+    private DesktopFrame? _latestFrame;
 
     public WindowsActionProvider(
         string? enrolledUserSid = null,
@@ -46,24 +54,41 @@ public sealed class WindowsActionProvider : IActionProvider
         ActionHost host = ActionHost.InteractiveTray,
         Func<string?>? currentSid = null,
         TimeSpan? restartTimeout = null,
-        TimeSpan? restartSettle = null)
+        TimeSpan? restartSettle = null,
+        IDesktopCapture? desktopCapture = null,
+        IDesktopInput? desktopInput = null,
+        Func<string?, LocalSession?>? sessionResolver = null,
+        Action<GuideInstruction>? showGuide = null,
+        Action? clearGuide = null,
+        Func<Uri, bool>? urlLauncher = null)
     {
         _enrolledUserSid = enrolledUserSid;
         _addins = new OfficeAddinManager(enrolledUserSid, journal, host, currentSid);
         _restartTimeout = restartTimeout ?? TimeSpan.FromSeconds(20);
         _restartSettle = restartSettle ?? TimeSpan.FromSeconds(4);
+        _desktopCapture = desktopCapture;
+        _desktopInput = desktopInput;
+        _sessionResolver = sessionResolver;
+        _showGuide = showGuide;
+        _clearGuide = clearGuide;
+        _urlLauncher = urlLauncher;
         var capabilities = new List<string>
         {
             "system.info", "process.list", "app.info", "disk.usage", "network.diagnostics", "eventlog.query", "service.status",
             "outlook.pdf_crash.inspect", "file.inspect", "config.read", "app.restart", "service.restart", "ui.invoke", "ui.set_text",
-            "guide.highlight", "guide.clear",
         };
+        if (_desktopCapture is not null) capabilities.AddRange(new[] { "screen.capture", "input.wait" });
+        if (_desktopCapture is not null && _desktopInput is not null && _sessionResolver is not null)
+            capabilities.AddRange(new[] { "input.click", "input.drag", "input.move", "input.mouse", "input.type", "input.key", "input.scroll", "input.cursor" });
+        if (_showGuide is not null && _clearGuide is not null) capabilities.AddRange(new[] { "guide.highlight", "guide.clear" });
+        if (_urlLauncher is not null) capabilities.Add("url.open");
         if (_addins.Available)
             capabilities.AddRange(new[] { "office.addin.set_load_behavior", "office.addin.restore_load_behavior", "office.addin.verify_restored" });
         Capabilities = capabilities;
     }
 
     public IReadOnlyCollection<string> Capabilities { get; }
+    public DesktopFrame? LatestFrame => _latestFrame;
 
     public IDictionary<string, string> Facts() => new Dictionary<string, string>
     {
@@ -76,6 +101,20 @@ public sealed class WindowsActionProvider : IActionProvider
         string S(string k) => p.GetProperty(k).GetString()!;
         string? O(string k) => p.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
         int I(string k, int d) => p.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : d;
+
+        if (action == "screen.capture")
+            return await CaptureResultAsync(I("max_long_edge", 1280), ct);
+        if (action is "input.click" or "input.drag" or "input.move" or "input.mouse" or "input.type" or "input.key" or "input.scroll" or "input.cursor")
+            return await ExecuteDesktopInputAsync(action, p, context, ct);
+        if (action == "input.wait")
+            return await WaitAndCaptureAsync(I("seconds", 1), ct);
+        if (action == "url.open")
+            return await OpenUrlAsync(S("url"), ct);
+        if (action == "guide.highlight")
+            return ShowGuide(p);
+        if (action == "guide.clear")
+            return ClearGuide();
+
         var data = action switch
         {
             "system.info" => SystemInfo(),
@@ -100,6 +139,152 @@ public sealed class WindowsActionProvider : IActionProvider
             _ => new JsonObject { ["ok"] = false, ["error"] = "unsupported" },
         };
         return new ActionResult(data);
+    }
+
+    private async Task<ActionResult> ExecuteDesktopInputAsync(
+        string action,
+        JsonElement parameters,
+        ActionExecutionContext? context,
+        CancellationToken ct)
+    {
+        var input = _desktopInput ?? throw new InvalidOperationException("Desktop input is unavailable");
+        var session = ResolveSession(context);
+        string String(string name) => parameters.GetProperty(name).GetString()!;
+        string? OptionalString(string name) => parameters.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+        int Integer(string name, int fallback = 0) => parameters.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number
+            ? value.GetInt32()
+            : fallback;
+        long Long(string name) => parameters.GetProperty(name).GetInt64();
+        var generation = action == "input.cursor" ? 0 : Long("frame_generation");
+        var layoutHash = action == "input.cursor" ? "" : String("layout_hash");
+        var data = new JsonObject { ["ok"] = true, ["action"] = action };
+
+        switch (action)
+        {
+            case "input.click":
+                await input.ClickAsync(Integer("x"), Integer("y"), OptionalString("button") ?? "left", Integer("count", 1),
+                    OptionalString("modifiers"), generation, layoutHash, session, ct);
+                break;
+            case "input.drag":
+                await input.DragAsync(Integer("x"), Integer("y"), Integer("to_x"), Integer("to_y"), generation, layoutHash, session, ct);
+                break;
+            case "input.move":
+                await input.MoveAsync(Integer("x"), Integer("y"), generation, layoutHash, session, ct);
+                break;
+            case "input.mouse":
+                await input.MouseAsync(String("state"), generation, layoutHash, session, ct);
+                break;
+            case "input.type":
+                await input.TypeAsync(String("text"), generation, layoutHash, session, ct);
+                break;
+            case "input.key":
+                await input.KeyAsync(String("combo"), Integer("repeat", 1), TimeSpan.FromSeconds(Integer("hold_seconds")),
+                    generation, layoutHash, session, ct);
+                break;
+            case "input.scroll":
+                await input.ScrollAsync(Integer("x"), Integer("y"), String("direction"), Integer("amount", 1),
+                    generation, layoutHash, session, ct);
+                break;
+            case "input.cursor":
+                var cursor = input.Cursor();
+                data["virtual_x"] = cursor.X;
+                data["virtual_y"] = cursor.Y;
+                break;
+            default:
+                throw new InvalidOperationException("Desktop input action is unsupported");
+        }
+
+        return await CaptureResultAsync(1280, ct, data);
+    }
+
+    private LocalSession ResolveSession(ActionExecutionContext? context)
+    {
+        if (context is null || string.IsNullOrWhiteSpace(context.SessionId))
+            throw new DesktopInputRefusedException("verified session context is missing");
+        var session = _sessionResolver?.Invoke(context.SessionId)
+            ?? throw new DesktopInputRefusedException("the consented local session is no longer active");
+        if (!session.Active || session.Expired ||
+            !string.Equals(session.ComputerUseRunId, context.ComputerUseRunId, StringComparison.Ordinal) ||
+            !string.Equals(session.ComputerUseMode, context.ComputerUseMode, StringComparison.Ordinal))
+            throw new DesktopInputRefusedException("the local run or mode no longer matches the signed command");
+        return session;
+    }
+
+    private async Task<ActionResult> WaitAndCaptureAsync(int seconds, CancellationToken ct)
+    {
+        if (seconds is < 1 or > 30) throw new ArgumentOutOfRangeException(nameof(seconds));
+        await Task.Delay(TimeSpan.FromSeconds(seconds), ct);
+        return await CaptureResultAsync(1280, ct, new JsonObject { ["ok"] = true, ["waited_seconds"] = seconds });
+    }
+
+    private async Task<ActionResult> OpenUrlAsync(string value, CancellationToken ct)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
+            return new ActionResult(new JsonObject { ["ok"] = false, ["error"] = "only http and https URLs are allowed" });
+        ct.ThrowIfCancellationRequested();
+        if (_urlLauncher is null || !_urlLauncher(uri))
+            return new ActionResult(new JsonObject { ["ok"] = false, ["error"] = "the default browser could not be opened" });
+        var result = new JsonObject { ["ok"] = true, ["url"] = uri.AbsoluteUri };
+        return _desktopCapture is null ? new ActionResult(result) : await CaptureResultAsync(1280, ct, result);
+    }
+
+    private ActionResult ShowGuide(JsonElement parameters)
+    {
+        var show = _showGuide ?? throw new InvalidOperationException("Guide overlay is unavailable");
+        show(new GuideInstruction(
+            parameters.GetProperty("x").GetInt32(),
+            parameters.GetProperty("y").GetInt32(),
+            parameters.GetProperty("width").GetInt32(),
+            parameters.GetProperty("height").GetInt32(),
+            parameters.GetProperty("frame_width").GetInt32(),
+            parameters.GetProperty("frame_height").GetInt32(),
+            parameters.GetProperty("instruction").GetString()!,
+            parameters.GetProperty("expected_control_label").GetString()!));
+        return new ActionResult(new JsonObject { ["ok"] = true, ["shown"] = true });
+    }
+
+    private ActionResult ClearGuide()
+    {
+        (_clearGuide ?? throw new InvalidOperationException("Guide overlay is unavailable"))();
+        return new ActionResult(new JsonObject { ["ok"] = true });
+    }
+
+    private async Task<ActionResult> CaptureResultAsync(
+        int maxLongEdge,
+        CancellationToken ct,
+        JsonObject? data = null)
+    {
+        var capture = _desktopCapture ?? throw new InvalidOperationException("Desktop capture is unavailable");
+        var frame = await capture.CaptureAsync(maxLongEdge, ct);
+        _latestFrame = frame;
+        data ??= new JsonObject { ["ok"] = true };
+        data["width"] = frame.Width;
+        data["height"] = frame.Height;
+        data["virtual_bounds"] = new JsonObject
+        {
+            ["left"] = frame.VirtualBounds.Left,
+            ["top"] = frame.VirtualBounds.Top,
+            ["width"] = frame.VirtualBounds.Width,
+            ["height"] = frame.VirtualBounds.Height,
+        };
+        data["scale_x"] = frame.ScaleX;
+        data["scale_y"] = frame.ScaleY;
+        data["layout_hash"] = frame.LayoutHash;
+        data["frame_generation"] = frame.FrameGeneration;
+        data["displays"] = new JsonArray(frame.Displays.Select(display => (JsonNode)new JsonObject
+        {
+            ["id"] = display.Id,
+            ["left"] = display.Left,
+            ["top"] = display.Top,
+            ["width"] = display.Width,
+            ["height"] = display.Height,
+            ["dpi_x"] = display.DpiX,
+            ["dpi_y"] = display.DpiY,
+            ["primary"] = display.Primary,
+        }).ToArray());
+        return new ActionResult(data, frame.Png, "image/png");
     }
 
     private static JsonObject SystemInfo()

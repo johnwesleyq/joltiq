@@ -328,7 +328,7 @@ public sealed class AgentRuntime
             await CompleteAndReportAsync(cid, "rejected", new JsonObject { ["ok"] = false, ["error"] = $"refused by device policy: {verdict.Reason}" }, ct);
             return;
         }
-        if (!action.StartsWith("guide.", StringComparison.Ordinal) && !_provider.Capabilities.Contains(action))
+        if (!_provider.Capabilities.Contains(action))
         {
             await CompleteAndReportAsync(cid, "rejected", new JsonObject { ["ok"] = false, ["error"] = "not supported on this device" }, ct);
             return;
@@ -344,12 +344,7 @@ public sealed class AgentRuntime
             lock (s.DispatchGate)
             {
                 linked.Token.ThrowIfCancellationRequested();
-                execution = action switch
-                {
-                    "guide.highlight" => ShowGuideAsync(p),
-                    "guide.clear" => ClearGuideAsync(),
-                    _ => _provider.ExecuteAsync(action, p, linked.Token, executionContext),
-                };
+                execution = _provider.ExecuteAsync(action, p, linked.Token, executionContext);
             }
             var actionResult = await execution;
             result = actionResult.Data;
@@ -370,21 +365,6 @@ public sealed class AgentRuntime
             status = "failed";
         }
         await CompleteAndReportAsync(cid, status, result, ct, evidence);
-    }
-
-    private Task<ActionResult> ShowGuideAsync(JsonElement p)
-    {
-        _ui.ShowGuide(new(
-            p.GetProperty("x").GetInt32(), p.GetProperty("y").GetInt32(), p.GetProperty("width").GetInt32(), p.GetProperty("height").GetInt32(),
-            p.GetProperty("frame_width").GetInt32(), p.GetProperty("frame_height").GetInt32(),
-            p.GetProperty("instruction").GetString()!, p.GetProperty("expected_control_label").GetString()!));
-        return Task.FromResult(new ActionResult(new JsonObject { ["ok"] = true, ["shown"] = true }));
-    }
-
-    private Task<ActionResult> ClearGuideAsync()
-    {
-        _ui.ClearGuide();
-        return Task.FromResult(new ActionResult(new JsonObject { ["ok"] = true }));
     }
 
     private async Task CompleteAndReportAsync(
