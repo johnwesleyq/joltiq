@@ -29,6 +29,43 @@ REQUIRED_EVIDENCE_KINDS = {
 }
 
 
+def _validate_attestation_payload(kind: str, payload: dict[str, Any], prefix: str) -> list[str]:
+    errors: list[str] = []
+    if kind == "authenticode":
+        if payload.get("signature_status") != "Valid":
+            errors.append(f"{prefix} signature_status must equal Valid")
+        if payload.get("timestamped") is not True:
+            errors.append(f"{prefix} timestamped must be true")
+        signed_roles = payload.get("signed_roles")
+        if not isinstance(signed_roles, list) or set(signed_roles) != {"tray", "broker", "msi"}:
+            errors.append(f"{prefix} signed_roles must contain exactly tray, broker, and msi")
+    elif kind == "installer_lifecycle":
+        if payload.get("disposable_vm") is not True or payload.get("clean_snapshot") is not True:
+            errors.append(f"{prefix} must attest a disposable VM reverted to a clean snapshot")
+        required = {"install", "repair", "upgrade", "downgrade_refused", "uninstall"}
+        operations = payload.get("operations")
+        if not isinstance(operations, dict) or any(operations.get(name) is not True for name in required):
+            errors.append(f"{prefix} must pass install, repair, upgrade, downgrade_refused, and uninstall")
+    elif kind in {"windows_10_acceptance", "windows_11_acceptance"}:
+        expected_os = "windows_10" if kind == "windows_10_acceptance" else "windows_11"
+        if payload.get("os_family") != expected_os:
+            errors.append(f"{prefix} os_family must equal {expected_os}")
+        if payload.get("disposable_vm") is not True or payload.get("snapshot_reset_each_case") is not True:
+            errors.append(f"{prefix} must attest a disposable VM reset before every case")
+        if payload.get("aggregate_passed") is not True:
+            errors.append(f"{prefix} aggregate_passed must be true")
+    elif kind == "independent_security_review":
+        if payload.get("independent") is not True:
+            errors.append(f"{prefix} independent must be true")
+        if not isinstance(payload.get("reviewer"), str) or not payload.get("reviewer", "").strip():
+            errors.append(f"{prefix} reviewer must identify the independent assessor")
+        if payload.get("unresolved_release_blockers") != 0:
+            errors.append(f"{prefix} unresolved_release_blockers must equal 0")
+        if payload.get("signed_decision") != "APPROVED FOR LIMITED PAID WINDOWS PILOT":
+            errors.append(f"{prefix} signed_decision must approve the limited paid Windows pilot")
+    return errors
+
+
 def _is_utc_timestamp(value: object) -> bool:
     if not isinstance(value, str) or not value.endswith("Z"):
         return False
@@ -97,6 +134,8 @@ def _validate_passed_evidence(
             errors.append(f"{prefix} attestation source_commit mismatch")
         if payload.get("artifact_sha256") != artifact_hash:
             errors.append(f"{prefix} attestation artifact_sha256 mismatch")
+        if isinstance(kind, str):
+            errors.extend(_validate_attestation_payload(kind, payload, prefix))
     missing = REQUIRED_EVIDENCE_KINDS[gate_name] - kinds
     if missing:
         errors.append(f"{gate_name} is missing required evidence kinds: {', '.join(sorted(missing))}")
@@ -125,6 +164,7 @@ def validate(manifest: Any, repo_root: Path | None = None) -> list[str]:
     if set(gates) != REQUIRED_GATES:
         errors.append("gates must contain exactly the four required release gates")
 
+    passed_artifact_hashes: set[str] = set()
     for name in sorted(REQUIRED_GATES & set(gates)):
         gate = gates[name]
         if not isinstance(gate, dict):
@@ -143,10 +183,19 @@ def validate(manifest: Any, repo_root: Path | None = None) -> list[str]:
             errors.append(f"{name} passed gate must reference evidence")
         if status == "passed":
             errors.extend(_validate_passed_evidence(name, evidence, manifest.get("source_commit"), repo_root))
+            if isinstance(evidence, list):
+                passed_artifact_hashes.update(
+                    item["artifact_sha256"]
+                    for item in evidence
+                    if isinstance(item, dict) and SHA256_RE.fullmatch(str(item.get("artifact_sha256", "")))
+                )
         if status == "passed" and blockers:
             errors.append(f"{name} passed gate cannot retain blockers")
         if status == "blocked" and not blockers:
             errors.append(f"{name} blocked gate must name at least one blocker")
+
+    if len(passed_artifact_hashes) > 1:
+        errors.append("passed release gates refer to mixed artifact hashes")
 
     all_passed = set(gates) == REQUIRED_GATES and all(
         isinstance(gates[name], dict) and gates[name].get("status") == "passed"

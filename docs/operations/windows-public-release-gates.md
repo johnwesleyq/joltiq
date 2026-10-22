@@ -8,6 +8,8 @@ python3 scripts/validate_windows_release_readiness.py docs/operations/evidence/w
 
 `public_launch_ready` may be `true` only when all four gates below are `passed` and reference their evidence. Engineering tests, a physical-PC build, a self-signed certificate, an internal review, or a partially completed case catalog cannot satisfy a public-release gate.
 
+Passed evidence must be a repository-contained JSON attestation whose file digest, source commit, and common release-artifact SHA-256 are recorded in the readiness manifest. The validator also requires gate-specific facts: valid timestamped signatures for tray, broker, and MSI; clean-snapshot disposable lifecycle operations; separate snapshot-reset Windows 10 and Windows 11 acceptance aggregates; and an identified independent assessor's signed approval with zero unresolved release blockers.
+
 ## Current prerequisite inventory
 
 The authorized physical PC is a Dell Pro Max 16 MC16250 running Windows 11 Pro 64-bit, version 10.0.26200 build 26200. Read-only inspection found no current-user code-signing certificate with private key, no Windows SDK `signtool.exe`, no Hyper-V management command, no VMware `vmrun`, and no Windows Sandbox executable. Windows reports a hypervisor is present, but the optional-feature query required elevation and no registered disposable VM was found. This PC remains an engineering host, not snapshot-reset acceptance infrastructure.

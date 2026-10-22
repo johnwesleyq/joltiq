@@ -4,7 +4,7 @@ Last updated: 2026-10-22
 
 ## Current verdict
 
-**Release blocked pending the disposable-VM behavioral matrix and production signing.**
+**Public launch is blocked.** Production signing, installer lifecycle evidence, disposable Windows 10/11 behavioral matrices, the supported local computer-use model gateway, remediation of the internal security-preflight findings, and an independent security decision are all still required.
 
 The consolidated fail-closed public-launch status is recorded in `docs/operations/evidence/windows-public-release-readiness.json` and explained in `docs/operations/windows-public-release-gates.md`.
 
@@ -24,6 +24,7 @@ The native Windows implementation has passed focused and full automated tests on
 | Disposable Windows 10 aggregate | Missing | Requires every Windows 10 case and applicable failure case. |
 | Signed production MSI | Missing | Internal unsigned builds are not customer-release artifacts. |
 | Independent security review | Missing | Required before an external unrestricted pilot. |
+| Internal security preflight | Release blockers found | The 2026-10-22 fresh-context preflight is linked below. It is not the independent external review. |
 
 ## Evidence locations
 
@@ -35,6 +36,8 @@ The native Windows implementation has passed focused and full automated tests on
 - Physical Task 10 build-manifest record: `docs/operations/evidence/windows-task10-build-manifest.json`
 - Public-release readiness manifest: `docs/operations/evidence/windows-public-release-readiness.json`
 - Public-release gate procedure: `docs/operations/windows-public-release-gates.md`
+- Internal security preflight: `docs/security/windows-internal-security-preflight-2026-10-22.md`
+- Independent-review scope and evidence template: `docs/security/windows-independent-review-scope.md`, `docs/security/windows-independent-review-evidence-template.md`
 - Original physical-PC artifacts/logs: `C:\Users\admin\j10final\artifacts` (not a release distribution location)
 
 No behavioral bundle or aggregate is linked here yet. Add only validator-approved bundles generated on named, freshly reverted disposable VM snapshots. Do not label the physical-PC test folder as a clean-VM aggregate.

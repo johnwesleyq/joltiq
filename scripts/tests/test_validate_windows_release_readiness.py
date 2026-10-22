@@ -1,4 +1,5 @@
 import json
+import importlib.util
 import subprocess
 import sys
 import tempfile
@@ -8,6 +9,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 VALIDATOR = ROOT / "scripts" / "validate_windows_release_readiness.py"
+SPEC = importlib.util.spec_from_file_location("windows_readiness_validator", VALIDATOR)
+assert SPEC and SPEC.loader
+VALIDATOR_MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(VALIDATOR_MODULE)
 
 
 def valid_manifest() -> dict:
@@ -90,6 +95,69 @@ class ReleaseReadinessValidatorTests(unittest.TestCase):
         result = self.run_validator(manifest)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("generated_at must be an ISO-8601 UTC timestamp", result.stderr)
+
+    def test_rejects_generic_attestation_for_authenticode_gate(self) -> None:
+        manifest = valid_manifest()
+        manifest["gates"]["authenticode_signing"] = {
+            "status": "passed",
+            "evidence": [],
+            "blockers": [],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact_hash = "b" * 64
+            payload = {
+                "passed": True,
+                "source_commit": manifest["source_commit"],
+                "artifact_sha256": artifact_hash,
+                "signed_roles": None,
+            }
+            evidence_path = root / "signing.json"
+            evidence_path.write_text(json.dumps(payload), encoding="utf-8")
+            import hashlib
+
+            manifest["gates"]["authenticode_signing"]["evidence"] = [{
+                "kind": "authenticode",
+                "path": "signing.json",
+                "sha256": hashlib.sha256(evidence_path.read_bytes()).hexdigest(),
+                "source_commit": manifest["source_commit"],
+                "artifact_sha256": artifact_hash,
+            }]
+            errors = VALIDATOR_MODULE.validate(manifest, root)
+        self.assertTrue(any("signature_status" in error for error in errors), errors)
+
+    def test_rejects_mixed_artifact_hashes_across_passed_gates(self) -> None:
+        manifest = valid_manifest()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence = []
+            for index, artifact_hash in enumerate(("b" * 64, "c" * 64)):
+                payload = {
+                    "passed": True,
+                    "source_commit": manifest["source_commit"],
+                    "artifact_sha256": artifact_hash,
+                    "signature_status": "Valid",
+                    "timestamped": True,
+                    "signed_roles": ["tray", "broker", "msi"],
+                }
+                evidence_path = root / f"signing-{index}.json"
+                evidence_path.write_text(json.dumps(payload), encoding="utf-8")
+                import hashlib
+
+                evidence.append({
+                    "kind": "authenticode",
+                    "path": evidence_path.name,
+                    "sha256": hashlib.sha256(evidence_path.read_bytes()).hexdigest(),
+                    "source_commit": manifest["source_commit"],
+                    "artifact_sha256": artifact_hash,
+                })
+            manifest["gates"]["authenticode_signing"] = {
+                "status": "passed",
+                "evidence": evidence,
+                "blockers": [],
+            }
+            errors = VALIDATOR_MODULE.validate(manifest, root)
+        self.assertTrue(any("mixed artifact hashes" in error for error in errors), errors)
 
 
 if __name__ == "__main__":

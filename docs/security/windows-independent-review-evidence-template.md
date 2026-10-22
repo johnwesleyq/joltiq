@@ -85,3 +85,19 @@ Record `PASS`, `FAIL`, or `NOT TESTED` and cite the report section/evidence.
 - Reviewer signature/attestation:
 
 The JoltIQ release owner separately verifies that the report covers the exact candidate hashes and that no Critical or Important finding remains unresolved before changing `independent_security_review.status` to `passed`.
+
+## Machine-readable attestation
+
+Alongside the signed report, create a JSON attestation containing these exact release-gate fields. Its `source_commit` and `artifact_sha256` must match every other passed gate, and the readiness manifest must record the attestation file's SHA-256.
+
+```json
+{
+  "passed": true,
+  "source_commit": "40-character-lowercase-git-sha",
+  "artifact_sha256": "64-character-lowercase-release-artifact-sha256",
+  "independent": true,
+  "reviewer": "Independent assessor or firm name",
+  "unresolved_release_blockers": 0,
+  "signed_decision": "APPROVED FOR LIMITED PAID WINDOWS PILOT"
+}
+```

@@ -1,8 +1,26 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-10-22T00:00:00Z",
-  "source_commit": "7119800350532eada7eb5b4043744327c7187d39",
+  "generated_at": "2026-10-22T21:32:39Z",
+  "source_commit": "91f72b24f6721a4e4cc35910be495fd748459d69",
   "public_launch_ready": false,
+  "remaining_actions": [
+    {
+      "owner": "JoltIQ release owner",
+      "action": "Obtain an organization Authenticode code-signing identity, configure the protected signing runner, and produce timestamp-verified tray, broker, and MSI artifacts."
+    },
+    {
+      "owner": "JoltIQ Windows test lead",
+      "action": "Provide named clean snapshots for disposable Windows 10 and Windows 11 VMs and run the installer lifecycle plus 35-run general and 59-run Outlook matrices, including licensed classic Outlook."
+    },
+    {
+      "owner": "JoltIQ engineering",
+      "action": "Resolve every Critical and Important internal security-preflight finding with RED-to-GREEN regressions, including the supported customer-controlled local computer-use model gateway."
+    },
+    {
+      "owner": "Independent security assessor",
+      "action": "Review and penetration-test the exact corrected commit and signed artifact hashes, retest fixes, and issue a signed release decision with no unresolved release blocker."
+    }
+  ],
   "host_inventory": {
     "classification": "enrolled physical engineering PC; not disposable acceptance infrastructure",
     "operating_system": "Microsoft Windows 11 Pro 64-bit",
