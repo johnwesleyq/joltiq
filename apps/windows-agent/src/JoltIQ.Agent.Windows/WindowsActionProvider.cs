@@ -205,19 +205,14 @@ public sealed class WindowsActionProvider : IActionProvider
     private static JsonObject ReadRegistry(string key, string value)
     {
         var sub = key.StartsWith(@"HKCU\", StringComparison.OrdinalIgnoreCase) ? key[5..] : throw new InvalidOperationException("HKCU only");
-        var found = new List<(string View, object Data, RegistryValueKind Kind)>();
-        foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
-        {
-            using var root = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, view);
-            using var k = root.OpenSubKey(sub);
-            if (k is null || !k.GetValueNames().Contains(value, StringComparer.OrdinalIgnoreCase)) continue;
-            var data = k.GetValue(value, null, RegistryValueOptions.DoNotExpandEnvironmentNames);
-            if (data is not null) found.Add((view == RegistryView.Registry32 ? "32" : "64", data, k.GetValueKind(value)));
-        }
-        if (found.Count == 0) return new JsonObject { ["exists"] = false };
-        if (found.Count > 1) return new JsonObject { ["ok"] = false, ["error"] = "registry value exists in both views; refusing ambiguous read-back" };
-        return new JsonObject { ["exists"] = true, ["data"] = found[0].Data.ToString(), ["kind"] = found[0].Kind.ToString(),
-                                ["registry_view"] = found[0].View };
+        using var root = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Registry64);
+        using var k = root.OpenSubKey(sub);
+        if (k is null || !k.GetValueNames().Contains(value, StringComparer.OrdinalIgnoreCase))
+            return new JsonObject { ["exists"] = false };
+        var data = k.GetValue(value, null, RegistryValueOptions.DoNotExpandEnvironmentNames);
+        if (data is null) return new JsonObject { ["exists"] = false };
+        return new JsonObject { ["exists"] = true, ["data"] = data.ToString(), ["kind"] = k.GetValueKind(value).ToString(),
+                                ["registry_view"] = "shared" };
     }
 
     private async Task<JsonObject> RestartApp(string proc, string? args, CancellationToken ct)

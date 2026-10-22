@@ -26,8 +26,9 @@ $logs = Join-Path $out "logs"
 New-Item -ItemType Directory $logs | Out-Null
 
 function Invoke-CheckedDotnet([string]$Operation, [string[]]$Arguments, [string]$LogName) {
-  $output = @(& dotnet @Arguments 2>&1)
-  $exitCode = $LASTEXITCODE
+  $result = Invoke-JoltIqNativeCommand -FilePath "dotnet" -Arguments $Arguments
+  $output = @($result.Output)
+  $exitCode = $result.ExitCode
   $output | Tee-Object -FilePath (Join-Path $logs $LogName) | ForEach-Object { Write-Host $_ }
   Assert-JoltIqCleanBuildOutput -Output ($output -join [Environment]::NewLine)
   Assert-JoltIqCommandSucceeded -ExitCode $exitCode -Operation $Operation

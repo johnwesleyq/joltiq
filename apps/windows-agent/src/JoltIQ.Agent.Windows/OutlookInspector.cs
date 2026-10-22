@@ -95,19 +95,35 @@ public sealed class OutlookInspector
     private static IReadOnlyList<AddinFact> ReadAddin(string progId)
     {
         var facts = new List<AddinFact>();
-        foreach (var (hive, scope) in new[] { (RegistryHive.CurrentUser, "HKCU"), (RegistryHive.LocalMachine, "HKLM") })
-        foreach (var (view, viewName) in new[] { (RegistryView.Registry64, "64"), (RegistryView.Registry32, "32") })
+        // HKCU\Software is shared across WOW64 views, so inspect it once rather than reporting a
+        // duplicate 32/64 registration. HKLM\Software remains redirected and retains both views.
+        using (var root = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Registry64))
         {
-            using var root = RegistryKey.OpenBaseKey(hive, view);
             using var key = root.OpenSubKey($@"Software\Microsoft\Office\Outlook\Addins\{progId}");
             if (key is not null)
             {
                 var raw = key.GetValue("LoadBehavior", null, RegistryValueOptions.DoNotExpandEnvironmentNames);
-                facts.Add(new(scope, viewName, raw is int i ? i : null,
+                facts.Add(new("HKCU", "shared", raw is int i ? i : null,
                     raw is null ? null : key.GetValueKind("LoadBehavior").ToString(), false));
             }
             using var policy = root.OpenSubKey(@"Software\Policies\Microsoft\Office\16.0\Outlook\Resiliency\AddinList");
-            if (policy?.GetValue(progId) is not null) facts.Add(new(scope, viewName, null, null, true));
+            if (policy?.GetValue(progId) is not null) facts.Add(new("HKCU", "shared", null, null, true));
+        }
+        foreach (var (view, viewName) in new[] { (RegistryView.Registry64, "64"), (RegistryView.Registry32, "32") })
+        {
+            using var root = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, view);
+            using var key = root.OpenSubKey($@"Software\Microsoft\Office\Outlook\Addins\{progId}");
+            if (key is not null)
+            {
+                var raw = key.GetValue("LoadBehavior", null, RegistryValueOptions.DoNotExpandEnvironmentNames);
+                facts.Add(new("HKLM", viewName, raw is int i ? i : null,
+                    raw is null ? null : key.GetValueKind("LoadBehavior").ToString(), false));
+            }
+        }
+        using (var root = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64))
+        {
+            using var policy = root.OpenSubKey(@"Software\Policies\Microsoft\Office\16.0\Outlook\Resiliency\AddinList");
+            if (policy?.GetValue(progId) is not null) facts.Add(new("HKLM", "shared", null, null, true));
         }
         return facts;
     }

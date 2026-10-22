@@ -168,12 +168,11 @@ public sealed class OfficeAddinManager
     {
         var path = $@"Software\Microsoft\Office\{app}\Addins\{progId}";
         var found = new List<(string, string)>();
-        foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
-        {
-            using var root = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, view);
-            using var key = root.OpenSubKey(path);
-            if (key is not null) found.Add((FromView(view), path));
-        }
+        // HKCU\Software is shared between 32-bit and 64-bit processes on supported Windows versions.
+        // Probing both alternate views returns the same physical key twice and creates a false ambiguity.
+        using var root = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Registry64);
+        using var key = root.OpenSubKey(path);
+        if (key is not null) found.Add(("shared", path));
         return found;
     }
 
@@ -251,6 +250,5 @@ public sealed class OfficeAddinManager
     }
 
     private static RegistryView ToView(string view) => view == "32" ? RegistryView.Registry32 : RegistryView.Registry64;
-    private static string FromView(RegistryView view) => view == RegistryView.Registry32 ? "32" : "64";
     private static JsonObject Fail(string error) => new() { ["ok"] = false, ["error"] = error };
 }

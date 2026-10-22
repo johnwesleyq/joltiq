@@ -1,8 +1,11 @@
 # Windows Outlook PDF MVP evidence index
 
-**Recorded:** 2026-10-20 (America/Denver)  
-**Branch:** `codex/windows-outlook-mvp`  
-**Implementation baseline:** `aace42906eb4ea52de2263b3c271ccced9627222`  
+**Recorded:** 2026-10-21 (America/Denver)
+
+**Branch:** `main`
+
+**Implementation baseline:** the current `main` source revision, including the physical-Windows fixes verified below
+
 **Branch base:** `dc218d2bcc994991ddd2d5e4d2226caeedc3f5fe`
 
 This index deliberately separates implementation from execution evidence. A source file, test, or CI workflow is not proof that Windows accepted the workflow.
@@ -11,14 +14,15 @@ This index deliberately separates implementation from execution evidence. A sour
 
 | Evidence level | Status | Evidence / blocker |
 |---|---|---|
-| Implemented | **YES** | Tasks 1–11 are committed on this branch. The server, protocol, companion, Windows providers, installer scripts, acceptance harness, and release workflows exist. |
+| Implemented | **YES** | The server, protocol, companion, Windows providers, installer scripts, acceptance harness, and release workflows exist. The physical-Windows fixes are included in this source revision. |
 | Simulator-tested | **YES, with a current limitation** | Server security/procedure tests and the cross-platform companion self-test pass. The Task 12 API run skips two simulator-spawning tests because `dotnet` is unavailable natively on this Mac; the companion Core self-test passes in the .NET 8 SDK container. |
+| Physical-Windows-tested | **YES — INTERNAL BUILD** | On a physical Windows 11 Pro x64 PC (build 26200) with .NET SDK 8.0.426 and classic Outlook installed, the complete build gate compiled with zero warnings/errors, Core self-tests passed 20/20, native xUnit passed 40/40, the acceptance-harness contract passed, self-contained tray/broker publishing passed, and WiX produced an internal MSI. This is strong native execution evidence, but it is not the snapshot-reset acceptance matrix. |
 | Windows-CI-tested | **NO — BLOCKED_EXTERNAL_DEPENDENCY** | Workflows exist, but this checkout has no Git remote and no `windows-latest` run or downloadable CI evidence exists. |
 | Windows-VM-accepted | **NO — BLOCKED_EXTERNAL_DEPENDENCY** | No authorized Windows 10/11 VM evidence bundle exists. None of the 59 required runs has been accepted. |
-| Signed | **NO** | No MSI was produced in this checkout and no Authenticode/timestamp evidence exists. Any locally produced package is **unsigned internal-only**. |
+| Signed | **NO** | An unsigned internal MSI was produced on the physical PC, but no Authenticode/timestamp evidence exists. It remains **internal-only** and must not be distributed to customers. |
 | Externally reviewed | **NO** | The focused review below is an implementer self-review. Independent code review and penetration testing remain release blockers. |
 
-**Release decision:** `IMPLEMENTED_NOT_TESTED` for Windows runtime behavior and `BLOCKED_EXTERNAL_DEPENDENCY` for Windows CI, VM acceptance, signing, and external review. Do not deploy this workflow to customers or call it pilot-ready.
+**Release decision:** `PHYSICAL_WINDOWS_BUILD_VERIFIED_INTERNAL_ONLY`. Native Windows compilation and automated tests now pass, but Windows CI, the complete snapshot-reset VM acceptance matrix, signing/timestamping, real-Outlook acceptance, and external review remain release blockers. Do not deploy this workflow to customers or call it pilot-ready.
 
 ## Fresh Task 12 verification
 
@@ -31,8 +35,11 @@ This index deliberately separates implementation from execution evidence. A sour
 | Web | `npm run typecheck`, `npm run build`, and `npm audit --omit=dev --audit-level=high` — passed; audit reported zero vulnerabilities. |
 | Companion Core | .NET 8 SDK container: **20 passed, 0 failed**. The final security self-review added coverage proving a reused command ID with altered signed parameters is refused instead of receiving cached success. |
 | Acceptance harness contract | .NET 8 SDK container: catalog, complete synthetic bundle, missing-evidence rejection, and secret-evidence rejection all passed. This validates the harness, not Windows behavior. |
-| Windows build and xUnit | Not run: this is macOS and no Windows runner evidence is available. |
-| Windows acceptance | Not run: requires authorized disposable Windows 10/11 VMs and licensed classic Outlook for the real-Outlook case. |
+| Physical Windows build gate | `powershell -executionpolicy bypass -file scripts/build.ps1` completed on Windows 11 Pro x64 build 26200 using .NET SDK 8.0.426. Every project built with zero warnings/errors; Core self-tests passed **20/20**; native xUnit passed **40/40** in 7 seconds; all four acceptance-harness contract checks passed; self-contained win-x64 tray/broker publishing and WiX v5 MSI packaging passed. |
+| Build-gate regression suite | `powershell -executionpolicy bypass -file scripts/tests/BuildGate.Tests.ps1` — **9 passed, 0 failed**, including native stderr capture when the caller uses stop-on-error behavior. |
+| Physical Windows repeatability | Native xUnit was also rerun with `--no-build`: **40/40 passed**. |
+| Internal MSI | `JoltIQCompanion-1.0.0-x64.msi`, 83,256,954 bytes. Independent `Get-FileHash` matched the build output and manifest: `ec3b2eaa1a4c6a5fd3e206b47cc2b654ce3bad25e8fb0c08879d6fcde5fedc0e`. Manifest: `distribution=Internal`, `signed=false`, `timestamped=false`. |
+| Windows acceptance | Not run: the physical PC is not a disposable snapshot-reset VM, the 59-case aggregate was not executed, and the licensed real-Outlook case remains outstanding. |
 
 ## Windows acceptance matrix
 
@@ -52,7 +59,7 @@ Every accepted run must provide the 14 evidence classes required by the catalog.
 | `apps/windows-agent/scripts/acceptance/cases.json` | `ddf4561b984811d05f0b79ad21a6fbaf7dc4a50a56a7eb39f90e7a086a066bea` |
 | `apps/windows-agent/scripts/acceptance/EvidenceBundle.psm1` | `45a88a87c54c9978ad94c31873d2b42a2ba43458482bcc500a454e7ff8137228` |
 | `apps/windows-agent/scripts/acceptance/Invoke-OutlookPdfMvp.ps1` | `75c64fe92317e9c7300823dbdd682e1c2f14279c49e647218a4beefc73a32302` |
-| `apps/windows-agent/scripts/build.ps1` | `711f9fb31fed16b6056f9ffcca2d0a2ac1e02058bd1a41c597927a2369202d72` |
+| `apps/windows-agent/scripts/build.ps1` | `248a9c26052b1a05b5b204ac8494d3facaedfe976fab3166fd9868be57faafab` |
 | `apps/windows-agent/scripts/test-on-windows.ps1` | `6debc5f4b8179bf9fc3e85d9dc788bc7785fa503d160f429ed2e93bc19cbfda3` |
 | `.github/workflows/ci.yml` | `e75d89b53e3bb1e8f10727daa8ee0301d6fa43fbe8a25e13f94c4881af8f37bc` |
 | `.github/workflows/windows-release.yml` | `0f3e12db5656fac317478cab2c7ab2f4a2fa6e35817613e20450083569954883` |

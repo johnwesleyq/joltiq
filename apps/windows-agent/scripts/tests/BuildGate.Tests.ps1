@@ -43,6 +43,16 @@ Test 'compile warnings and failed commands fail the gate' {
     Throws { Assert-JoltIqCommandSucceeded -ExitCode 1 -Operation 'dotnet test' }
     Assert-JoltIqCommandSucceeded -ExitCode 0 -Operation 'dotnet test'
 }
+Test 'native stderr is captured even when the caller stops on PowerShell errors' {
+    $fixture = Join-Path ([IO.Path]::GetTempPath()) ('joltiq-native-stderr-' + [guid]::NewGuid().ToString('N') + '.cmd')
+    try {
+        "@echo off`r`necho stderr marker 1>&2`r`nexit /b 0" | Set-Content -LiteralPath $fixture -Encoding ascii
+        $result = Invoke-JoltIqNativeCommand -FilePath $env:ComSpec -Arguments @('/d', '/c', $fixture)
+        if ($result.ExitCode -ne 0) { throw "native command returned $($result.ExitCode)" }
+        if ((@($result.Output) -join "`n") -notmatch 'stderr marker') { throw 'native stderr was not captured' }
+    }
+    finally { Remove-Item -LiteralPath $fixture -Force -ErrorAction SilentlyContinue }
+}
 Test 'missing package inputs and checksum mismatches fail the gate' {
     $temp = Join-Path ([IO.Path]::GetTempPath()) ('joltiq-build-gate-' + [guid]::NewGuid().ToString('N'))
     try {

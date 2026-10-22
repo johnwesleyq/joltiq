@@ -41,6 +41,27 @@ function Assert-JoltIqCommandSucceeded {
     if ($ExitCode -ne 0) { throw "$Operation failed with exit code $ExitCode." }
 }
 
+function Invoke-JoltIqNativeCommand {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [string[]]$Arguments = @()
+    )
+    # Windows PowerShell 5.1 promotes native stderr to NativeCommandError. With the
+    # repository-wide Stop preference that aborts the wrapper before it can record the
+    # process exit code or persist its log, even when the native process succeeds.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = @(& $FilePath @Arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    [pscustomobject]@{ Output = $output; ExitCode = $exitCode }
+}
+
 function Assert-JoltIqCleanBuildOutput {
     [CmdletBinding()]
     param([AllowEmptyString()][string]$Output)
@@ -115,4 +136,4 @@ function Assert-JoltIqInstallerClassification {
     if ($ArpComments -notmatch '(?i)external') { throw 'External installer classification is not visible in installed-product metadata.' }
 }
 
-Export-ModuleMember -Function Assert-JoltIqBuildRequest, Assert-JoltIqPackageVersion, Resolve-JoltIqOutputDirectory, Assert-JoltIqCommandSucceeded, Assert-JoltIqCleanBuildOutput, Assert-JoltIqFile, Write-JoltIqChecksum, Assert-JoltIqChecksum, Assert-JoltIqSignatureEvidence, Assert-JoltIqAuthenticodeFile, Assert-JoltIqInstallerClassification
+Export-ModuleMember -Function Assert-JoltIqBuildRequest, Assert-JoltIqPackageVersion, Resolve-JoltIqOutputDirectory, Assert-JoltIqCommandSucceeded, Invoke-JoltIqNativeCommand, Assert-JoltIqCleanBuildOutput, Assert-JoltIqFile, Write-JoltIqChecksum, Assert-JoltIqChecksum, Assert-JoltIqSignatureEvidence, Assert-JoltIqAuthenticodeFile, Assert-JoltIqInstallerClassification

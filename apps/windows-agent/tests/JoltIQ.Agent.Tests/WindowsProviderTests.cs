@@ -14,6 +14,7 @@ namespace JoltIQ.Agent.Tests;
 /// except the HKCU add-in test, which uses a throwaway ProgId and cleans up.</summary>
 public class WindowsProviderTests
 {
+    private const string TestManagedAddinPath = @"Software\Microsoft\Office\16.0\Outlook\Resiliency\AddinList";
     private readonly WindowsActionProvider _p = new();
     private static JsonElement J(string s) => JsonDocument.Parse(s).RootElement;
 
@@ -63,7 +64,7 @@ public class WindowsProviderTests
         {
             using var root = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, view);
             root.DeleteSubKeyTree($@"Software\Microsoft\Office\Outlook\Addins\{progId}", false);
-            using var policy = root.CreateSubKey(@"Software\Policies\Microsoft\Office\16.0\Outlook\Resiliency\AddinList", true);
+            using var policy = root.OpenSubKey(TestManagedAddinPath, writable: true);
             policy?.DeleteValue(progId, false);
         }
     }
@@ -178,7 +179,7 @@ public class WindowsProviderTests
             Assert.True(journal.TryGet("change-1", out var saved));
             Assert.True(saved.Applied);
             Assert.Equal("DWord", saved.Before.Kind);
-            Assert.Equal("64", saved.Before.RegistryView);
+            Assert.Equal("shared", saved.Before.RegistryView);
 
             var restored = await p.ExecuteAsync("office.addin.restore_load_behavior",
                 J("{\"source_command_id\":\"change-1\"}"), default, Context("restore-1"));
@@ -222,7 +223,6 @@ public class WindowsProviderTests
     [Theory]
     [InlineData("missing")]
     [InlineData("policy")]
-    [InlineData("ambiguous_view")]
     [InlineData("journal_refused")]
     [InlineData("user_changed")]
     [InlineData("service_host")]
@@ -237,15 +237,10 @@ public class WindowsProviderTests
                 using var key = AddinKey(id, RegistryView.Registry64);
                 key.SetValue("LoadBehavior", 3, RegistryValueKind.DWord);
             }
-            if (scenario == "ambiguous_view")
-            {
-                using var key = AddinKey(id, RegistryView.Registry32);
-                key.SetValue("LoadBehavior", 3, RegistryValueKind.DWord);
-            }
             if (scenario == "policy")
             {
                 using var root = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Registry64);
-                using var policy = root.CreateSubKey(@"Software\Policies\Microsoft\Office\16.0\Outlook\Resiliency\AddinList", true);
+                using var policy = root.CreateSubKey(TestManagedAddinPath, true);
                 policy!.SetValue(id, "1", RegistryValueKind.String);
             }
             var currentSid = scenario == "user_changed" ? "S-1-5-21-different" : Sid;
@@ -314,7 +309,7 @@ public class WindowsProviderTests
         Assert.False(verdict.Allowed);
     }
 
-    [Fact] public async Task AddinLoadBehavior_UsesExisting32BitViewWithoutCreating64BitKey()
+    [Fact] public async Task AddinLoadBehavior_TreatsHkcuSoftwareAsOneSharedRegistryView()
     {
         var id = "JoltIQ.Test." + Guid.NewGuid().ToString("N")[..8];
         try
@@ -324,14 +319,15 @@ public class WindowsProviderTests
             var result = await p.ExecuteAsync("office.addin.set_load_behavior",
                 J($"{{\"app\":\"Outlook\",\"addin_progid\":\"{id}\",\"enabled\":false}}"), default, Context("view-32"));
             Assert.True(result["ok"]!.GetValue<bool>());
-            Assert.Equal("32", result["before"]!["registry_view"]!.GetValue<string>());
+            Assert.True(result["ok"]!.GetValue<bool>());
+            Assert.Equal("shared", result["before"]!["registry_view"]!.GetValue<string>());
             var readback = await p.ExecuteAsync("config.read",
                 J($"{{\"key\":\"HKCU\\\\Software\\\\Microsoft\\\\Office\\\\Outlook\\\\Addins\\\\{id}\",\"value\":\"LoadBehavior\"}}"),
                 default, Context("read-view-32"));
-            Assert.Equal("32", readback["registry_view"]!.GetValue<string>());
+            Assert.Equal("shared", readback["registry_view"]!.GetValue<string>());
             Assert.Equal("2", readback["data"]!.GetValue<string>());
             using var root64 = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Registry64);
-            Assert.Null(root64.OpenSubKey($@"Software\Microsoft\Office\Outlook\Addins\{id}"));
+            Assert.NotNull(root64.OpenSubKey($@"Software\Microsoft\Office\Outlook\Addins\{id}"));
         }
         finally { DeleteAddin(id); }
     }

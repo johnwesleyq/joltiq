@@ -30,7 +30,7 @@
 
 ## Review Focus
 
-- Registry precedence and bitness: HKCU/HKLM, Policies, and 32/64-bit views must identify the effective setting and refuse a user-level write that will not persist. Covered in Task 3.
+- Registry precedence and bitness: the shared HKCU registration, applicable HKLM/Policies views, and Outlook architecture must identify the effective setting and refuse a user-level write that will not persist. Covered in Task 3.
 - Interactive-session ambiguity: locked desktops, no user, console plus RDP, and mismatched enrolled/interactive users must refuse diagnosis/remediation. Covered in Task 3.
 - Lost or duplicate results: a completed registry write followed by network loss must resend its recorded result without executing again. Covered in Task 6.
 - STOP races: stop before dispatch, during a registry write, and during safe restart must prevent subsequent work and report any atomic change that completed. Covered in Tasks 6 and 10.
@@ -161,7 +161,7 @@ git commit -m "feat: bind executable plans to canonical procedures"
 
 - [ ] **Step 1: Write policy and Windows-provider tests**
 
-Add literal fixtures for classic Outlook present/absent, New Outlook present, add-in absent, HKCU 32/64 views, HKLM add-in, HKCU/HKLM Policies overrides, Event ID 1000 matching/nonmatching modules, disabled/unreadable/stale Application logging, locked/no user, enrolled/logged-in user mismatch, and multiple active sessions. The production mutation each test catches is a false `supported=true`, a false clean crash observation, or a wrong effective setting/user.
+Add literal fixtures for classic Outlook present/absent, New Outlook present, add-in absent, the shared HKCU registration, applicable HKLM views, Outlook architecture, HKCU/HKLM Policies overrides, Event ID 1000 matching/nonmatching modules, disabled/unreadable/stale Application logging, locked/no user, enrolled/logged-in user mismatch, and multiple active sessions. The production mutation each test catches is a false `supported=true`, a false clean crash observation, or a wrong effective setting/user.
 
 - [ ] **Step 2: Verify RED on cross-platform policy tests**
 

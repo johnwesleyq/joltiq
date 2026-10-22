@@ -77,7 +77,7 @@ Before building an executable plan, JoltIQ collects fresh, read-only facts from 
 1. Confirm Windows version and 64-bit architecture.
 2. Confirm one unlocked interactive user session and identify that user.
 3. Confirm classic Outlook is installed; explicitly distinguish it from New Outlook.
-4. Confirm the exact published add-in is installed in the relevant 32-bit or 64-bit registry view for the interactive user.
+4. Confirm the exact published add-in is installed in the interactive user's shared HKCU registration and record Outlook's 32-bit or 64-bit architecture separately. On supported Windows versions, `HKCU\\Software` is shared between registry views; machine-level registrations and policy locations are still inspected in their applicable views.
 5. Read the effective add-in setting and determine whether a user-level change can persist or is overridden by HKLM/Group Policy.
 6. Confirm the tray process is running as the enrolled/consenting user whose stable Windows SID owns the Outlook profile.
 7. Confirm the required Windows event log is enabled, readable, current, and capable of supporting the requested lookback/observation window.
