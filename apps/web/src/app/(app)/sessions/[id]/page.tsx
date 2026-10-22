@@ -58,7 +58,7 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
   }
 
   return <div>
-    <PageHead title={`${d.kind[0]!.toUpperCase()}${d.kind.slice(1)} session`} back={d.ticket_id ? { href: staff ? `/console/tickets/${d.ticket_id}` : `/portal/tickets/${d.ticket_id}`, label: "Ticket" } : undefined}>
+    <PageHead title={d.kind === "desktop" ? "Computer help" : "Browser session"} back={d.ticket_id ? { href: staff ? `/console/tickets/${d.ticket_id}` : `/portal/tickets/${d.ticket_id}`, label: "Ticket" } : undefined}>
       <Badge value={d.state} />
       {["active", "awaiting_user_auth", "paused"].includes(d.state) && <button className="btn btn-stop" onClick={() => stop.mutate(undefined)}>Emergency stop</button>}
     </PageHead>
@@ -127,14 +127,17 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
       </div>
     </div>}
 
-    {d.kind === "desktop" && d.state !== "pending_consent" && <div className="panel max-w-[640px] p-5 text-sm">
-      <p>{d.status_message ?? (d.consent?.device_local_consent
-        ? d.request_details?.active_message ?? "The person at the computer accepted the session. Actions run through the companion app, which shows a STOP button."
-        : d.state === "terminated" ? "This session has ended."
-          : d.request_details?.device_wait_message ?? "Waiting for the person at the computer to accept the session in the companion app.")}</p>
-      {d.state !== "terminated" && <button className="btn btn-ghost mt-3" onClick={() => end.mutate(undefined)}>End session</button>}
+    {d.kind === "desktop" && d.state !== "pending_consent" && <div className="space-y-5">
+      <div className="panel flex max-w-4xl flex-wrap items-center gap-3 px-4 py-3 text-sm">
+        <span aria-hidden="true" className={`size-2.5 rounded-full ${d.consent?.device_local_consent ? "bg-verify" : "bg-jolt"}`} />
+        <p className="min-w-0 flex-1">{d.status_message ?? (d.consent?.device_local_consent
+          ? d.request_details?.active_message ?? "The JoltIQ companion is connected and ready."
+          : d.state === "terminated" ? "This session has ended."
+            : d.request_details?.device_wait_message ?? "Waiting for the person at the computer to accept the session in the companion app.")}</p>
+        {d.state !== "terminated" && <button className="btn btn-ghost" onClick={() => end.mutate(undefined)}>End session</button>}
+      </div>
+      <DrivePanel sessionId={id} ready={d.state === "active" && !!d.consent?.device_local_consent} />
     </div>}
-    {d.kind === "desktop" && d.state !== "pending_consent" && <div className="mt-6"><DrivePanel sessionId={id} ready={d.state === "active" && !!d.consent?.device_local_consent} /></div>}
 
     {d.state === "terminated" && <p className="mt-4 text-slate">This session has ended{d.emergency_stopped ? " (emergency stop)" : ""}. {d.ticket_id && <Link className="underline" href={staff ? `/console/tickets/${d.ticket_id}` : `/portal/tickets/${d.ticket_id}`}>Back to the ticket</Link>}</p>}
   </div>;

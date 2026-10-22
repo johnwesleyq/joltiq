@@ -38,3 +38,14 @@ export type Session = {
   status_message?: string | null;
   browser?: { url?: string; title?: string; auth_required?: boolean; auth_kind?: string; blocked_requests?: string[]; error?: string };
 };
+export type ComputerUseMode = "guide" | "fix";
+export type ComputerUseStep = {
+  idx: number; kind: string; params: Record<string, unknown>; narration: string; status: string; error: string | null;
+  has_screen: boolean; at: string | null;
+};
+export type ComputerUseRun = {
+  id: string; goal: string; mode: ComputerUseMode; local_consent_state: "pending" | "approved" | "declined"; state: string;
+  waiting_for: { kind: "approval" | "question" | "secure_input" | "guide_action"; text: string } | null;
+  step_count: number; max_steps: number; summary: string | null; success: boolean | null; live_model: boolean; has_screen: boolean;
+  steps?: ComputerUseStep[]; you_can_answer?: boolean; cost_usd: number;
+};

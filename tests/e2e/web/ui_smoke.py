@@ -261,17 +261,72 @@ with sync_playwright() as p:
     expect(page.get_by_text(portal_message, exact=True)).to_be_visible()
     expect(page.get_by_role("button", name="Allow session")).to_be_visible()
 
+    # An active desktop session offers two explicit control contracts. The mode, current operator, and STOP control
+    # remain visible, and the selected mode is sent to the API rather than inferred from the goal text.
+    control_session = {**session_fixture, "id": "ui-control", "state": "active", "consent": {"device_local_consent": True}}
+    computer_use_posts = []
+
+    page.route(
+        "**/api/v1/sessions/ui-control",
+        lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps(control_session)),
+    )
+
+    def route_computer_use(route):
+        if route.request.method == "GET":
+            route.fulfill(status=200, content_type="application/json", body="[]")
+            return
+        computer_use_posts.append(route.request.post_data_json)
+        route.fulfill(status=201, content_type="application/json", body=json.dumps({
+            "id": "started-run", "goal": route.request.post_data_json["goal"], "mode": route.request.post_data_json["mode"],
+            "state": "waiting_local_consent", "local_consent_state": "pending", "waiting_for": None,
+            "step_count": 0, "max_steps": 60, "summary": None, "success": None, "live_model": True,
+            "has_screen": False, "cost_usd": 0,
+        }))
+
+    page.route("**/api/v1/sessions/ui-control/computer-use", route_computer_use)
+    page.goto(BASE + "/sessions/ui-control")
+    expect(page.get_by_role("heading", name="How should JoltIQ help?")).to_be_visible()
+    expect(page.get_by_text("You make every click", exact=True)).to_be_visible()
+    expect(page.get_by_text("JoltIQ controls the computer", exact=True)).to_be_visible()
+    expect(page.get_by_text("You have control", exact=True)).to_be_visible()
+    expect(page.get_by_role("button", name="Stop JoltIQ")).to_be_visible()
+    shot(page, "06-computer-help")
+
+    page.get_by_label("What should we fix?").fill("Show me how to open Windows Settings")
+    page.get_by_text("Guide me", exact=True).click()
+    expect(page.get_by_role("radio", name=re.compile("Guide me"))).to_be_checked()
+    page.get_by_role("button", name="Start Guide mode").click()
+    page.wait_for_timeout(250)
+    assert len(computer_use_posts) == 1
+    assert computer_use_posts[-1]["mode"] == "guide"
+
+    page.get_by_label("What should we fix?").fill("Open Windows Settings for me")
+    page.get_by_text("Fix it for me", exact=True).click()
+    expect(page.get_by_role("radio", name=re.compile("Fix it for me"))).to_be_checked()
+    page.get_by_role("button", name="Start Fix mode").click()
+    page.wait_for_timeout(250)
+    assert len(computer_use_posts) == 2
+    assert computer_use_posts[-1]["mode"] == "fix"
+
+    page.set_viewport_size({"width": 390, "height": 844})
+    page.goto(BASE + "/sessions/ui-control")
+    expect(page.get_by_text("You have control", exact=True)).to_be_visible()
+    expect(page.get_by_role("button", name="Stop JoltIQ")).to_be_visible()
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    shot(page, "07-computer-help-mobile")
+    page.set_viewport_size({"width": 1360, "height": 900})
+
     # Mobile customer controls stay within the viewport and retain accessible names.
     page.set_viewport_size({"width": 390, "height": 844})
     page.goto(ticket_url)
     expect(page.get_by_text("Part of the fix changed this PC", exact=True)).to_be_visible()
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
-    shot(page, "06-windows-recovery-mobile")
+    shot(page, "08-windows-recovery-mobile")
     page.set_viewport_size({"width": 1360, "height": 900})
 
     page.goto(BASE + "/console")
     expect(page.get_by_text("Outlook crashes").first).to_be_visible()
-    shot(page, "07-queue")
+    shot(page, "09-queue")
 
     # Mobile layout renders
     m = b.new_context(viewport={"width": 390, "height": 844})
@@ -279,7 +334,7 @@ with sync_playwright() as p:
     watch(mp)
     mp.goto(BASE + "/")
     mp.wait_for_timeout(6000)
-    shot(mp, "08-home-mobile")
+    shot(mp, "10-home-mobile")
 
     # Sign out + protected route redirects to login
     page.get_by_role("button", name="Sign out").click()
