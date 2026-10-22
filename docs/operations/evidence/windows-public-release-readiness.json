@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-22T00:00:00Z",
+  "source_commit": "7119800350532eada7eb5b4043744327c7187d39",
+  "public_launch_ready": false,
+  "host_inventory": {
+    "classification": "enrolled physical engineering PC; not disposable acceptance infrastructure",
+    "operating_system": "Microsoft Windows 11 Pro 64-bit",
+    "version": "10.0.26200",
+    "build": "26200",
+    "manufacturer": "Dell Inc.",
+    "model": "Dell Pro Max 16 MC16250",
+    "hypervisor_present": true,
+    "code_signing_private_key_certificates": 0,
+    "signtool_found": false,
+    "hyper_v_management_available": false,
+    "vmware_vmrun_available": false,
+    "windows_sandbox_executable_found": false,
+    "optional_feature_query": "unknown: elevation required for read",
+    "inventory_method": "read-only PowerShell commands observed over the authorized Windows App session"
+  },
+  "gates": {
+    "authenticode_signing": {
+      "status": "blocked",
+      "evidence": [
+        "docs/operations/evidence/windows-task10-build-manifest.json",
+        ".github/workflows/windows-release.yml",
+        "apps/windows-agent/scripts/sign.ps1"
+      ],
+      "blockers": [
+        "No Authenticode code-signing certificate with an accessible private key is installed for the Windows build user.",
+        "Windows SDK signtool.exe was not found on the inspected Windows PC.",
+        "The recorded MSI is unsigned and restricted to internal engineering use."
+      ]
+    },
+    "installer_lifecycle": {
+      "status": "blocked",
+      "evidence": [
+        "apps/windows-agent/scripts/test-on-windows.ps1",
+        ".github/workflows/ci.yml"
+      ],
+      "blockers": [
+        "No named clean snapshot on an authorized disposable Windows VM is available for install, repair, upgrade, downgrade-refusal, and uninstall testing."
+      ]
+    },
+    "windows_acceptance": {
+      "status": "blocked",
+      "evidence": [
+        "docs/operations/windows-general-computer-use-acceptance.md",
+        "docs/operations/windows-outlook-pdf-acceptance.md"
+      ],
+      "blockers": [
+        "No disposable Windows 10 x64 VM and named clean snapshot are registered.",
+        "No disposable Windows 11 x64 VM and named clean snapshot are registered.",
+        "The required licensed Microsoft 365 classic-Outlook disposable-profile case has not been run."
+      ]
+    },
+    "independent_security_review": {
+      "status": "blocked",
+      "evidence": [],
+      "blockers": [
+        "No independent reviewer or penetration-testing firm has delivered a report covering the tested commit and release artifacts."
+      ]
+    }
+  }
+}

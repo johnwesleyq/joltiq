@@ -6,6 +6,8 @@ Last updated: 2026-10-22
 
 **Release blocked pending the disposable-VM behavioral matrix and production signing.**
 
+The consolidated fail-closed public-launch status is recorded in `docs/operations/evidence/windows-public-release-readiness.json` and explained in `docs/operations/windows-public-release-gates.md`.
+
 The native Windows implementation has passed focused and full automated tests on the enrolled physical Windows 11 PC. The general computer-use acceptance catalog, fail-closed bundle validator, secret scanner, STOP evidence contract, and aggregate completeness gate are implemented. These facts do not replace the required Windows 10/11 snapshot-reset runs.
 
 ## Available evidence
@@ -31,6 +33,8 @@ The native Windows implementation has passed focused and full automated tests on
 - Lab procedure: `docs/operations/windows-general-computer-use-acceptance.md`
 - Expected aggregate: `windows-computer-use-acceptance.json` at the lab evidence root
 - Physical Task 10 build-manifest record: `docs/operations/evidence/windows-task10-build-manifest.json`
+- Public-release readiness manifest: `docs/operations/evidence/windows-public-release-readiness.json`
+- Public-release gate procedure: `docs/operations/windows-public-release-gates.md`
 - Original physical-PC artifacts/logs: `C:\Users\admin\j10final\artifacts` (not a release distribution location)
 
 No behavioral bundle or aggregate is linked here yet. Add only validator-approved bundles generated on named, freshly reverted disposable VM snapshots. Do not label the physical-PC test folder as a clean-VM aggregate.
