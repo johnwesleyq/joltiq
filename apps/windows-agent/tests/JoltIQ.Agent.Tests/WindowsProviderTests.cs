@@ -26,8 +26,12 @@ public class WindowsProviderTests
         public bool RefuseAppliedMarker { get; set; }
         public bool MarkRunning(ActionExecutionContext context, string action) => _commands.MarkRunning(context, action);
         public bool TryGetCommand(string commandId, out CommandJournalEntry record) => _commands.TryGetCommand(commandId, out record);
-        public bool MarkCompleted(string commandId, string status, JsonObject result) => _commands.MarkCompleted(commandId, status, result);
+        public bool MarkCompleted(string commandId, string status, JsonObject result, CommandEvidence? evidence = null) =>
+            _commands.MarkCompleted(commandId, status, result, evidence);
         public IReadOnlyList<PendingCommandReport> PendingReports() => _commands.PendingReports();
+        public bool TryLoadEvidence(string commandId, out CommandEvidence? evidence, out string? error) =>
+            _commands.TryLoadEvidence(commandId, out evidence, out error);
+        public bool MarkEvidenceUnavailable(string commandId, string reason) => _commands.MarkEvidenceUnavailable(commandId, reason);
         public bool AcknowledgeReport(string commandId) => _commands.AcknowledgeReport(commandId);
         public bool TrySaveMutation(MutationRecord record)
         {

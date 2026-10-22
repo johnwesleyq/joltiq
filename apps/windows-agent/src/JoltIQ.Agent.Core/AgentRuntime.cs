@@ -11,8 +11,16 @@ namespace JoltIQ.Agent.Core;
 public interface IActionProvider
 {
     IReadOnlyCollection<string> Capabilities { get; }
-    Task<JsonObject> ExecuteAsync(string action, JsonElement parameters, CancellationToken ct, ActionExecutionContext? context = null);
+    Task<ActionResult> ExecuteAsync(string action, JsonElement parameters, CancellationToken ct, ActionExecutionContext? context = null);
     IDictionary<string, string> Facts();
+}
+
+public sealed record ActionResult(
+    JsonObject Data,
+    byte[]? Screenshot = null,
+    string? ScreenshotMediaType = null)
+{
+    public JsonNode? this[string propertyName] => Data[propertyName];
 }
 
 /// <summary>User-facing UI (Windows: tray + consent dialog + always-on-top session banner).</summary>
@@ -248,16 +256,20 @@ public sealed class AgentRuntime
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, s!.Cancel.Token);
         linked.CancelAfter(TimeSpan.FromSeconds(90));
         JsonObject result;
+        CommandEvidence? evidence = null;
         string status;
         try
         {
-            Task<JsonObject> execution;
+            Task<ActionResult> execution;
             lock (s.DispatchGate)
             {
                 linked.Token.ThrowIfCancellationRequested();
                 execution = _provider.ExecuteAsync(action, p, linked.Token, executionContext);
             }
-            result = await execution;
+            var actionResult = await execution;
+            result = actionResult.Data;
+            if (actionResult.Screenshot is not null)
+                evidence = new CommandEvidence(actionResult.ScreenshotMediaType ?? "", actionResult.Screenshot);
             result["ok"] ??= true;
             status = result["ok"]!.GetValue<bool>() ? "done" : "failed";
             _ui.ActionPerformed(s.SessionId, Describe(action, p));
@@ -272,18 +284,31 @@ public sealed class AgentRuntime
             result = new JsonObject { ["ok"] = false, ["error"] = Redactor.Redact(e.Message) };
             status = "failed";
         }
-        await CompleteAndReportAsync(cid, status, result, ct);
+        await CompleteAndReportAsync(cid, status, result, ct, evidence);
     }
 
-    private async Task CompleteAndReportAsync(string cid, string status, JsonObject result, CancellationToken ct)
+    private async Task CompleteAndReportAsync(
+        string cid,
+        string status,
+        JsonObject result,
+        CancellationToken ct,
+        CommandEvidence? evidence = null)
     {
         var redacted = Redactor.RedactNode(result)!.AsObject();
-        if (!_journal.MarkCompleted(cid, status, redacted))
+        if (!_journal.MarkCompleted(cid, status, redacted, evidence))
         {
             L("critical", $"command {cid} completed but its result could not be persisted; no success was reported");
+            StopSessionForCommand(cid, "result evidence could not be saved safely");
             return;
         }
-        await SendReportAsync(new PendingCommandReport(cid, status, redacted, DateTimeOffset.UtcNow), ct);
+        if (!_journal.TryGetCommand(cid, out var completed) || completed.CompletedAt is null) return;
+        await SendReportAsync(new PendingCommandReport(
+            cid,
+            completed.SessionId,
+            status,
+            redacted,
+            completed.CompletedAt.Value,
+            completed.Evidence), ct);
     }
 
     private async Task FlushPendingReportsAsync(CancellationToken ct)
@@ -294,14 +319,42 @@ public sealed class AgentRuntime
     private async Task SendCachedReportAsync(CommandJournalEntry entry, CancellationToken ct)
     {
         if (entry.Status is null || entry.Result is null || entry.CompletedAt is null) return;
-        await SendReportAsync(new PendingCommandReport(entry.CommandId, entry.Status, entry.Result, entry.CompletedAt.Value), ct);
+        await SendReportAsync(new PendingCommandReport(
+            entry.CommandId,
+            entry.SessionId,
+            entry.Status,
+            entry.Result,
+            entry.CompletedAt.Value,
+            entry.Evidence), ct);
     }
 
     private async Task SendReportAsync(PendingCommandReport report, CancellationToken ct)
     {
+        if (report.Evidence is not null)
+        {
+            if (!_journal.TryLoadEvidence(report.CommandId, out var evidence, out var error) || evidence is null)
+            {
+                var why = error ?? "protected evidence was unavailable";
+                L("critical", $"command {report.CommandId} evidence failed validation; reporting an unknown outcome");
+                StopSessionForCommand(report.CommandId, "post-action evidence was unavailable or corrupt");
+                if (!_journal.MarkEvidenceUnavailable(report.CommandId, why)) return;
+                var failed = _journal.PendingReports().SingleOrDefault(x => x.CommandId == report.CommandId);
+                if (failed is null) return;
+                await SendReportAsync(failed, ct);
+                return;
+            }
+            await _client.SendCommandScreenshotAsync(report.CommandId, evidence.Bytes, evidence.MediaType, ct);
+        }
         await _client.SendCommandResultAsync(report, ct);
         if (!_journal.AcknowledgeReport(report.CommandId))
             L("warn", $"server accepted command {report.CommandId}, but local acknowledgement was not saved; it will be retried safely");
+    }
+
+    private void StopSessionForCommand(string commandId, string reason)
+    {
+        if (_journal.TryGetCommand(commandId, out var entry) &&
+            _sessions.TryGetValue(entry.SessionId, out var session))
+            EndLocal(session, reason);
     }
 
     private static bool Matches(CommandJournalEntry entry, JsonElement envelope, string? sessionId)

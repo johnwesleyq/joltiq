@@ -7,6 +7,7 @@ namespace JoltIQ.Agent.Windows;
 /// <summary>
 /// Production per-user command journal. The complete serialized journal, including mutation pre-state and pending
 /// reports, is encrypted by Windows DPAPI and can be opened only by the logged-in tray user's Windows account.
+/// Screenshot evidence uses separate command-derived store names through the same CurrentUser DPAPI key store.
 /// </summary>
 public sealed class DpapiCommandJournal : PersistentCommandJournal
 {

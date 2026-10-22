@@ -64,7 +64,7 @@ sealed class SimulatedOs(bool brokenService) : IActionProvider
 
     public IDictionary<string, string> Facts() => new Dictionary<string, string> { ["simulated"] = "true", ["os"] = "Windows 11 23H2 (simulated)" };
 
-    public Task<JsonObject> ExecuteAsync(string action, JsonElement p, CancellationToken ct, ActionExecutionContext? context = null)
+    public Task<ActionResult> ExecuteAsync(string action, JsonElement p, CancellationToken ct, ActionExecutionContext? context = null)
     {
         Executed.Add(action);
         string S(string k) => p.GetProperty(k).GetString()!;
@@ -88,7 +88,7 @@ sealed class SimulatedOs(bool brokenService) : IActionProvider
             _ => new() { ["ok"] = false, ["error"] = "unsupported" },
         };
         if (action == "app.restart") _outlookResponding = _addins.GetValueOrDefault("PdfPreview.Connect") != 3;
-        return Task.FromResult(r);
+        return Task.FromResult(new ActionResult(r));
     }
 
     private JsonObject Restart(string name)

@@ -72,16 +72,40 @@ public sealed class AgentClient : IDisposable
 
     public async Task<JsonNode?> SendAsync(HttpMethod method, string relPath, object? payload = null, CancellationToken ct = default)
     {
+        var body = payload is null ? Array.Empty<byte>() : JsonSerializer.SerializeToUtf8Bytes(payload);
+        return await SendSignedAsync(method, relPath, body, payload is null ? null : "application/json", ct);
+    }
+
+    public Task<JsonNode?> SendCommandScreenshotAsync(
+        string commandId,
+        byte[] bytes,
+        string mediaType,
+        CancellationToken ct = default)
+    {
+        if (mediaType is not ("image/png" or "image/jpeg"))
+            throw new ArgumentException("Screenshot media type must be image/png or image/jpeg", nameof(mediaType));
+        if (bytes.Length == 0 || bytes.Length > 4 * 1024 * 1024)
+            throw new ArgumentException("Screenshot must contain 1 byte to 4 MiB", nameof(bytes));
+        return SendSignedAsync(HttpMethod.Post, $"/commands/{commandId}/screenshot", bytes, mediaType, ct);
+    }
+
+    private async Task<JsonNode?> SendSignedAsync(
+        HttpMethod method,
+        string relPath,
+        byte[] body,
+        string? mediaType,
+        CancellationToken ct)
+    {
         if (!Enrolled) throw new InvalidOperationException("not enrolled");
         var path = ApiPrefix + relPath;
-        var body = payload is null ? Array.Empty<byte>() : JsonSerializer.SerializeToUtf8Bytes(payload);
         string ctr;
         lock (_ctrLock) { State.Counter++; ctr = State.Counter.ToString(); Persist(); }
         var ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
         var nonce = RequestSigning.NewNonce();
         var sig = _key!.Sign(RequestSigning.StringToSign(method.Method, path, ts, nonce, ctr, body));
         using var req = new HttpRequestMessage(method, State.ServerUrl + path);
-        if (payload is not null) req.Content = new ByteArrayContent(body) { Headers = { ContentType = new MediaTypeHeaderValue("application/json") } };
+        if (mediaType is not null)
+            req.Content = new ByteArrayContent(body) { Headers = { ContentType = new MediaTypeHeaderValue(mediaType) } };
         req.Headers.Add("X-JQ-Device", State.DeviceId);
         req.Headers.Add("X-JQ-Timestamp", ts);
         req.Headers.Add("X-JQ-Nonce", nonce);

@@ -3,6 +3,7 @@ using System.Diagnostics.Eventing.Reader;
 using System.IO;
 using System.IO.Pipes;
 using System.Net.NetworkInformation;
+using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.ServiceProcess;
 using System.Text;
@@ -19,6 +20,20 @@ namespace JoltIQ.Agent.Windows;
 [SupportedOSPlatform("windows10.0.19041.0")]
 public sealed class WindowsActionProvider : IActionProvider
 {
+    private const uint WmNull = 0x0000;
+    private const uint SmtoBlock = 0x0001;
+    private const uint SmtoAbortIfHung = 0x0002;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SendMessageTimeout(
+        IntPtr window,
+        uint message,
+        UIntPtr wParam,
+        IntPtr lParam,
+        uint flags,
+        uint timeoutMilliseconds,
+        out UIntPtr result);
+
     public const string BrokerPipe = "JoltIQ.Agent.Broker.v1";
     private readonly string? _enrolledUserSid;
     private readonly OfficeAddinManager _addins;
@@ -55,12 +70,12 @@ public sealed class WindowsActionProvider : IActionProvider
         ["build"] = Registry.GetValue(@"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion", "DisplayVersion", "")?.ToString() ?? "",
     };
 
-    public async Task<JsonObject> ExecuteAsync(string action, JsonElement p, CancellationToken ct, ActionExecutionContext? context = null)
+    public async Task<ActionResult> ExecuteAsync(string action, JsonElement p, CancellationToken ct, ActionExecutionContext? context = null)
     {
         string S(string k) => p.GetProperty(k).GetString()!;
         string? O(string k) => p.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
         int I(string k, int d) => p.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : d;
-        return action switch
+        var data = action switch
         {
             "system.info" => SystemInfo(),
             "process.list" => Processes(O("name_filter")),
@@ -83,6 +98,7 @@ public sealed class WindowsActionProvider : IActionProvider
             "ui.set_text" => UiSetText(S("process"), S("automation_id"), S("text")),
             _ => new JsonObject { ["ok"] = false, ["error"] = "unsupported" },
         };
+        return new ActionResult(data);
     }
 
     private static JsonObject SystemInfo()
@@ -278,7 +294,19 @@ public sealed class WindowsActionProvider : IActionProvider
         {
             return processes.Any(process =>
             {
-                try { return process.MainWindowHandle != IntPtr.Zero && process.Responding; }
+                try
+                {
+                    var window = process.MainWindowHandle;
+                    if (window == IntPtr.Zero || !process.Responding) return false;
+                    return SendMessageTimeout(
+                        window,
+                        WmNull,
+                        UIntPtr.Zero,
+                        IntPtr.Zero,
+                        SmtoBlock | SmtoAbortIfHung,
+                        250,
+                        out _) != IntPtr.Zero;
+                }
                 catch (InvalidOperationException) { return false; }
             });
         }

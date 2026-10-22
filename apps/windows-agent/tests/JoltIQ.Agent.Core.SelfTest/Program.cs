@@ -133,6 +133,72 @@ T("command journal prevents duplicate execution and acknowledges the durable out
     Assert(journal.PendingReports().Count == 0, "acknowledged report remained pending");
 });
 
+T("command journal protects screenshot evidence across restart and deletes it after acknowledgement", () =>
+{
+    var store = new MemoryKeyStore();
+    var first = new PersistentCommandJournal(store);
+    var context = new ActionExecutionContext("cmd-screen", "device-1", "session-1", "user-1", "procedure-1");
+    var screenshot = new byte[] { 137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4 };
+    Assert(first.MarkRunning(context, "screen.capture"));
+    Assert(first.MarkCompleted(
+        "cmd-screen",
+        "done",
+        JsonNode.Parse("{\"ok\":true}")!.AsObject(),
+        new CommandEvidence("image/png", screenshot)), "evidence completion was not persisted");
+
+    var restarted = new PersistentCommandJournal(store);
+    var report = restarted.PendingReports().Single();
+    Assert(report.Evidence is not null, "evidence metadata was lost on restart");
+    Assert(restarted.TryLoadEvidence(report.CommandId, out var loaded, out var error), error ?? "evidence could not be loaded");
+    Assert(loaded is not null && loaded.MediaType == "image/png" && loaded.Bytes.SequenceEqual(screenshot), "evidence changed on disk");
+    var evidenceName = report.Evidence!.StoreName;
+    Assert(store.Load(evidenceName) is not null, "evidence was not retained before server acknowledgement");
+    Assert(restarted.AcknowledgeReport(report.CommandId), "acknowledgement failed");
+    Assert(store.Load(evidenceName) is null, "acknowledged evidence remained on disk");
+});
+
+T("missing or corrupt screenshot evidence is downgraded to an unknown failed outcome", () =>
+{
+    var store = new MemoryKeyStore();
+    var journal = new PersistentCommandJournal(store);
+    var context = new ActionExecutionContext("cmd-corrupt", "device-1", "session-1", "user-1", "procedure-1");
+    Assert(journal.MarkRunning(context, "input.click"));
+    Assert(journal.MarkCompleted(
+        "cmd-corrupt",
+        "done",
+        JsonNode.Parse("{\"ok\":true}")!.AsObject(),
+        new CommandEvidence("image/png", new byte[] { 1, 2, 3, 4 })));
+    var evidenceName = journal.PendingReports().Single().Evidence!.StoreName;
+    store.Save(evidenceName, new byte[] { 9, 9, 9 });
+
+    Assert(!journal.TryLoadEvidence("cmd-corrupt", out _, out var error) && error is not null, "corruption was accepted");
+    Assert(journal.MarkEvidenceUnavailable("cmd-corrupt", error!), "corrupt evidence was not failed closed");
+    var failed = journal.PendingReports().Single();
+    Assert(failed.Status == "failed" && failed.Evidence is null, "corrupt evidence retained a success report");
+    Assert(failed.Result["outcome"]?.GetValue<string>() == "unknown", "uncertain outcome was hidden");
+});
+
+T("malformed screenshot hash metadata fails closed without crashing reconciliation", () =>
+{
+    var store = new MemoryKeyStore();
+    var journal = new PersistentCommandJournal(store);
+    var context = new ActionExecutionContext("cmd-bad-hash", "device-1", "session-1", "user-1", "procedure-1");
+    Assert(journal.MarkRunning(context, "input.click"));
+    Assert(journal.MarkCompleted(
+        "cmd-bad-hash",
+        "done",
+        JsonNode.Parse("{\"ok\":true}")!.AsObject(),
+        new CommandEvidence("image/png", new byte[] { 1, 2, 3, 4 })));
+
+    var document = JsonNode.Parse(store.Load("command-journal.v1.json")!)!.AsObject();
+    document["Commands"]!["cmd-bad-hash"]!["Evidence"]!["Sha256"] = "not-hex";
+    store.Save("command-journal.v1.json", Encoding.UTF8.GetBytes(document.ToJsonString()));
+    var restarted = new PersistentCommandJournal(store);
+
+    Assert(!restarted.TryLoadEvidence("cmd-bad-hash", out _, out var error) && error is not null,
+        "malformed evidence metadata was accepted");
+});
+
 T("persistent journal survives restart with result and exact typed rollback state", () =>
 {
     var dir = Path.Combine(Path.GetTempPath(), "joltiq-journal-" + Guid.NewGuid().ToString("N"));
@@ -212,6 +278,38 @@ await TA("runtime sends the durable outbox before polling and never re-executes 
     Assert(harness.Paths.Count >= 2 && harness.Paths[0].EndsWith("/commands/command-1/result") && harness.Paths[1].EndsWith("/poll"),
         "pending result did not flush before polling for new work");
     Assert(harness.AcceptedResults.Count == 2, "completed duplicate did not resend its cached result");
+    Assert(!harness.Paths.Any(x => x.EndsWith("/screenshot")), "JSON-only action uploaded screenshot evidence");
+});
+
+await TA("runtime uploads screenshot before result and restart resumes without repeating native input", async () =>
+{
+    var store = new MemoryKeyStore();
+    var provider = new CountingProvider { Screenshot = new byte[] { 137, 80, 78, 71, 5, 4, 3, 2, 1 } };
+    using (var first = new RuntimeHarness())
+    {
+        var runtime = new AgentRuntime(first.Client, provider, new AcceptingUi(), new PersistentCommandJournal(store));
+        first.EnqueuePoll(
+            first.SessionBegin("screen-session"),
+            first.Action("screen-command", "screen-session", "system.info", new JsonObject()));
+        first.FailNextScreenshot = true;
+        try { await runtime.PollOnceAsync(default); throw new Exception("screenshot upload failure was not surfaced"); }
+        catch (AgentProtocolException) { }
+        Assert(provider.CallCount == 1, "native action did not execute exactly once");
+        Assert(!first.Paths.Any(x => x.EndsWith("/result")), "result was sent before screenshot evidence succeeded");
+    }
+
+    using (var restarted = new RuntimeHarness())
+    {
+        var shouldNotRun = new CountingProvider();
+        var runtime = new AgentRuntime(restarted.Client, shouldNotRun, new AcceptingUi(), new PersistentCommandJournal(store));
+        restarted.EnqueuePoll();
+        await runtime.PollOnceAsync(default);
+        Assert(shouldNotRun.CallCount == 0, "restart repeated an already journaled action");
+        var evidenceAt = restarted.Paths.FindIndex(x => x.EndsWith("/screenshot"));
+        var resultAt = restarted.Paths.FindIndex(x => x.EndsWith("/result"));
+        Assert(evidenceAt >= 0 && resultAt > evidenceAt, "result was not ordered after screenshot upload");
+        Assert(restarted.AcceptedScreenshots.Single().SequenceEqual(provider.Screenshot!), "uploaded screenshot bytes changed");
+    }
 });
 
 await TA("runtime refuses a duplicate command id whose signed parameters changed", async () =>
@@ -322,8 +420,10 @@ sealed class ProtocolHandler : HttpMessageHandler
 {
     private readonly Queue<JsonArray> _polls = new();
     public bool FailNextResult { get; set; }
+    public bool FailNextScreenshot { get; set; }
     public List<string> Paths { get; } = new();
     public List<JsonObject> AcceptedResults { get; } = new();
+    public List<byte[]> AcceptedScreenshots { get; } = new();
 
     public void Enqueue(params JsonObject[] envelopes)
     {
@@ -351,6 +451,18 @@ sealed class ProtocolHandler : HttpMessageHandler
             AcceptedResults.Add(body);
             return Json(new JsonObject { ["ok"] = true });
         }
+        if (path.Contains("/commands/") && path.EndsWith("/screenshot"))
+        {
+            if (FailNextScreenshot)
+            {
+                FailNextScreenshot = false;
+                return new HttpResponseMessage(System.Net.HttpStatusCode.ServiceUnavailable) { Content = new StringContent("offline") };
+            }
+            if (request.Content?.Headers.ContentType?.MediaType != "image/png")
+                throw new InvalidOperationException("screenshot content type changed");
+            AcceptedScreenshots.Add(await request.Content!.ReadAsByteArrayAsync(cancellationToken));
+            return Json(new JsonObject { ["ok"] = true, ["stored"] = true });
+        }
         return Json(new JsonObject { ["ok"] = true });
     }
 
@@ -366,8 +478,10 @@ sealed class RuntimeHarness : IDisposable
     private readonly ProtocolHandler _handler = new();
     public AgentClient Client { get; }
     public bool FailNextResult { set => _handler.FailNextResult = value; }
+    public bool FailNextScreenshot { set => _handler.FailNextScreenshot = value; }
     public List<string> Paths => _handler.Paths;
     public List<JsonObject> AcceptedResults => _handler.AcceptedResults;
+    public List<byte[]> AcceptedScreenshots => _handler.AcceptedScreenshots;
 
     public RuntimeHarness()
     {
@@ -425,12 +539,13 @@ sealed class CountingProvider : IActionProvider
     public bool WaitForRelease { get; init; }
     public bool WaitForCancellation { get; init; }
     public bool CancellationObserved { get; private set; }
+    public byte[]? Screenshot { get; init; }
     public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public IReadOnlyCollection<string> Capabilities { get; } = new[] { "system.info" };
     public IDictionary<string, string> Facts() => new Dictionary<string, string>();
 
-    public async Task<JsonObject> ExecuteAsync(string action, JsonElement parameters, CancellationToken ct, ActionExecutionContext? context = null)
+    public async Task<ActionResult> ExecuteAsync(string action, JsonElement parameters, CancellationToken ct, ActionExecutionContext? context = null)
     {
         CallCount++;
         Entered.TrySetResult();
@@ -440,7 +555,10 @@ sealed class CountingProvider : IActionProvider
             try { await Task.Delay(Timeout.InfiniteTimeSpan, ct); }
             catch (OperationCanceledException) { CancellationObserved = true; throw; }
         }
-        return new JsonObject { ["ok"] = true, ["calls"] = CallCount };
+        return new ActionResult(
+            new JsonObject { ["ok"] = true, ["calls"] = CallCount },
+            Screenshot,
+            Screenshot is null ? null : "image/png");
     }
 }
 
