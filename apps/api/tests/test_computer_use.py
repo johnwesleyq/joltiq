@@ -11,7 +11,10 @@ import pytest
 from test_device_protocol import FakeDevice, _code
 
 pytestmark = pytest.mark.mocked
-CU_CAPS = ("system.info", "screen.capture", "input.click", "input.type", "input.key", "input.scroll", "input.move", "url.open")
+CU_CAPS = (
+    "system.info", "screen.capture", "input.click", "input.type", "input.key", "input.scroll", "input.move", "url.open",
+    "guide.highlight", "guide.clear",
+)
 
 
 def png(w=64, h=40) -> bytes:
@@ -216,6 +219,97 @@ def test_device_guide_response_requires_exactly_one_declared_choice(app, owner):
         f"/computer-use/{rid}/respond",
         {"done": True, "switch_to_fix": True},
     ).status_code == 400
+
+
+def test_guide_translates_input_and_refreshes_after_idempotent_done(app, owner):
+    d, sid = _setup(app, owner)
+    rid = owner.post(
+        f"/api/v1/sessions/{sid}/computer-use",
+        json={"goal": "Show me how to type a note in Notepad", "mode": "guide"},
+    ).json()["id"]
+    log: list = []
+    run = _pump(d, owner, rid, log)
+
+    assert run["state"] == "waiting_customer"
+    assert run["waiting_for"]["kind"] == "guide_action"
+    assert [action for action, _ in log] == ["screen.capture", "guide.highlight"]
+    assert not [action for action, _ in log if action.startswith("input.")]
+
+    completed = d.post(f"/computer-use/{rid}/respond", {"done": True})
+    assert completed.status_code == 200, completed.text
+    replay = d.post(f"/computer-use/{rid}/respond", {"done": True})
+    assert replay.status_code == 200, replay.text
+
+    run = _pump(d, owner, rid, log)
+    assert run["state"] == "waiting_customer"
+    assert [action for action, _ in log] == [
+        "screen.capture", "guide.highlight", "guide.clear", "screen.capture", "guide.highlight",
+    ]
+    assert not [action for action, _ in log if action.startswith("input.")]
+
+
+def test_switch_from_guide_creates_unapproved_fix_run(app, owner):
+    d, sid = _setup(app, owner)
+    guide_id = owner.post(
+        f"/api/v1/sessions/{sid}/computer-use",
+        json={"goal": "Show me how to type a note in Notepad", "mode": "guide"},
+    ).json()["id"]
+    log: list = []
+    guide = _pump(d, owner, guide_id, log)
+    assert guide["state"] == "waiting_customer"
+
+    switched = d.post(f"/computer-use/{guide_id}/respond", {"switch_to_fix": True})
+    assert switched.status_code == 200, switched.text
+    fix = switched.json()
+    assert fix["id"] != guide_id
+    assert fix["mode"] == "fix"
+    assert fix["state"] == "pending_approval"
+    assert fix["local_consent_state"] == "pending"
+    assert owner.get(f"/api/v1/computer-use/{guide_id}").json()["state"] == "stopped"
+
+    before_approval = d.envelopes()
+    assert any(e["type"] == "computer_use.end" and e["computer_use_run_id"] == guide_id for e in before_approval)
+    assert not any(e["type"] == "computer_use.begin" and e["computer_use_run_id"] == fix["id"] for e in before_approval)
+    assert not any(e["type"] == "action" and e.get("computer_use_run_id") == fix["id"] for e in before_approval)
+
+    approved = owner.post(f"/api/v1/computer-use/{fix['id']}/approve", json={"approved": True})
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["state"] == "waiting_local_consent"
+    assert not any(e["type"] == "action" and e.get("computer_use_run_id") == fix["id"] for e in d.envelopes())
+    assert d.post(f"/computer-use/{fix['id']}/local-consent", {"accepted": True}).status_code == 200
+    action = next(e for e in d.envelopes() if e["type"] == "action" and e.get("computer_use_run_id") == fix["id"])
+    assert action["action"] == "screen.capture"
+
+
+def test_stale_guide_highlight_is_recorded_as_blocked_and_never_becomes_input(app, owner):
+    d, sid = _setup(app, owner)
+    rid = owner.post(
+        f"/api/v1/sessions/{sid}/computer-use",
+        json={"goal": "Show me how to type a note in Notepad", "mode": "guide"},
+    ).json()["id"]
+    assert d.post(f"/computer-use/{rid}/local-consent", {"accepted": True}).status_code == 200
+
+    capture = next(e for e in d.envelopes() if e["type"] == "action")
+    assert capture["action"] == "screen.capture"
+    assert d.post(f"/commands/{capture['command_id']}/screenshot", raw=png(), ctype="image/png").status_code == 200
+    assert d.post(f"/commands/{capture['command_id']}/result", {"status": "done", "result": {
+        "ok": True, "width": 1280, "height": 800, "frame_generation": 17, "layout_hash": "a" * 64,
+    }}).status_code == 200
+    drain()
+
+    highlight = next(e for e in d.envelopes() if e["type"] == "action")
+    assert highlight["action"] == "guide.highlight"
+    assert highlight["params"]["frame_generation"] == 17
+    assert d.post(f"/commands/{highlight['command_id']}/result", {
+        "status": "rejected", "result": {"ok": False, "error": "stale frame or display layout"},
+    }).status_code == 200
+    drain()
+
+    run = owner.get(f"/api/v1/computer-use/{rid}").json()
+    refused = next(step for step in run["steps"] if step["kind"] == "left_click")
+    assert refused["status"] == "blocked"
+    assert "stale frame" in refused["error"]
+    assert not any(e["type"] == "action" and e["action"].startswith("input.") for e in d.envelopes())
 
 
 def test_full_run_with_approval_pause_and_screens(app, owner):

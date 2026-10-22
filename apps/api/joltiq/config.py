@@ -72,6 +72,7 @@ class Settings(BaseSettings):
 
     rate_limit_login_per_minute: int = 10
     rate_limit_register_per_hour: int = 10
+    rate_limit_device_enroll_per_hour: int = 20
     otel_exporter_endpoint: str | None = None
 
     allowed_research_domains: list[str] = Field(

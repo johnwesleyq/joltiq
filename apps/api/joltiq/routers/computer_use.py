@@ -9,7 +9,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from ..core.errors import Conflict, Forbidden, NotFound
+from ..core.errors import AppError, Conflict, Forbidden, NotFound
 from ..deps import Ctx, get_ctx
 from ..models import ComputerUseRun, ComputerUseStep
 from ..services import computer_use as svc
@@ -93,6 +93,7 @@ class RespondIn(BaseModel):
     approved: bool | None = None
     answer: str | None = Field(default=None, max_length=1000)
     done: bool = False
+    switch_to_fix: bool = False
 
 
 @router.post("/computer-use/{rid}/respond")
@@ -100,8 +101,14 @@ def respond(rid: uuid.UUID, body: RespondIn, ctx: Ctx = Depends(get_ctx)):
     run = run_for(ctx, rid)
     if not _is_customer_side(ctx, run):
         raise Forbidden("Only the person whose computer this is can answer")
-    svc.respond(ctx.db, run, user_id=ctx.p.user_id, approved=body.approved, answer=body.answer, done=body.done)
-    return svc.ser(run)
+    choices = int(body.approved is not None) + int(bool(body.answer)) + int(body.done) + int(body.switch_to_fix)
+    if choices != 1:
+        raise AppError("Provide exactly one response", code="validation_error")
+    answered = svc.respond(
+        ctx.db, run, user_id=ctx.p.user_id, approved=body.approved, answer=body.answer, done=body.done,
+        switch_to_fix=body.switch_to_fix,
+    )
+    return svc.ser(answered)
 
 
 @router.post("/computer-use/{rid}/stop")

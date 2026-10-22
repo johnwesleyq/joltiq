@@ -15,6 +15,7 @@ os.environ.setdefault("JOLTIQ_MIGRATION_DATABASE_URL", "postgresql+psycopg://pos
 os.environ.setdefault("JOLTIQ_LOCAL_STORAGE_DIR", "/tmp/joltiq-test-storage")
 os.environ.setdefault("JOLTIQ_SMTP_PORT", "2525")
 os.environ.setdefault("JOLTIQ_RATE_LIMIT_REGISTER_PER_HOUR", "100000")
+os.environ.setdefault("JOLTIQ_RATE_LIMIT_DEVICE_ENROLL_PER_HOUR", "100000")
 os.environ.setdefault("JOLTIQ_BROWSER_WORKER_URL", "http://127.0.0.1:8199")
 os.environ.setdefault("JOLTIQ_BROWSER_WORKER_TOKEN", "test-worker-token")
 os.environ.setdefault("JOLTIQ_RESEARCH_FIXTURE_BASE_URL", "http://127.0.0.1:8399/docs")

@@ -300,20 +300,49 @@ def respond(db: Session, run: ComputerUseRun, *, user_id, approved: bool | None 
             switch_to_fix: bool = False, via: str = "portal") -> ComputerUseRun:
     """The customer answered a pause: approval decision, question answer, or 'I finished typing the secret'."""
     if run.state != "waiting_customer" or not run.waiting_for:
+        # The companion may retry after losing the HTTP response. A repeated, identical Guide completion
+        # acknowledges the in-flight clear/capture chain; it must not queue that chain twice.
+        pending = run.waiting_for or {}
+        if via == "device" and done and not switch_to_fix and pending.get("guide_response") == "done":
+            return run
         raise Conflict("Nothing is waiting for an answer", code="invalid_state")
     w = run.waiting_for
     if w["kind"] == "guide_action":
         if run.mode != "guide" or done == switch_to_fix:
             raise AppError("Choose I did it or Switch to Fix", code="validation_error")
+        st = db.get(ComputerUseStep, uuid.UUID(w["step_id"])) if w.get("step_id") else None
         if switch_to_fix:
-            # A Guide grant can never be widened. Request a new, exact Fix grant from the PC.
-            run.mode = "fix"
-            run.local_consent_state = "pending"
-            run.waiting_for = None
-            _request_local_consent(db, run, user_id)
-            _event(db, run, "mode_change_requested", {"mode": "fix"})
-            return run
+            # A Guide grant can never be widened or reused. End it, then create a distinct Fix run that
+            # waits for both a fresh portal approval and a fresh native consent decision.
+            if st:
+                st.status, st.error = "blocked", "Customer requested a new Fix run instead of completing this Guide step."
+            goal, max_steps, session_id = run.goal, run.max_steps, run.session_id
+            _end(db, run, "stopped", "Guide mode ended because the customer requested Fix it for me.", False)
+            s = db.get(SupportSession, session_id)
+            assert s is not None
+            replacement = start(db, s, goal=goal, user_id=user_id, approved_by_customer=False, max_steps=max_steps, mode="fix")
+            audit.record(
+                db, org_id=run.org_id, actor_kind="user", actor_id=user_id, action="computer_use.mode_switch_requested",
+                resource_type="computer_use_run", resource_id=run.id,
+                data={"from": "guide", "to": "fix", "replacement_run_id": str(replacement.id), "via": via},
+            )
+            _event(db, replacement, "mode_change_requested", {"from_run_id": str(run.id), "mode": "fix"})
+            return replacement
+
         text = "The customer completed the highlighted step. Capture the screen and verify it before continuing."
+        if st:
+            st.status = "done"
+            st.params = {**st.params, "response": text[:300], "via": via}
+        audit.record(
+            db, org_id=run.org_id, actor_kind="user", actor_id=user_id, action="computer_use.guide_action_answered",
+            resource_type="computer_use_run", resource_id=run.id, data={"via": via, "choice": "done"},
+        )
+        run.waiting_for, run.state = None, "running"
+        _event(db, run, "customer_responded", {"kind": "guide_action", "approved": None})
+        _dispatch(db, run, w["tool_use_id"], "guide.clear", {}, "Removing the completed highlight.", kind="guide.clear")
+        if run.waiting_for:
+            run.waiting_for = {**run.waiting_for, "computer": True, "guide_response": "done"}
+        return run
     elif w["kind"] == "approval":
         if approved is None:
             raise AppError("approved is required", code="validation_error")
@@ -439,8 +468,14 @@ def on_device_result(db: Session, cmd: DeviceCommand) -> bool:
         }
         _event(db, run, "customer_needed", {"kind": "guide_action"})
         return True
+    elif cmd.action == "guide.clear" and ok and w.get("guide_response") == "done":
+        _dispatch(db, run, tid, "screen.capture", {"max_long_edge": 1280}, "Checking your completed step.", kind="screen.capture")
+        if run.waiting_for:
+            run.waiting_for = {**run.waiting_for, "computer": True, "guide_completed": True}
+        return True
     else:
-        note = "OK" if ok else f"Error: {st.error if st else cmd.status}"
+        note = ("The customer completed the highlighted step." if ok and w.get("guide_completed") else
+                "OK" if ok else f"Error: {st.error if st else cmd.status}")
         if res.get("text"):
             note += f" — {str(res['text'])[:300]}"
         run.results = [*run.results, _result(tid, note, key, is_error=not ok, computer=w.get("computer", True))]
@@ -632,13 +667,23 @@ def _execute(db: Session, run: ComputerUseRun, tu: dict) -> None:
             if run.mode == "guide" and action.startswith("input.") and action not in ("input.wait", "input.cursor"):
                 display = run.display or {}
                 frame_width, frame_height = int(display.get("width") or 1280), int(display.get("height") or 800)
+                width, height = min(72, frame_width), min(44, frame_height)
+                x = max(0, min(int(params.get("x", (frame_width - width) // 2)), frame_width - width))
+                y = max(0, min(int(params.get("y", (frame_height - height) // 2)), frame_height - height))
+                instruction = redact_text(narr or _guide_instruction(name, inp)).text[:500]
                 action, params = "guide.highlight", {
                     "frame_generation": params["frame_generation"], "layout_hash": params["layout_hash"],
-                    "x": int(params.get("x", frame_width // 2)), "y": int(params.get("y", frame_height // 2)),
-                    "width": 72, "height": 44, "frame_width": frame_width, "frame_height": frame_height,
-                    "instruction": (narr or _guide_instruction(name, inp))[:500],
-                    "expected_control_label": str(inp.get("text") or name.replace("_", " "))[:200],
+                    "x": x, "y": y, "width": width, "height": height,
+                    "frame_width": frame_width, "frame_height": frame_height,
+                    "instruction": instruction,
+                    "expected_control_label": ("active text field" if name == "type" else name.replace("_", " "))[:200],
                 }
+                audit.record(
+                    db, org_id=run.org_id, actor_kind="ai", actor_id=None, action="computer_use.guide_translated",
+                    resource_type="computer_use_run", resource_id=run.id,
+                    data={"source_tool": name, "device_action": action, "frame_generation": params["frame_generation"],
+                          "layout_hash": params["layout_hash"]},
+                )
             params = validate_params(action, params)
         except (AppError, ActionValidationError, ValueError, TypeError) as e:
             return _refuse(db, run, tid, name, inp, narr, f"Invalid action: {e}", computer=True)

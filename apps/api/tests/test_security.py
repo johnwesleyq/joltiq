@@ -628,10 +628,13 @@ def test_desktop_candidate_selection_cannot_invent_or_modify_a_procedure():
     assert select_candidate_procedure(candidates, "learned-fix") is None
     assert select_candidate_procedure(candidates, None) is None
 
+    from joltiq.services.actions.registry import ACTIONS
     from joltiq.services.devices import DESKTOP_ACTIONS
 
-    assert "screen.capture" not in DESKTOP_ACTIONS
-    assert not any(action.startswith("input.") for action in DESKTOP_ACTIONS)
+    # The signed companion protocol accepts these actions, but the procedure planner cannot use them:
+    # every screen/input primitive is marked computer-use-only and procedure validation rejects that flag.
+    assert "screen.capture" in DESKTOP_ACTIONS and ACTIONS["screen.capture"].computer_use
+    assert all(ACTIONS[action].computer_use for action in DESKTOP_ACTIONS if action.startswith("input."))
 
 
 def test_outlook_diagnostic_gate_requires_exact_trustworthy_evidence():

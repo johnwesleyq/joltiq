@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..config import get_settings
 from ..core.errors import AppError, Forbidden, NotFound
 from ..db import get_raw_session
 from ..deps import Ctx, get_ctx, perm
@@ -96,7 +97,7 @@ class EnrollIn(BaseModel):
 def enroll(body: EnrollIn, request: Request, db: Session = Depends(get_raw_session)):
     from ..security.ratelimit import hit
 
-    hit(db, f"enroll:{request.client.host if request.client else 'x'}", 20, 3600)
+    hit(db, f"enroll:{request.client.host if request.client else 'x'}", get_settings().rate_limit_device_enroll_per_hour, 3600)
     d = svc.enroll(db, code=body.code, public_key_pem=body.public_key_pem, hostname=body.hostname, os_name=body.os_name,
                    os_version=body.os_version, agent_version=body.agent_version, capabilities=body.capabilities)
     return {"device_id": str(d.id), "org_id": str(d.org_id), "server_public_key_pem": svc.server_public_pem(), "protocol": svc.PROTOCOL_VERSION,
@@ -261,10 +262,11 @@ def device_cu_respond(rid: uuid.UUID, body: DeviceRespondIn, dd=Depends(device_a
         raise AppError("Provide exactly one response", code="validation_error")
     if run.state == "pending_approval":
         computer_use.approve_goal(db, run, user_id=None, approved=bool(body.approved))
+        answered = run
     else:
-        computer_use.respond(db, run, user_id=None, approved=body.approved, answer=body.answer, done=body.done,
-                             switch_to_fix=body.switch_to_fix, via="device")
-    return computer_use.ser(run)
+        answered = computer_use.respond(db, run, user_id=None, approved=body.approved, answer=body.answer, done=body.done,
+                                        switch_to_fix=body.switch_to_fix, via="device")
+    return computer_use.ser(answered)
 
 
 @agent_router.post("/computer-use/{rid}/stop")
