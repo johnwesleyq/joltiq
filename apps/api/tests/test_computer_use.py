@@ -44,6 +44,10 @@ class CUDevice(FakeDevice):
 
     def answer_all(self, log):
         """Answer every queued action with a screenshot + result (what a real adapter would do)."""
+        for run in self.get("/computer-use/active").json()["runs"]:
+            if run["state"] == "waiting_local_consent":
+                accepted = self.post(f"/computer-use/{run['id']}/local-consent", {"accepted": True})
+                assert accepted.status_code == 200, accepted.text
         n = 0
         for b in self.envelopes():
             if b["type"] == "session.begin":
@@ -80,12 +84,68 @@ def _pump(d, owner, rid, log, until=("waiting_customer", "completed", "failed", 
     return run
 
 
+def test_customer_selects_guide_or_fix_mode(app, owner):
+    d, sid = _setup(app, owner)
+    guide = owner.post(
+        f"/api/v1/sessions/{sid}/computer-use",
+        json={"goal": "Show me how to open Windows Settings", "mode": "guide"},
+    )
+    assert guide.status_code == 201, guide.text
+    assert guide.json()["mode"] == "guide"
+    assert guide.json()["local_consent_state"] == "pending"
+    assert guide.json()["state"] == "waiting_local_consent"
+
+    rid = guide.json()["id"]
+    accepted = d.post(f"/computer-use/{rid}/local-consent", {"accepted": True})
+    assert accepted.status_code == 200, accepted.text
+    started = owner.get(f"/api/v1/computer-use/{rid}").json()
+    assert started["mode"] == "guide"
+    assert started["local_consent_state"] == "approved"
+    assert started["state"] == "waiting_device"
+
+    assert owner.post(f"/api/v1/computer-use/{rid}/stop").status_code == 200
+    fix = owner.post(f"/api/v1/sessions/{sid}/computer-use", json={"goal": "Open Windows Settings for me"})
+    assert fix.status_code == 201, fix.text
+    assert fix.json()["mode"] == "fix"
+
+
+def test_invalid_mode_and_mode_change_are_refused(app, owner):
+    _d, sid = _setup(app, owner)
+    invalid = owner.post(
+        f"/api/v1/sessions/{sid}/computer-use",
+        json={"goal": "Open Windows Settings", "mode": "automatic"},
+    )
+    assert invalid.status_code == 422
+
+    guide = owner.post(
+        f"/api/v1/sessions/{sid}/computer-use",
+        json={"goal": "Show me Windows Settings", "mode": "guide"},
+    )
+    assert guide.status_code == 201, guide.text
+    rid = guide.json()["id"]
+    changed = owner.patch(f"/api/v1/computer-use/{rid}", json={"mode": "fix"})
+    assert changed.status_code == 405
+    assert owner.get(f"/api/v1/computer-use/{rid}").json()["mode"] == "guide"
+
+
+def test_portal_approval_waits_for_native_run_consent(app, owner):
+    d, sid = _setup(app, owner)
+    created = owner.post(
+        f"/api/v1/sessions/{sid}/computer-use",
+        json={"goal": "Open Notepad and show me the File menu", "mode": "fix"},
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["state"] == "waiting_local_consent"
+    assert created.json()["local_consent_state"] == "pending"
+    assert not [e for e in d.envelopes() if e["type"] == "action"]
+
+
 def test_full_run_with_approval_pause_and_screens(app, owner):
     d, sid = _setup(app, owner)
     r = owner.post(f"/api/v1/sessions/{sid}/computer-use", json={"goal": "Open notepad, type a note and save it"})
     assert r.status_code == 201, r.text
     rid = r.json()["id"]
-    assert r.json()["state"] == "waiting_device"  # started by the consenting person → no extra approval
+    assert r.json()["state"] == "waiting_local_consent"
     log: list = []
     run = _pump(d, owner, rid, log)
     assert run["state"] == "waiting_customer" and run["waiting_for"]["kind"] == "approval"

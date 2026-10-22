@@ -211,6 +211,10 @@ class DeviceRespondIn(BaseModel):
     done: bool = False
 
 
+class DeviceRunConsentIn(BaseModel):
+    accepted: bool
+
+
 @agent_router.get("/computer-use/active")
 def device_cu_active(dd=Depends(device_auth)):
     """What the companion should show: the active run's goal, and any question/approval/secure-input pause."""
@@ -223,6 +227,21 @@ def device_cu_active(dd=Depends(device_auth)):
     sids = [s.id for s in db.execute(select(SupportSession).where(SupportSession.device_id == d.id, SupportSession.state == "active")).scalars()]
     runs = db.execute(select(ComputerUseRun).where(ComputerUseRun.session_id.in_(sids), ComputerUseRun.state.in_(computer_use.ACTIVE))).scalars().all() if sids else []
     return {"runs": [computer_use.ser(r) for r in runs]}
+
+
+@agent_router.post("/computer-use/{rid}/local-consent")
+def device_cu_local_consent(rid: uuid.UUID, body: DeviceRunConsentIn, dd=Depends(device_auth)):
+    """Record native consent for one exact computer-use goal and immutable Guide/Fix mode."""
+    from ..models import ComputerUseRun
+    from ..services import computer_use
+
+    db, d = dd
+    run = db.get(ComputerUseRun, rid)
+    s = db.get(SupportSession, run.session_id) if run else None
+    if not run or not s or s.device_id != d.id:
+        raise NotFound("run not found")
+    computer_use.record_local_consent(db, run, device_id=d.id, accepted=body.accepted)
+    return computer_use.ser(run)
 
 
 @agent_router.post("/computer-use/{rid}/respond")

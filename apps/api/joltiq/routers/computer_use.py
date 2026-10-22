@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import uuid
+from typing import Literal
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import Response
@@ -36,6 +37,7 @@ def _is_customer_side(ctx: Ctx, run: ComputerUseRun) -> bool:
 class StartIn(BaseModel):
     goal: str = Field(min_length=5, max_length=2000)
     max_steps: int = Field(default=60, ge=5, le=200)
+    mode: Literal["guide", "fix"] = "fix"
 
 
 @router.post("/sessions/{sid}/computer-use", status_code=201)
@@ -46,7 +48,15 @@ def start(sid: uuid.UUID, body: StartIn, ctx: Ctx = Depends(get_ctx)):
     # The person whose computer it is (the one who consented) approves the goal by starting it themselves;
     # anyone else's request waits for their approval.
     own = s.consented_by == ctx.p.user_id
-    run = svc.start(ctx.db, s, goal=body.goal, user_id=ctx.p.user_id, approved_by_customer=own, max_steps=body.max_steps)
+    run = svc.start(
+        ctx.db,
+        s,
+        goal=body.goal,
+        user_id=ctx.p.user_id,
+        approved_by_customer=own,
+        max_steps=body.max_steps,
+        mode=body.mode,
+    )
     return svc.ser(run, [])
 
 

@@ -33,7 +33,7 @@ from .jobs import enqueue, handler
 
 log = logging.getLogger("joltiq.computer_use")
 
-ACTIVE = ("pending_approval", "running", "waiting_device", "waiting_customer")
+ACTIVE = ("pending_approval", "waiting_local_consent", "running", "waiting_device", "waiting_customer")
 SECRET_FINDINGS = {"private_key", "jwt", "api_key", "bearer", "password_kv", "card", "ssn"}
 KEEP_IMAGES = 3
 DEVICE_TIMEOUT_S = 150
@@ -189,7 +189,16 @@ def recall(db: Session, run: ComputerUseRun) -> str:
 
 
 # ---------------- public API ----------------
-def start(db: Session, s: SupportSession, *, goal: str, user_id, approved_by_customer: bool, max_steps: int = 60) -> ComputerUseRun:
+def start(
+    db: Session,
+    s: SupportSession,
+    *,
+    goal: str,
+    user_id,
+    approved_by_customer: bool,
+    max_steps: int = 60,
+    mode: str = "fix",
+) -> ComputerUseRun:
     goal = goal.strip()
     if not 5 <= len(goal) <= 2000:
         raise AppError("Describe the goal in 5–2000 characters", code="validation_error")
@@ -207,14 +216,28 @@ def start(db: Session, s: SupportSession, *, goal: str, user_id, approved_by_cus
     if not [c for c in available_providers(db, s.org_id, "computer_use") if c[0] in SUPPORTED_PROVIDERS]:
         raise Conflict("Computer use needs an approved Anthropic API key. An admin can add one under Admin → AI models.",
                        code="computer_use_not_configured")
-    run = ComputerUseRun(org_id=s.org_id, session_id=s.id, ticket_id=s.ticket_id, started_by=user_id, goal=redact_text(goal).text,
-                         state="pending_approval", max_steps=max(5, min(200, max_steps)), transcript=[], queue=[], results=[])
+    if mode not in ("guide", "fix"):
+        raise AppError("Mode must be guide or fix", code="validation_error")
+    run = ComputerUseRun(
+        org_id=s.org_id,
+        session_id=s.id,
+        ticket_id=s.ticket_id,
+        started_by=user_id,
+        goal=redact_text(goal).text,
+        mode=mode,
+        local_consent_state="pending",
+        state="pending_approval",
+        max_steps=max(5, min(200, max_steps)),
+        transcript=[],
+        queue=[],
+        results=[],
+    )
     db.add(run)
     db.flush()
     audit.record(db, org_id=s.org_id, actor_kind="user", actor_id=user_id, action="computer_use.requested", resource_type="computer_use_run",
-                 resource_id=run.id, data={"goal": run.goal[:500], "session_id": str(s.id)})
+                 resource_id=run.id, data={"goal": run.goal[:500], "session_id": str(s.id), "mode": run.mode})
     if approved_by_customer:
-        _begin(db, run, user_id)
+        _request_local_consent(db, run, user_id)
     else:
         _event(db, run, "approval_requested", {"goal": run.goal[:500]})
     return run
@@ -226,14 +249,48 @@ def approve_goal(db: Session, run: ComputerUseRun, *, user_id, approved: bool) -
     if not approved:
         _end(db, run, "stopped", "The customer declined to let JoltIQ control the computer.", False)
         return run
-    _begin(db, run, user_id)
+    _request_local_consent(db, run, user_id)
     return run
 
 
-def _begin(db: Session, run: ComputerUseRun, user_id) -> None:
+def _request_local_consent(db: Session, run: ComputerUseRun, user_id) -> None:
+    run.state = "waiting_local_consent"
+    audit.record(
+        db,
+        org_id=run.org_id,
+        actor_kind="user",
+        actor_id=user_id,
+        action="computer_use.goal_approved",
+        resource_type="computer_use_run",
+        resource_id=run.id,
+        data={"goal": run.goal[:500], "mode": run.mode},
+    )
+    _event(db, run, "local_consent_requested", {"goal": run.goal[:500], "mode": run.mode})
+
+
+def record_local_consent(db: Session, run: ComputerUseRun, *, device_id, accepted: bool) -> ComputerUseRun:
+    if run.state != "waiting_local_consent" or run.local_consent_state != "pending":
+        raise Conflict(f"Run is {run.state}", code="invalid_state")
+    run.local_consent_state = "approved" if accepted else "declined"
+    audit.record(
+        db,
+        org_id=run.org_id,
+        actor_kind="device",
+        actor_id=device_id,
+        action="computer_use.local_consent",
+        resource_type="computer_use_run",
+        resource_id=run.id,
+        data={"accepted": accepted, "mode": run.mode},
+    )
+    if accepted:
+        _begin(db, run)
+    else:
+        _end(db, run, "stopped", "The person at the computer declined this JoltIQ request.", False)
+    return run
+
+
+def _begin(db: Session, run: ComputerUseRun) -> None:
     run.state = "running"
-    audit.record(db, org_id=run.org_id, actor_kind="user", actor_id=user_id, action="computer_use.goal_approved", resource_type="computer_use_run",
-                 resource_id=run.id, data={"goal": run.goal[:500]})
     _event(db, run, "started", {"goal": run.goal[:500]})
     _dispatch(db, run, None, "screen.capture", {"max_long_edge": 1280}, "Looking at the screen.")
 
@@ -592,6 +649,7 @@ def _timeout_job(db: Session, payload: dict) -> None:
 def ser(run: ComputerUseRun, steps: list[ComputerUseStep] | None = None) -> dict[str, Any]:
     out: dict[str, Any] = {
         "id": str(run.id), "session_id": str(run.session_id), "ticket_id": str(run.ticket_id) if run.ticket_id else None, "goal": run.goal,
+        "mode": run.mode, "local_consent_state": run.local_consent_state,
         "state": run.state, "waiting_for": ({k: v for k, v in run.waiting_for.items() if k in ("kind", "text")} if run.waiting_for else None),
         "provider": run.provider, "model": run.model, "live_model": run.provider not in (None, "local_fixture"),
         "step_count": run.step_count, "max_steps": run.max_steps, "summary": run.summary, "success": run.success,

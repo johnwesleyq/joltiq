@@ -4,7 +4,19 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -359,11 +371,20 @@ class ComputerUseRun(IdMixin, TimestampMixin, TenantMixin, Base):
     """One goal-driven 'see the screen, act, repeat' run on a consented desktop session."""
 
     __tablename__ = "computer_use_runs"
+    __table_args__ = (
+        CheckConstraint("mode IN ('guide', 'fix')", name="ck_computer_use_runs_mode"),
+        CheckConstraint(
+            "local_consent_state IN ('pending', 'approved', 'declined')",
+            name="ck_computer_use_runs_local_consent_state",
+        ),
+    )
     session_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("support_sessions.id", ondelete="CASCADE"), index=True)
     ticket_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("tickets.id", ondelete="SET NULL"), nullable=True)
     started_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     goal: Mapped[str] = mapped_column(Text)
-    # pending_approval|running|waiting_device|waiting_customer|completed|failed|stopped
+    mode: Mapped[str] = mapped_column(String(10), default="fix")
+    local_consent_state: Mapped[str] = mapped_column(String(10), default="pending")
+    # pending_approval|waiting_local_consent|running|waiting_device|waiting_customer|completed|failed|stopped
     state: Mapped[str] = mapped_column(String(30), default="pending_approval", index=True)
     waiting_for: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # {kind: approval|question|secure_input, text, tool_use_id}
     provider: Mapped[str | None] = mapped_column(String(40), nullable=True)
