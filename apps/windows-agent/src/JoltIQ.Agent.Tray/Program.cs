@@ -125,7 +125,7 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
             return;
         }
         var controller = new SupportConversationController(new AgentSupportRequestClient(_client));
-        _supportConversation = new SupportConversationForm(controller, _client.State.ServerUrl);
+        _supportConversation = new SupportConversationForm(controller, _client.State.ServerUrl, Environment.MachineName);
         _supportConversation.FormClosed += (_, _) => _supportConversation = null;
         _supportConversation.Show();
     }

@@ -152,9 +152,8 @@ def test_device_support_request_status_is_customer_safe_and_can_continue(app, ow
     status = d.get(f"/support-requests/{run_id}")
     assert status.status_code == 200, status.text
     body = status.json()
-    assert "model_calls" not in body
-    assert "observations" not in body
-    assert "hypotheses" not in body
+    assert set(body) == {"id", "ticket_id", "state", "paused_for", "outcome_stage", "messages"}
+    assert all(set(message) == {"id", "role", "content", "at"} for message in body["messages"])
     assert [message["content"] for message in body["messages"]] == [
         "Please help with Outlook.",
         "It fails when I open a PDF.",
@@ -201,6 +200,62 @@ def test_revoked_device_cannot_create_support_request(app, owner):
     )
     assert refused.status_code == 403
     assert refused.json()["error"]["code"] == "device_revoked"
+
+
+def test_ownerless_device_cannot_create_or_read_support_requests(app, owner):
+    from joltiq.db import session_scope
+    from joltiq.models import Device
+
+    d = FakeDevice(app)
+    assert d.enroll(_code(owner)).status_code == 200
+    created = d.post(
+        "/support-requests",
+        {"client_request_id": str(uuid.uuid4()), "message": "Create before owner is removed."},
+    )
+    assert created.status_code == 201, created.text
+
+    with session_scope(uuid.UUID(owner.org_id)) as db:
+        device = db.get(Device, uuid.UUID(d.device_id))
+        device.owner_user_id = None
+
+    refused_create = d.post(
+        "/support-requests",
+        {"client_request_id": str(uuid.uuid4()), "message": "This must be refused."},
+    )
+    refused_read = d.get(f"/support-requests/{created.json()['run_id']}")
+    assert refused_create.status_code == 403
+    assert refused_read.status_code == 403
+
+
+def test_device_with_stale_owner_membership_cannot_continue_support_request(app, owner):
+    from sqlalchemy import select
+
+    from joltiq.db import session_scope
+    from joltiq.models import Device, Membership
+
+    d = FakeDevice(app)
+    assert d.enroll(_code(owner)).status_code == 200
+    created = d.post(
+        "/support-requests",
+        {"client_request_id": str(uuid.uuid4()), "message": "Create before membership is removed."},
+    )
+    assert created.status_code == 201, created.text
+
+    with session_scope(uuid.UUID(owner.org_id)) as db:
+        device = db.get(Device, uuid.UUID(d.device_id))
+        membership = db.execute(
+            select(Membership).where(
+                Membership.user_id == device.owner_user_id,
+                Membership.org_id == device.org_id,
+            )
+        ).scalar_one()
+        db.delete(membership)
+
+    refused = d.post(
+        f"/support-requests/{created.json()['run_id']}/messages",
+        {"message": "This must be refused."},
+    )
+    assert refused.status_code == 403
 
 
 def test_device_support_request_retry_returns_original_ticket_and_run(app, owner):

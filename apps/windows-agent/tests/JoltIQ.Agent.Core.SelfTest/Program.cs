@@ -18,18 +18,21 @@ async Task TA(string name, Func<Task> body)
 }
 void Assert(bool c, string m = "assertion failed") { if (!c) throw new Exception(m); }
 JsonElement J(string s) => JsonDocument.Parse(s).RootElement;
-AgentClient DirectHelpClient(HttpMessageHandler handler)
+AgentClient DirectHelpClient(HttpMessageHandler handler, MemoryKeyStore? existingStore = null)
 {
-    var store = new MemoryKeyStore();
-    using var key = DeviceKey.Create();
-    store.Save("device.key", key.ExportPkcs8());
-    store.Save("state.json", JsonSerializer.SerializeToUtf8Bytes(new AgentState
+    var store = existingStore ?? new MemoryKeyStore();
+    if (store.Load("device.key") is null)
     {
-        ServerUrl = "http://localhost",
-        DeviceId = "11111111-1111-1111-1111-111111111111",
-        OrgId = "22222222-2222-2222-2222-222222222222",
-        ServerPublicKeyPem = "enrolled",
-    }));
+        using var key = DeviceKey.Create();
+        store.Save("device.key", key.ExportPkcs8());
+        store.Save("state.json", JsonSerializer.SerializeToUtf8Bytes(new AgentState
+        {
+            ServerUrl = "http://localhost",
+            DeviceId = "11111111-1111-1111-1111-111111111111",
+            OrgId = "22222222-2222-2222-2222-222222222222",
+            ServerPublicKeyPem = "enrolled",
+        }));
+    }
     return new AgentClient("http://localhost", store, handler);
 }
 var active = new LocalSession { SessionId = "s1", Active = true, ExpiresAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 600 };
@@ -205,6 +208,24 @@ await TA("direct help create retry reuses the caller's request id", async () =>
 
     var ids = handler.Requests.Select(x => JsonNode.Parse(x.Body)!["client_request_id"]!.GetValue<Guid>()).ToArray();
     Assert(ids.Length == 2 && ids.All(x => x == requestId), "retry generated a new idempotency key");
+});
+
+await TA("direct help bookmark survives a client restart", async () =>
+{
+    var store = new MemoryKeyStore();
+    var handler = new DirectHelpHandler();
+    handler.Enqueue(System.Net.HttpStatusCode.Created,
+        "{\"ticket_id\":\"cccccccc-cccc-cccc-cccc-cccccccccccc\",\"ticket_number\":42,\"run_id\":\"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\",\"state\":\"NEW\"}");
+    using (var first = DirectHelpClient(handler, store))
+        await first.CreateSupportRequestAsync(Guid.NewGuid(), "Persist this conversation.", default);
+
+    using var reopened = DirectHelpClient(new DirectHelpHandler(), store);
+    Assert(reopened.ActiveSupportRequest is
+    {
+        TicketNumber: 42,
+        RunId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        State: "NEW",
+    }, "active support request was not restored");
 });
 
 await TA("direct help client redacts server errors and honors cancellation", async () =>

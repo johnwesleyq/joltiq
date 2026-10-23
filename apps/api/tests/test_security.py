@@ -813,6 +813,10 @@ def test_structured_redaction_preserves_operational_session_counters():
         "interactive": {"active_session_count": 1, "same_user": True},
         "session_token": "must-not-leak",
         "session": "must-not-leak-either",
+        "accessToken": "must-not-leak",
+        "refreshToken": "must-not-leak",
+        "clientSecret": "must-not-leak",
+        "passwordHash": "must-not-leak",
     }
 
     redacted = redact_obj(source)
@@ -820,6 +824,10 @@ def test_structured_redaction_preserves_operational_session_counters():
     assert redacted["interactive"] == {"active_session_count": 1, "same_user": True}
     assert redacted["session_token"] == "[REDACTED]"
     assert redacted["session"] == "[REDACTED]"
+    assert redacted["accessToken"] == "[REDACTED]"
+    assert redacted["refreshToken"] == "[REDACTED]"
+    assert redacted["clientSecret"] == "[REDACTED]"
+    assert redacted["passwordHash"] == "[REDACTED]"
 
 
 # ---------------- SSRF ----------------

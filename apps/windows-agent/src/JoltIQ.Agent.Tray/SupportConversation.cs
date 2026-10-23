@@ -5,6 +5,7 @@ namespace JoltIQ.Agent.Tray;
 
 public interface ISupportRequestClient
 {
+    SupportRequestBookmark? ActiveRequest { get; }
     Task<SupportRequestResult> CreateSupportRequestAsync(Guid requestId, string message, CancellationToken ct);
     Task<SupportRequestResult> ContinueSupportRequestAsync(string runId, string message, CancellationToken ct);
     Task<SupportRequestDetail> GetSupportRequestAsync(string runId, CancellationToken ct);
@@ -12,6 +13,7 @@ public interface ISupportRequestClient
 
 public sealed class AgentSupportRequestClient(AgentClient client) : ISupportRequestClient
 {
+    public SupportRequestBookmark? ActiveRequest => client.ActiveSupportRequest;
     public Task<SupportRequestResult> CreateSupportRequestAsync(Guid requestId, string message, CancellationToken ct) =>
         client.CreateSupportRequestAsync(requestId, message, ct);
 
@@ -48,7 +50,20 @@ public sealed class SupportConversationController
     public SupportConversationState State { get; private set; } = new();
     public event Action<SupportConversationState>? StateChanged;
 
-    public SupportConversationController(ISupportRequestClient client) => _client = client;
+    public SupportConversationController(ISupportRequestClient client)
+    {
+        _client = client;
+        if (client.ActiveRequest is { } active)
+        {
+            State = State with
+            {
+                TicketId = active.TicketId,
+                TicketNumber = active.TicketNumber,
+                RunId = active.RunId,
+                Status = active.State,
+            };
+        }
+    }
 
     public void SetDraft(string draft) => SetState(State with { Draft = draft, Error = null });
 
@@ -161,7 +176,7 @@ public sealed class SupportConversationForm : Form
     private readonly string _serverUrl;
     private bool _refreshing;
 
-    public SupportConversationForm(SupportConversationController controller, string serverUrl)
+    public SupportConversationForm(SupportConversationController controller, string serverUrl, string computerName)
     {
         _controller = controller;
         _serverUrl = serverUrl.TrimEnd('/');
@@ -185,8 +200,15 @@ public sealed class SupportConversationForm : Form
             MaximumSize = new Size(650, 0),
             ForeColor = SystemColors.GrayText,
         };
-        var header = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 88, FlowDirection = FlowDirection.TopDown, Padding = new Padding(12, 10, 12, 4) };
-        header.Controls.AddRange([heading, privacy]);
+        var computer = new Label
+        {
+            Text = $"This computer: {computerName}",
+            AutoSize = true,
+            ForeColor = SystemColors.GrayText,
+            AccessibleName = "Enrolled computer",
+        };
+        var header = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 112, FlowDirection = FlowDirection.TopDown, Padding = new Padding(12, 10, 12, 4) };
+        header.Controls.AddRange([heading, computer, privacy]);
 
         var footer = new TableLayoutPanel { Dock = DockStyle.Bottom, Height = 160, ColumnCount = 2, Padding = new Padding(12, 4, 12, 10) };
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));

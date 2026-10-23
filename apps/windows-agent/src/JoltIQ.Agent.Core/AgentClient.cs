@@ -14,7 +14,10 @@ public sealed class AgentState
     public string? ServerPublicKeyPem { get; set; }
     public string? EnrolledUserSid { get; set; }
     public long Counter { get; set; }
+    public SupportRequestBookmark? ActiveSupportRequest { get; set; }
 }
+
+public sealed record SupportRequestBookmark(string TicketId, int TicketNumber, string RunId, string State);
 
 public sealed record SupportRequestResult(
     [property: JsonPropertyName("ticket_id")] string TicketId,
@@ -26,7 +29,6 @@ public sealed record SupportConversationMessage(
     [property: JsonPropertyName("id")] string Id,
     [property: JsonPropertyName("role")] string Role,
     [property: JsonPropertyName("content")] string Content,
-    [property: JsonPropertyName("data")] JsonObject Data,
     [property: JsonPropertyName("at")] DateTimeOffset At);
 
 public sealed record SupportRequestDetail(
@@ -34,6 +36,7 @@ public sealed record SupportRequestDetail(
     [property: JsonPropertyName("ticket_id")] string TicketId,
     [property: JsonPropertyName("state")] string State,
     [property: JsonPropertyName("paused_for")] string? PausedFor,
+    [property: JsonPropertyName("outcome_stage")] string? OutcomeStage,
     [property: JsonPropertyName("messages")] IReadOnlyList<SupportConversationMessage> Messages);
 
 /// <summary>Signed HTTPS client for the companion protocol (PROTOCOL.md). Persists device key + counter via IKeyStore.</summary>
@@ -65,6 +68,7 @@ public sealed class AgentClient : IDisposable
 
     public static string Version => typeof(AgentClient).Assembly.GetName().Version?.ToString(3) ?? "1.0.0";
     public bool Enrolled => State.DeviceId is not null && _key is not null && State.ServerPublicKeyPem is not null;
+    public SupportRequestBookmark? ActiveSupportRequest => State.ActiveSupportRequest;
 
     private void Persist() => _store.Save("state.json", JsonSerializer.SerializeToUtf8Bytes(State));
 
@@ -153,7 +157,9 @@ public sealed class AgentClient : IDisposable
             "/support-requests",
             new { client_request_id = requestId, message },
             ct);
-        return ParseResponse<SupportRequestResult>(node, "create support request");
+        var result = ParseResponse<SupportRequestResult>(node, "create support request");
+        RememberSupportRequest(result);
+        return result;
     }
 
     public async Task<SupportRequestResult> ContinueSupportRequestAsync(
@@ -164,14 +170,28 @@ public sealed class AgentClient : IDisposable
         ValidateSupportMessage(message);
         var id = NormalizeRunId(runId);
         var node = await SendAsync(HttpMethod.Post, $"/support-requests/{id}/messages", new { message }, ct);
-        return ParseResponse<SupportRequestResult>(node, "continue support request");
+        var result = ParseResponse<SupportRequestResult>(node, "continue support request");
+        RememberSupportRequest(result);
+        return result;
     }
 
     public async Task<SupportRequestDetail> GetSupportRequestAsync(string runId, CancellationToken ct = default)
     {
         var id = NormalizeRunId(runId);
         var node = await SendAsync(HttpMethod.Get, $"/support-requests/{id}", ct: ct);
-        return ParseResponse<SupportRequestDetail>(node, "get support request");
+        var detail = ParseResponse<SupportRequestDetail>(node, "get support request");
+        if (State.ActiveSupportRequest is { } active && active.RunId == detail.Id)
+        {
+            State.ActiveSupportRequest = active with { State = detail.State };
+            Persist();
+        }
+        return detail;
+    }
+
+    private void RememberSupportRequest(SupportRequestResult result)
+    {
+        State.ActiveSupportRequest = new SupportRequestBookmark(result.TicketId, result.TicketNumber, result.RunId, result.State);
+        Persist();
     }
 
     public void ForgetEnrollment()

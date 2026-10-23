@@ -1,4 +1,3 @@
-using System.Text.Json.Nodes;
 using JoltIQ.Agent.Core;
 using JoltIQ.Agent.Tray;
 using Xunit;
@@ -58,6 +57,25 @@ public sealed class SupportConversationTests
     }
 
     [Fact]
+    public async Task ReopenedConversationContinuesThePersistedRun()
+    {
+        var client = new FakeSupportClient();
+        var firstWindow = new SupportConversationController(client);
+        firstWindow.SetDraft("First message");
+        await firstWindow.SendAsync(default);
+
+        var reopenedWindow = new SupportConversationController(client);
+        Assert.Equal("run-1", reopenedWindow.State.RunId);
+        Assert.Equal(42, reopenedWindow.State.TicketNumber);
+        reopenedWindow.SetDraft("Second message after reopening");
+        await reopenedWindow.SendAsync(default);
+
+        Assert.Single(client.Creates);
+        Assert.Single(client.Continues);
+        Assert.Equal(("run-1", "Second message after reopening"), client.Continues[0]);
+    }
+
+    [Fact]
     public async Task RefreshShowsServerTranscriptAndStopsPollingAtTerminalState()
     {
         var client = new FakeSupportClient();
@@ -107,10 +125,12 @@ public sealed class SupportConversationTests
         "ticket-1",
         state,
         state == "RESOLVED" ? null : "customer",
-        [new SupportConversationMessage("message-1", "assistant", content, new JsonObject(), DateTimeOffset.UtcNow)]);
+        null,
+        [new SupportConversationMessage("message-1", "assistant", content, DateTimeOffset.UtcNow)]);
 
     private sealed class FakeSupportClient : ISupportRequestClient
     {
+        public SupportRequestBookmark? ActiveRequest { get; private set; }
         public List<(Guid RequestId, string Message)> Creates { get; } = [];
         public List<(string RunId, string Message)> Continues { get; } = [];
         public int Gets { get; private set; }
@@ -124,12 +144,14 @@ public sealed class SupportConversationTests
             Creates.Add((requestId, message));
             if (Revoked) throw new DeviceRevokedException();
             if (FailCreates-- > 0) throw new AgentProtocolException("network unavailable");
+            ActiveRequest = new SupportRequestBookmark("ticket-1", 42, "run-1", "NEW");
             return Task.FromResult(new SupportRequestResult("ticket-1", 42, "run-1", "NEW"));
         }
 
         public Task<SupportRequestResult> ContinueSupportRequestAsync(string runId, string message, CancellationToken ct)
         {
             Continues.Add((runId, message));
+            ActiveRequest = new SupportRequestBookmark("ticket-1", 42, runId, "CLARIFYING");
             return Task.FromResult(new SupportRequestResult("ticket-1", 42, runId, "CLARIFYING"));
         }
 

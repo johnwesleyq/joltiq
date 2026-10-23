@@ -27,17 +27,20 @@ _NAME_CUES = re.compile(
     r"([A-Z][a-z'\-]+(?:\s+[A-Z][a-z'\-]+){0,2})"
 )
 
-# Field names whose values are always masked regardless of content.
-# Match secret-bearing key components without treating ordinary operational
-# metadata such as ``active_session_count`` as a credential.  A bare
-# ``session`` value is still sensitive, as are session-token style keys.
-SECRET_KEYS = re.compile(
-    r"(?i)(?:"
-    r"(?:^|[_-])(?:password|passwd|secret|token|cookie|authorization|api[_-]?key|mfa|otp|private[_-]?key)(?:$|[_-])"
-    r"|^session$"
-    r"|^session(?:token|secret|key|cookie)$"
-    r")"
-)
+def _is_secret_key(key: str) -> bool:
+    """Recognize snake/kebab/camel secret names without masking session counters."""
+    normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key)
+    tokens = [part for part in re.split(r"[^A-Za-z0-9]+", normalized.lower()) if part]
+    if any(part in {"password", "passwd", "secret", "token", "cookie", "authorization", "mfa", "otp"} for part in tokens):
+        return True
+    if any(tokens[index:index + 2] in (["api", "key"], ["private", "key"]) for index in range(len(tokens) - 1)):
+        return True
+    if tokens == ["session"]:
+        return True
+    return any(
+        tokens[index] == "session" and tokens[index + 1] in {"token", "secret", "key", "cookie"}
+        for index in range(len(tokens) - 1)
+    )
 
 
 @dataclass
@@ -101,7 +104,7 @@ def redact_obj(obj: Any, depth: int = 0) -> Any:
         return "[TRUNCATED]"
     if isinstance(obj, dict):
         return {
-            k: ("[REDACTED]" if isinstance(k, str) and SECRET_KEYS.search(k) else redact_obj(v, depth + 1))
+            k: ("[REDACTED]" if isinstance(k, str) and _is_secret_key(k) else redact_obj(v, depth + 1))
             for k, v in obj.items()
         }
     if isinstance(obj, list):

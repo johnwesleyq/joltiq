@@ -1745,21 +1745,18 @@ def device_run_detail(db: Session, run: AgentRun) -> dict[str, Any]:
     Keep the device contract narrower than the staff/portal representation so new
     internal diagnostic fields cannot accidentally become companion-visible.
     """
-    out = run_detail(db, run, customer_view=True)
-    for internal in (
-        "hypotheses",
-        "observations",
-        "model_calls",
-        "cost_usd",
-        "retries",
-        "max_retries",
-        "correlation_id",
-        "uses_test_fixture_model",
-        "article_id",
-        "research_query_id",
-    ):
-        out.pop(internal, None)
-    return out
+    detail = run_detail(db, run, customer_view=True)
+    return {
+        "id": detail["id"],
+        "ticket_id": detail["ticket_id"],
+        "state": detail["state"],
+        "paused_for": detail["paused_for"],
+        "outcome_stage": detail["outcome_stage"],
+        "messages": [
+            {key: message[key] for key in ("id", "role", "content", "at")}
+            for message in detail["messages"]
+        ],
+    }
 
 
 _ = timedelta
