@@ -2,6 +2,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 
 namespace JoltIQ.Agent.Core;
 
@@ -14,6 +15,26 @@ public sealed class AgentState
     public string? EnrolledUserSid { get; set; }
     public long Counter { get; set; }
 }
+
+public sealed record SupportRequestResult(
+    [property: JsonPropertyName("ticket_id")] string TicketId,
+    [property: JsonPropertyName("ticket_number")] int TicketNumber,
+    [property: JsonPropertyName("run_id")] string RunId,
+    [property: JsonPropertyName("state")] string State);
+
+public sealed record SupportConversationMessage(
+    [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("role")] string Role,
+    [property: JsonPropertyName("content")] string Content,
+    [property: JsonPropertyName("data")] JsonObject Data,
+    [property: JsonPropertyName("at")] DateTimeOffset At);
+
+public sealed record SupportRequestDetail(
+    [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("ticket_id")] string TicketId,
+    [property: JsonPropertyName("state")] string State,
+    [property: JsonPropertyName("paused_for")] string? PausedFor,
+    [property: JsonPropertyName("messages")] IReadOnlyList<SupportConversationMessage> Messages);
 
 /// <summary>Signed HTTPS client for the companion protocol (PROTOCOL.md). Persists device key + counter via IKeyStore.</summary>
 public sealed class AgentClient : IDisposable
@@ -121,6 +142,38 @@ public sealed class AgentClient : IDisposable
     public Task<JsonNode?> SendCommandResultAsync(PendingCommandReport report, CancellationToken ct = default) =>
         SendAsync(HttpMethod.Post, $"/commands/{report.CommandId}/result", new { status = report.Status, result = report.Result }, ct);
 
+    public async Task<SupportRequestResult> CreateSupportRequestAsync(
+        Guid requestId,
+        string message,
+        CancellationToken ct = default)
+    {
+        ValidateSupportMessage(message);
+        var node = await SendAsync(
+            HttpMethod.Post,
+            "/support-requests",
+            new { client_request_id = requestId, message },
+            ct);
+        return ParseResponse<SupportRequestResult>(node, "create support request");
+    }
+
+    public async Task<SupportRequestResult> ContinueSupportRequestAsync(
+        string runId,
+        string message,
+        CancellationToken ct = default)
+    {
+        ValidateSupportMessage(message);
+        var id = NormalizeRunId(runId);
+        var node = await SendAsync(HttpMethod.Post, $"/support-requests/{id}/messages", new { message }, ct);
+        return ParseResponse<SupportRequestResult>(node, "continue support request");
+    }
+
+    public async Task<SupportRequestDetail> GetSupportRequestAsync(string runId, CancellationToken ct = default)
+    {
+        var id = NormalizeRunId(runId);
+        var node = await SendAsync(HttpMethod.Get, $"/support-requests/{id}", ct: ct);
+        return ParseResponse<SupportRequestDetail>(node, "get support request");
+    }
+
     public void ForgetEnrollment()
     {
         _store.Delete("device.key");
@@ -130,9 +183,39 @@ public sealed class AgentClient : IDisposable
         State = new AgentState { ServerUrl = State.ServerUrl };
     }
 
-    private static string Truncate(string s) => s.Length > 300 ? s[..300] : s;
+    private static T ParseResponse<T>(JsonNode? node, string operation)
+    {
+        if (node is null) throw new AgentProtocolException($"Invalid response while attempting to {operation}");
+        try
+        {
+            return node.Deserialize<T>() ?? throw new JsonException("empty response");
+        }
+        catch (JsonException e)
+        {
+            throw new AgentProtocolException($"Invalid response while attempting to {operation}", e);
+        }
+    }
+
+    private static string NormalizeRunId(string runId) =>
+        Guid.TryParse(runId, out var id) ? id.ToString() : throw new ArgumentException("Run id must be a UUID", nameof(runId));
+
+    private static void ValidateSupportMessage(string message)
+    {
+        if (string.IsNullOrWhiteSpace(message) || message.Length > 20_000)
+            throw new ArgumentException("Support message must contain 1 to 20,000 characters", nameof(message));
+    }
+
+    private static string Truncate(string s)
+    {
+        var redacted = Redactor.Redact(s);
+        return redacted.Length > 300 ? redacted[..300] : redacted;
+    }
     public void Dispose() { _http.Dispose(); _key?.Dispose(); }
 }
 
-public class AgentProtocolException(string m) : Exception(m);
+public class AgentProtocolException : Exception
+{
+    public AgentProtocolException(string message) : base(message) { }
+    public AgentProtocolException(string message, Exception innerException) : base(message, innerException) { }
+}
 public sealed class DeviceRevokedException() : AgentProtocolException("device revoked by administrator");

@@ -18,6 +18,20 @@ async Task TA(string name, Func<Task> body)
 }
 void Assert(bool c, string m = "assertion failed") { if (!c) throw new Exception(m); }
 JsonElement J(string s) => JsonDocument.Parse(s).RootElement;
+AgentClient DirectHelpClient(HttpMessageHandler handler)
+{
+    var store = new MemoryKeyStore();
+    using var key = DeviceKey.Create();
+    store.Save("device.key", key.ExportPkcs8());
+    store.Save("state.json", JsonSerializer.SerializeToUtf8Bytes(new AgentState
+    {
+        ServerUrl = "http://localhost",
+        DeviceId = "11111111-1111-1111-1111-111111111111",
+        OrgId = "22222222-2222-2222-2222-222222222222",
+        ServerPublicKeyPem = "enrolled",
+    }));
+    return new AgentClient("http://localhost", store, handler);
+}
 var active = new LocalSession { SessionId = "s1", Active = true, ExpiresAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 600 };
 
 T("string-to-sign matches server format", () =>
@@ -142,6 +156,84 @@ T("client refuses plain HTTP to non-local servers", () =>
 {
     try { using var _ = new AgentClient("http://evil.example.com", new InsecureFileKeyStore(Path.GetTempPath())); throw new Exception("accepted"); }
     catch (ArgumentException) { }
+});
+
+await TA("direct help client signs exact paths and parses typed responses", async () =>
+{
+    var handler = new DirectHelpHandler();
+    var requestId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+    var runId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+    handler.Enqueue(System.Net.HttpStatusCode.Created,
+        "{\"ticket_id\":\"cccccccc-cccc-cccc-cccc-cccccccccccc\",\"ticket_number\":42,\"run_id\":\"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\",\"state\":\"NEW\"}");
+    handler.Enqueue(System.Net.HttpStatusCode.OK,
+        "{\"ticket_id\":\"cccccccc-cccc-cccc-cccc-cccccccccccc\",\"ticket_number\":42,\"run_id\":\"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\",\"state\":\"CLARIFYING\"}");
+    handler.Enqueue(System.Net.HttpStatusCode.OK,
+        "{\"id\":\"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\",\"ticket_id\":\"cccccccc-cccc-cccc-cccc-cccccccccccc\",\"state\":\"CLARIFYING\",\"paused_for\":\"customer\",\"messages\":[{\"id\":\"dddddddd-dddd-dddd-dddd-dddddddddddd\",\"role\":\"assistant\",\"content\":\"Which PDF app is installed?\",\"data\":{},\"at\":\"2026-10-23T12:00:00Z\"}]}");
+    using var client = DirectHelpClient(handler);
+
+    var created = await client.CreateSupportRequestAsync(requestId, "Outlook cannot find Adobe Sign.", default);
+    Assert(created.TicketNumber == 42 && created.RunId == runId && created.State == "NEW", "create response changed");
+    var continued = await client.ContinueSupportRequestAsync(runId, "It is classic Outlook.", default);
+    Assert(continued.State == "CLARIFYING", "continuation response changed");
+    var detail = await client.GetSupportRequestAsync(runId, default);
+    Assert(detail.Messages.Single().Content == "Which PDF app is installed?" && detail.PausedFor == "customer", "detail response changed");
+
+    Assert(handler.Requests.Select(x => x.Path).SequenceEqual(new[]
+    {
+        "/api/v1/agent/v1/support-requests",
+        $"/api/v1/agent/v1/support-requests/{runId}/messages",
+        $"/api/v1/agent/v1/support-requests/{runId}",
+    }), "direct-help paths changed");
+    var createBody = JsonNode.Parse(handler.Requests[0].Body)!.AsObject();
+    Assert(createBody["client_request_id"]!.GetValue<Guid>() == requestId, "request id was not serialized");
+    Assert(createBody["message"]!.GetValue<string>() == "Outlook cannot find Adobe Sign.", "message changed");
+    Assert(createBody.Count == 2, "create body gained an identity, action, or consent field");
+    Assert(handler.Requests.All(x => x.Headers.Contains("X-JQ-Signature")), "request was not signed");
+});
+
+await TA("direct help create retry reuses the caller's request id", async () =>
+{
+    var handler = new DirectHelpHandler();
+    var response = "{\"ticket_id\":\"cccccccc-cccc-cccc-cccc-cccccccccccc\",\"ticket_number\":42,\"run_id\":\"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\",\"state\":\"NEW\"}";
+    handler.Enqueue(System.Net.HttpStatusCode.Created, response);
+    handler.Enqueue(System.Net.HttpStatusCode.Created, response);
+    using var client = DirectHelpClient(handler);
+    var requestId = Guid.NewGuid();
+
+    await client.CreateSupportRequestAsync(requestId, "Retry me safely.", default);
+    await client.CreateSupportRequestAsync(requestId, "Retry me safely.", default);
+
+    var ids = handler.Requests.Select(x => JsonNode.Parse(x.Body)!["client_request_id"]!.GetValue<Guid>()).ToArray();
+    Assert(ids.Length == 2 && ids.All(x => x == requestId), "retry generated a new idempotency key");
+});
+
+await TA("direct help client redacts server errors and honors cancellation", async () =>
+{
+    var failing = new DirectHelpHandler();
+    failing.Enqueue(System.Net.HttpStatusCode.InternalServerError, "password=supersecret owner@example.com");
+    using (var client = DirectHelpClient(failing))
+    {
+        try
+        {
+            await client.GetSupportRequestAsync("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", default);
+            throw new Exception("server error was accepted");
+        }
+        catch (AgentProtocolException e)
+        {
+            Assert(!e.Message.Contains("supersecret") && !e.Message.Contains("owner@example.com"), "server error leaked sensitive text");
+            Assert(e.Message.Contains("[REDACTED"), "redaction was not visible");
+        }
+    }
+
+    var waiting = new DirectHelpHandler { WaitForCancellation = true };
+    using var cancellable = DirectHelpClient(waiting);
+    using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
+    try
+    {
+        await cancellable.GetSupportRequestAsync("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", cts.Token);
+        throw new Exception("cancelled request completed");
+    }
+    catch (OperationCanceledException) when (cts.IsCancellationRequested) { }
 });
 
 T("command journal prevents duplicate execution and acknowledges the durable outbox", () =>
@@ -495,6 +587,34 @@ sealed class ProtocolHandler : HttpMessageHandler
     {
         Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json"),
     };
+}
+
+sealed record DirectHelpRequest(string Method, string Path, string Body, HashSet<string> Headers);
+
+sealed class DirectHelpHandler : HttpMessageHandler
+{
+    private readonly Queue<HttpResponseMessage> _responses = new();
+    public List<DirectHelpRequest> Requests { get; } = new();
+    public bool WaitForCancellation { get; init; }
+
+    public void Enqueue(System.Net.HttpStatusCode status, string body) => _responses.Enqueue(new HttpResponseMessage(status)
+    {
+        Content = new StringContent(body, Encoding.UTF8, "application/json"),
+    });
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        var body = request.Content is null ? "" : await request.Content.ReadAsStringAsync(cancellationToken);
+        Requests.Add(new DirectHelpRequest(
+            request.Method.Method,
+            request.RequestUri!.AbsolutePath,
+            body,
+            request.Headers.Select(x => x.Key).ToHashSet(StringComparer.OrdinalIgnoreCase)));
+        if (WaitForCancellation)
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        if (_responses.Count == 0) throw new InvalidOperationException("No direct-help response was queued");
+        return _responses.Dequeue();
+    }
 }
 
 sealed class RuntimeHarness : IDisposable
