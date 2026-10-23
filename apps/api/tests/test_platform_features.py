@@ -785,6 +785,7 @@ def test_outlook_customer_copy_is_validated_bound_and_signed():
     body["display"] = {"addin_name": "Contoso PDF Preview", "addin_progid": "Contoso.PdfPreview"}
     body["diagnostics"][0]["params"]["addin_progid"] = "Contoso.PdfPreview"
     body["procedure"][0]["params"]["addin_progid"] = "Contoso.PdfPreview"
+    body["procedure"][0]["postconditions"][0]["params"]["addin_progid"] = "Contoso.PdfPreview"
     definition = validate_executable_body(body)
     fingerprint = procedure_hash(definition)
     details = customer_messages.outlook_session_details(definition, fingerprint)

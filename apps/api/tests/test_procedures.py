@@ -22,7 +22,9 @@ def outlook_body() -> dict:
                 "action": "office.addin.set_load_behavior",
                 "params": {"app": "Outlook", "addin_progid": "PdfPreview.Connect", "enabled": False},
                 "rationale": "Disable the published faulty add-in",
-                "postconditions": [{"type": "device_config_equals", "params": {"enabled": False}}],
+                "postconditions": [{"type": "device_config_equals", "params": {
+                    "app": "Outlook", "addin_progid": "PdfPreview.Connect", "enabled": False,
+                }}],
             },
             {
                 "action": "app.restart", "params": {"process": "outlook.exe"},
@@ -51,7 +53,6 @@ def test_canonical_hash_is_order_independent_but_contract_sensitive():
 
     mutations = [
         ("procedure", 0, "rationale", "Different rationale"),
-        ("procedure", 0, "postconditions", [{"type": "device_config_equals", "params": {"enabled": True}}]),
         ("diagnostics", 0, "expect", {"supported": True, "outlook.kind": "classic", "addin.installed": True, "crash.matched": False}),
     ]
     for section, index, field, value in mutations:
@@ -59,10 +60,16 @@ def test_canonical_hash_is_order_independent_but_contract_sensitive():
         changed[section][index][field] = value
         assert procedure_hash(validate_executable_body(changed)) != expected
 
+    changed_setting = copy.deepcopy(body)
+    changed_setting["procedure"][0]["params"]["enabled"] = True
+    changed_setting["procedure"][0]["postconditions"][0]["params"]["enabled"] = True
+    assert procedure_hash(validate_executable_body(changed_setting)) != expected
+
     changed_progid = copy.deepcopy(body)
     changed_progid["display"]["addin_progid"] = "Other.Connect"
     changed_progid["diagnostics"][0]["params"]["addin_progid"] = "Other.Connect"
     changed_progid["procedure"][0]["params"]["addin_progid"] = "Other.Connect"
+    changed_progid["procedure"][0]["postconditions"][0]["params"]["addin_progid"] = "Other.Connect"
     assert procedure_hash(validate_executable_body(changed_progid)) != expected
 
     reordered_steps = copy.deepcopy(body)
@@ -71,7 +78,10 @@ def test_canonical_hash_is_order_independent_but_contract_sensitive():
     assert procedure_hash(validate_executable_body(reordered_steps)) != expected
 
 
-@pytest.mark.parametrize("mutation", ["missing_rollback", "untyped_diagnostic", "computer_use", "unsupported_action", "missing_progid", "missing_module"])
+@pytest.mark.parametrize("mutation", [
+    "missing_rollback", "untyped_diagnostic", "computer_use", "unsupported_action",
+    "missing_progid", "missing_module", "incomplete_readback_target",
+])
 def test_invalid_desktop_procedure_is_rejected(mutation):
     """Catches publication of a desktop procedure that can bypass its typed diagnosis/rollback boundary."""
     from joltiq.services.procedures import validate_executable_body
@@ -90,6 +100,8 @@ def test_invalid_desktop_procedure_is_rejected(mutation):
         body["diagnostics"][0]["params"].pop("addin_progid")
     elif mutation == "missing_module":
         body["diagnostics"][0]["params"].pop("faulting_module")
+    elif mutation == "incomplete_readback_target":
+        body["procedure"][0]["postconditions"][0]["params"] = {"enabled": False}
     with pytest.raises(ValueError):
         validate_executable_body(body)
 

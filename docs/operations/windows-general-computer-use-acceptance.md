@@ -25,6 +25,22 @@ powershell -executionpolicy bypass -file apps\windows-agent\scripts\tests\BuildG
 
 Both commands must pass before a behavioral run begins.
 
+## Direct request acceptance case
+
+Run this case on each disposable Windows image before the Guide/Fix catalog:
+
+1. Install and enroll the signed companion for the local test user.
+2. From the tray, choose **Ask JoltIQ…** and send `Outlook closes every time I open a PDF attachment.`
+3. Confirm that exactly one `device_chat` ticket and one linked agent run exist for the authenticated device and user.
+4. Confirm that the tray shows the initial JoltIQ response, state and ticket number. Disconnect before the first response, reconnect and retry to prove the same client request ID returns the original ticket/run and the draft is not falsely shown as submitted.
+5. Let the run reach the diagnostic-consent pause. Do not approve the portal session and do not accept anything locally.
+6. Confirm the support session is `pending_consent`, the executable plan is empty, device polling returns no action envelope, and the device has executed no desktop command.
+7. Revoke the device and confirm that new messages and status reads fail closed without revealing ticket data.
+
+Preserve the signed request audit entries, ticket/run/device IDs, idempotency record, customer-safe transcript, session state, empty pre-consent command list, companion log and final desktop screenshot. Conversation participation is not computer-control consent; evidence that merges those concepts fails the case.
+
+On 23 October 2026, the direct-request tray/controller and the existing Windows safety suite passed 78/78 tests on an authorized physical Windows PC with .NET SDK 8.0.426. That is native smoke evidence only. It does not mark this disposable-VM case, installer lifecycle testing, Authenticode signing, or independent security review complete.
+
 ## Run one case
 
 1. Revert the correct Windows VM to its named clean snapshot.

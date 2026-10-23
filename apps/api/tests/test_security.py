@@ -806,6 +806,22 @@ def test_redaction_of_research_queries():
         assert leak not in r.text
 
 
+def test_structured_redaction_preserves_operational_session_counters():
+    from joltiq.security.redaction import redact_obj
+
+    source = {
+        "interactive": {"active_session_count": 1, "same_user": True},
+        "session_token": "must-not-leak",
+        "session": "must-not-leak-either",
+    }
+
+    redacted = redact_obj(source)
+
+    assert redacted["interactive"] == {"active_session_count": 1, "same_user": True}
+    assert redacted["session_token"] == "[REDACTED]"
+    assert redacted["session"] == "[REDACTED]"
+
+
 # ---------------- SSRF ----------------
 @pytest.mark.parametrize("url", ["http://127.0.0.1/", "http://localhost/", "http://169.254.169.254/latest/meta-data/", "http://[::1]/",
                                  "http://10.0.0.1/", "http://192.168.1.1/", "http://metadata.google.internal/", "ftp://example.com/",

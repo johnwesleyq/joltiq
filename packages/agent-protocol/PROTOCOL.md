@@ -24,6 +24,24 @@ String-to-sign (UTF-8, `\n`-joined): `METHOD`, `PATH` (e.g. `/api/v1/agent/v1/po
 
 The server rejects a bad signature, a stale timestamp, a reused nonce, a non-increasing counter, or a revoked device. Each rejection is recorded as a security event.
 
+### Direct support requests
+
+An enrolled user can start or continue a support conversation from the tray without first opening the web portal. These calls use the same signed-request headers above.
+
+- `POST /agent/v1/support-requests`
+  - Request: `{"client_request_id":"<UUID>","message":"<1..20000 characters>"}`
+  - Response (`201`): `{"ticket_id":"<UUID>","ticket_number":123,"run_id":"<UUID>","state":"NEW"}`
+  - `client_request_id` is generated once by the companion and reused after a network-uncertain retry. Its uniqueness scope is the authenticated device. The server returns the original response for a duplicate and never creates a second ticket or run.
+- `POST /agent/v1/support-requests/{run_id}/messages`
+  - Request: `{"message":"<1..20000 characters>"}`
+  - Response: the same ticket/run identity fields and current state.
+- `GET /agent/v1/support-requests/{run_id}`
+  - Response: customer-safe run state, pause reason, outcome stage, and conversation messages. Internal model calls, hypotheses, observations and execution details are not returned.
+
+The server derives tenant, user, customer and device identity from the authenticated device. It refuses revoked devices, devices without an active owner, and any read or write where the run's ticket is not linked to that exact device. Client-supplied identity, ticket, session, action, approval and consent fields are rejected.
+
+Starting or using this conversation grants **no screen visibility, input control, action approval or session consent**. If diagnosis needs the computer, the normal signed `session.begin` flow and local consent dialog still happen separately. No desktop command is eligible before the applicable portal and device-local gates pass.
+
 ## 3. Server → device envelopes (`GET /agent/v1/poll`)
 ```json
 {"protocol":"1","payload":"<base64 of exact signed JSON bytes>","body":{...},"signature":"<base64 DER>","alg":"ES256-DER"}

@@ -71,6 +71,18 @@ class RemediationStep(StrictModel):
             raise ValueError(str(exc)) from exc
         if not self.postconditions:
             raise ValueError("remediation step requires a postcondition")
+        if self.action == "office.addin.set_load_behavior":
+            expected = (
+                "device_config_equals",
+                {name: self.params[name] for name in ("app", "addin_progid", "enabled")},
+            )
+        else:
+            expected = (
+                "device_process_responding",
+                {"process": self.params["process"]},
+            )
+        if not any(pc.type == expected[0] and pc.params == expected[1] for pc in self.postconditions):
+            raise ValueError(f"{self.action} requires an exact {expected[0]} read-back target")
         return self
 
 

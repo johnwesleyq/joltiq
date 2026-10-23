@@ -74,7 +74,8 @@ def publish_desktop_procedure(app, owner):
             "procedure": [
                 {"action": "office.addin.set_load_behavior", "params": {"app": "Outlook", "addin_progid": "PdfPreview.Connect", "enabled": False},
                  "rationale": "Disable faulty PDF preview add-in",
-                 "postconditions": [{"type": "device_config_equals", "params": {"enabled": False}}]},
+                 "postconditions": [{"type": "device_config_equals", "params": {
+                     "app": "Outlook", "addin_progid": "PdfPreview.Connect", "enabled": False}}]},
                 {"action": "app.restart", "params": {"process": "outlook.exe"}, "rationale": "Restart Outlook to apply",
                  "postconditions": [{"type": "device_process_responding", "params": {"process": "outlook.exe"}}]}],
             "rollback": {"action": "office.addin.restore_load_behavior", "source_step": 0,
@@ -95,7 +96,10 @@ def run_until(c, run_id, pred, proc=None, timeout=60):
             return last
         time.sleep(0.3)
     out = proc.stdout.read() if proc and proc.poll() is not None else ""
-    raise AssertionError(f"timeout: {last['state']} {last['paused_for']} {last['transitions'][-3:]} {out[-1500:]}")
+    raise AssertionError(
+        f"timeout: {last['state']} {last['paused_for']} {last['transitions'][-3:]} "
+        f"verifications={last.get('verifications')} {out[-1500:]}"
+    )
 
 
 def setup_device(app, owner, tmp):
@@ -104,6 +108,50 @@ def setup_device(app, owner, tmp):
     code = customer.post("/api/v1/devices/enrollment-codes", json={}).json()["code"]
     dev = json.loads(sim("enroll", URL, code, tmp).strip().splitlines()[-1])
     return customer, dev
+
+
+def test_signed_direct_request_replies_before_any_desktop_command(api_server, app, owner):
+    """A conversation may diagnose and pause, but it cannot silently become computer control."""
+    from test_device_protocol import FakeDevice, _code
+
+    from joltiq.db import session_scope
+    from joltiq.models import AgentRun, Device, DeviceCommand, SupportSession, Ticket
+
+    publish_desktop_procedure(app, owner)
+    device_client = FakeDevice(app)
+    assert device_client.enroll(_code(owner)).status_code == 200
+
+    created = device_client.post(
+        "/support-requests",
+        {
+            "client_request_id": str(uuid.uuid4()),
+            "message": "Outlook closes every time I open a PDF attachment.",
+        },
+    )
+    assert created.status_code == 201, created.text
+    result = created.json()
+    run = run_until(owner, result["run_id"], lambda value: value["state"] == "AWAITING_DIAGNOSTIC_CONSENT")
+
+    status = device_client.get(f"/support-requests/{result['run_id']}")
+    assert status.status_code == 200, status.text
+    messages = status.json()["messages"]
+    assert messages[0]["role"] == "user"
+    assert any(message["role"] == "assistant" and message["content"].strip() for message in messages)
+    assert run["plans"] == []
+
+    with session_scope(uuid.UUID(owner.org_id)) as db:
+        device = db.get(Device, uuid.UUID(device_client.device_id))
+        ticket = db.get(Ticket, uuid.UUID(result["ticket_id"]))
+        agent_run = db.get(AgentRun, uuid.UUID(result["run_id"]))
+        session = db.execute(select(SupportSession).where(SupportSession.run_id == agent_run.id)).scalar_one()
+        commands = db.execute(select(DeviceCommand).where(DeviceCommand.device_id == device.id)).scalars().all()
+
+        assert ticket.device_id == device.id and agent_run.ticket_id == ticket.id
+        assert session.state == "pending_consent"
+        assert not (session.consent or {}).get("device_local_consent")
+        assert commands == []
+
+    assert device_client.get("/poll").json()["envelopes"] == []
 
 
 def test_desktop_fix_verified_via_companion_protocol(api_server, app, owner):
@@ -124,7 +172,8 @@ def test_desktop_fix_verified_via_companion_protocol(api_server, app, owner):
     run = run_until(customer, run_id, lambda r: r["state"] == "AWAITING_APPROVAL")
     assert [s["action"] for s in run["plans"][-1]["steps"]] == ["office.addin.set_load_behavior", "app.restart"]
     assert run["plans"][-1]["procedure"]["hash"] == sess["request_details"]["procedure_hash"]
-    assert any(o.get("task") == "candidate_selection" for o in run["model_calls"])
+    staff_run = owner.get(f"/api/v1/agents/runs/{run_id}").json()
+    assert any(o.get("task") == "candidate_selection" for o in staff_run["model_calls"])
     assert all(s["params"].get("addin_progid", "PdfPreview.Connect") == "PdfPreview.Connect" for s in run["plans"][-1]["steps"])
     for a in run["approvals"]:
         assert customer.post(f"/api/v1/approvals/{a['id']}/decision", json={"decision": "approve"}).status_code == 200
@@ -147,7 +196,7 @@ def test_desktop_fix_verified_via_companion_protocol(api_server, app, owner):
     proc.terminate()
     out = proc.communicate(timeout=10)[0]
     assert run["state"] == "RESOLVED" and run["outcome_stage"] == "RESOLVED_VERIFIED", (run["transitions"][-4:], out[-1500:])
-    checks = {d["type"]: d for d in run["verifications"][-1]["details"]}
+    checks = {d["type"]: d for verification in run["verifications"] for d in verification["details"]}
     assert checks["device_config_equals"]["status"] == "VERIFIED" and checks["device_process_responding"]["status"] == "VERIFIED"
     assert customer.get(f"/api/v1/tickets/{t['id']}").json()["resolution_verified"] is True
 

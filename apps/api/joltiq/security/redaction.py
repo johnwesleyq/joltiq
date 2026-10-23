@@ -28,7 +28,16 @@ _NAME_CUES = re.compile(
 )
 
 # Field names whose values are always masked regardless of content.
-SECRET_KEYS = re.compile(r"(?i)(password|passwd|secret|token|cookie|authorization|api[_-]?key|mfa|otp|private[_-]?key|session)")
+# Match secret-bearing key components without treating ordinary operational
+# metadata such as ``active_session_count`` as a credential.  A bare
+# ``session`` value is still sensitive, as are session-token style keys.
+SECRET_KEYS = re.compile(
+    r"(?i)(?:"
+    r"(?:^|[_-])(?:password|passwd|secret|token|cookie|authorization|api[_-]?key|mfa|otp|private[_-]?key)(?:$|[_-])"
+    r"|^session$"
+    r"|^session(?:token|secret|key|cookie)$"
+    r")"
+)
 
 
 @dataclass
