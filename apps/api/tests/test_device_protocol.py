@@ -109,7 +109,10 @@ def test_signed_device_support_request_links_identity_and_creates_no_control_art
     d = FakeDevice(app)
     assert d.enroll(_code(owner)).status_code == 200
 
-    created = d.post("/support-requests", {"message": "Outlook cannot find Adobe Sign."})
+    created = d.post(
+        "/support-requests",
+        {"client_request_id": str(uuid.uuid4()), "message": "Outlook cannot find Adobe Sign."},
+    )
     assert created.status_code == 201, created.text
     result = created.json()
     assert set(result) == {"ticket_id", "ticket_number", "run_id", "state"}
@@ -135,7 +138,10 @@ def test_device_support_request_status_is_customer_safe_and_can_continue(app, ow
 
     d = FakeDevice(app)
     assert d.enroll(_code(owner)).status_code == 200
-    created = d.post("/support-requests", {"message": "Please help with Outlook."})
+    created = d.post(
+        "/support-requests",
+        {"client_request_id": str(uuid.uuid4()), "message": "Please help with Outlook."},
+    )
     assert created.status_code == 201, created.text
     run_id = created.json()["run_id"]
 
@@ -173,7 +179,10 @@ def test_device_support_request_is_private_to_its_device_even_in_same_tenant(app
     second = FakeDevice(app)
     assert first.enroll(_code(owner)).status_code == 200
     assert second.enroll(_code(owner)).status_code == 200
-    created = first.post("/support-requests", {"message": "Private device issue."})
+    created = first.post(
+        "/support-requests",
+        {"client_request_id": str(uuid.uuid4()), "message": "Private device issue."},
+    )
     assert created.status_code == 201
     run_id = created.json()["run_id"]
 
@@ -186,9 +195,54 @@ def test_revoked_device_cannot_create_support_request(app, owner):
     assert d.enroll(_code(owner)).status_code == 200
     assert owner.post(f"/api/v1/devices/{d.device_id}/revoke").status_code == 200
 
-    refused = d.post("/support-requests", {"message": "This must not create a ticket."})
+    refused = d.post(
+        "/support-requests",
+        {"client_request_id": str(uuid.uuid4()), "message": "This must not create a ticket."},
+    )
     assert refused.status_code == 403
     assert refused.json()["error"]["code"] == "device_revoked"
+
+
+def test_device_support_request_retry_returns_original_ticket_and_run(app, owner):
+    from sqlalchemy import func, select
+
+    from joltiq.db import session_scope
+    from joltiq.models import DeviceSupportRequest
+
+    d = FakeDevice(app)
+    assert d.enroll(_code(owner)).status_code == 200
+    request_id = str(uuid.uuid4())
+    payload = {"client_request_id": request_id, "message": "The same request must be safe to retry."}
+
+    first = d.post("/support-requests", payload)
+    retry = d.post("/support-requests", payload)
+    assert first.status_code == 201, first.text
+    assert retry.status_code == 201, retry.text
+    assert retry.json() == first.json()
+
+    with session_scope(uuid.UUID(owner.org_id)) as db:
+        count = db.scalar(
+            select(func.count()).select_from(DeviceSupportRequest).where(
+                DeviceSupportRequest.device_id == uuid.UUID(d.device_id),
+                DeviceSupportRequest.client_request_id == uuid.UUID(request_id),
+            )
+        )
+        assert count == 1
+
+
+def test_device_support_request_idempotency_key_is_scoped_to_device(app, owner):
+    first_device = FakeDevice(app)
+    second_device = FakeDevice(app)
+    assert first_device.enroll(_code(owner)).status_code == 200
+    assert second_device.enroll(_code(owner)).status_code == 200
+    payload = {"client_request_id": str(uuid.uuid4()), "message": "Device-scoped retry key."}
+
+    first = first_device.post("/support-requests", payload)
+    second = second_device.post("/support-requests", payload)
+    assert first.status_code == 201, first.text
+    assert second.status_code == 201, second.text
+    assert first.json()["ticket_id"] != second.json()["ticket_id"]
+    assert first.json()["run_id"] != second.json()["run_id"]
 
 
 def test_server_envelope_signature_verifies(app, owner):

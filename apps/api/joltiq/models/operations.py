@@ -64,6 +64,18 @@ class DeviceNonce(Base):
     seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class DeviceSupportRequest(IdMixin, TimestampMixin, TenantMixin, Base):
+    """Device-scoped idempotency record for the first direct-help message."""
+
+    __tablename__ = "device_support_requests"
+    __table_args__ = (UniqueConstraint("device_id", "client_request_id"),)
+    device_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("devices.id", ondelete="CASCADE"), index=True)
+    client_request_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    ticket_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tickets.id", ondelete="CASCADE"))
+    run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("agent_runs.id", ondelete="CASCADE"))
+    response: Mapped[dict] = mapped_column(JSONB)
+
+
 class DeviceCommand(IdMixin, TimestampMixin, TenantMixin, Base):
     """Server -> device signed action request queue (device polls over outbound HTTPS / WebSocket)."""
 

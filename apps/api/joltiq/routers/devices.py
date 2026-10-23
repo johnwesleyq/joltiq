@@ -6,14 +6,14 @@ import uuid
 from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..core.errors import AppError, Forbidden, NotFound
 from ..db import get_raw_session
 from ..deps import Ctx, get_ctx, perm
-from ..models import AgentRun, Device, DeviceCommand, Membership, SupportSession, Ticket, User
+from ..models import AgentRun, Device, DeviceCommand, DeviceSupportRequest, Membership, SupportSession, Ticket, User
 from ..models.enums import TERMINAL_RUN_STATES
 from ..services import agent as agent_svc
 from ..services import audit
@@ -120,6 +120,10 @@ class DeviceSupportMessageIn(BaseModel):
     message: str = Field(min_length=1, max_length=20_000)
 
 
+class DeviceSupportRequestIn(DeviceSupportMessageIn):
+    client_request_id: uuid.UUID
+
+
 class DeviceSupportCreatedOut(BaseModel):
     ticket_id: uuid.UUID
     ticket_number: int
@@ -155,9 +159,21 @@ def _device_support_run(db: Session, device: Device, run_id: uuid.UUID) -> tuple
 
 
 @agent_router.post("/support-requests", status_code=201, response_model=DeviceSupportCreatedOut)
-def create_device_support_request(body: DeviceSupportMessageIn, dd=Depends(device_auth)):
+def create_device_support_request(body: DeviceSupportRequestIn, dd=Depends(device_auth)):
     db, device = dd
     owner = _support_owner(db, device)
+    db.execute(
+        text("select pg_advisory_xact_lock(hashtext(:key))"),
+        {"key": f"device-support-request:{device.id}:{body.client_request_id}"},
+    )
+    existing = db.execute(
+        select(DeviceSupportRequest).where(
+            DeviceSupportRequest.device_id == device.id,
+            DeviceSupportRequest.client_request_id == body.client_request_id,
+        )
+    ).scalar_one_or_none()
+    if existing:
+        return existing.response
     subject = body.message.split("\n", 1)[0][:120].strip()
     ticket = ticket_svc.create(
         db,
@@ -181,7 +197,19 @@ def create_device_support_request(body: DeviceSupportMessageIn, dd=Depends(devic
         resource_id=run.id,
         data={"ticket_id": str(ticket.id)},
     )
-    return {"ticket_id": ticket.id, "ticket_number": ticket.number, "run_id": run.id, "state": run.state}
+    response = {"ticket_id": str(ticket.id), "ticket_number": ticket.number, "run_id": str(run.id), "state": run.state}
+    db.add(
+        DeviceSupportRequest(
+            org_id=device.org_id,
+            device_id=device.id,
+            client_request_id=body.client_request_id,
+            ticket_id=ticket.id,
+            run_id=run.id,
+            response=response,
+        )
+    )
+    db.flush()
+    return response
 
 
 @agent_router.post("/support-requests/{run_id}/messages", response_model=DeviceSupportMessageOut)
