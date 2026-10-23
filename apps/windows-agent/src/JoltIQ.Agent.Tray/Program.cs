@@ -36,6 +36,8 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
     private SessionBanner? _banner;
     private GuideOverlay? _guideOverlay;
     private GuideControlBar? _guideControls;
+    private SupportConversationForm? _supportConversation;
+    private ToolStripMenuItem? _askItem;
     private string? _activeSession;
     private readonly HotkeyWindow _hotkey;
 
@@ -51,6 +53,8 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
     {
         var m = new ContextMenuStrip();
         m.Items.Add("Status…", null, (_, _) => ShowStatus());
+        _askItem = new ToolStripMenuItem("Ask JoltIQ…", null, (_, _) => ShowSupportConversation()) { Enabled = false };
+        m.Items.Add(_askItem);
         m.Items.Add("Enroll this device…", null, (_, _) => Enroll());
         m.Items.Add(new ToolStripSeparator());
         m.Items.Add("STOP active support session", null, (_, _) => StopActive("tray menu"));
@@ -74,6 +78,7 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
         _cts = new CancellationTokenSource();
         _ = Task.Run(() => _runtime.RunAsync(_cts.Token));
         _icon.Text = $"JoltIQ Companion — connected ({_client.State.DeviceId?[..8]})";
+        if (_askItem is not null) _askItem.Enabled = true;
     }
 
     private void Enroll()
@@ -104,7 +109,25 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
         try { _client.SendAsync(HttpMethod.Post, "/unenroll", new { }).GetAwaiter().GetResult(); } catch (Exception) { /* revoke locally anyway */ }
         _cts?.Cancel();
         _client.ForgetEnrollment();
+        _supportConversation?.Close();
+        _supportConversation = null;
+        if (_askItem is not null) _askItem.Enabled = false;
         _icon.Text = "JoltIQ Companion — not enrolled";
+    }
+
+    private void ShowSupportConversation()
+    {
+        if (_client?.Enrolled != true) return;
+        if (_supportConversation is { IsDisposed: false })
+        {
+            _supportConversation.Show();
+            _supportConversation.Activate();
+            return;
+        }
+        var controller = new SupportConversationController(new AgentSupportRequestClient(_client));
+        _supportConversation = new SupportConversationForm(controller, _client.State.ServerUrl);
+        _supportConversation.FormClosed += (_, _) => _supportConversation = null;
+        _supportConversation.Show();
     }
 
     private void StopActive(string via)
@@ -228,6 +251,7 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
     {
         StopActive("exit");
         _cts?.Cancel();
+        _supportConversation?.Close();
         _icon.Visible = false;
         _hotkey.Dispose();
         base.ExitThreadCore();
