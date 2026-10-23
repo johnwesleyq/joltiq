@@ -45,7 +45,8 @@ public sealed class AgentClient : IDisposable
     public const string ApiPrefix = "/api/v1/agent/v1";
     private readonly HttpClient _http;
     private readonly IKeyStore _store;
-    private readonly object _ctrLock = new();
+    private readonly object _stateLock = new();
+    private readonly SemaphoreSlim _sendGate = new(1, 1);
     public AgentState State { get; private set; }
     private DeviceKey? _key;
 
@@ -70,7 +71,7 @@ public sealed class AgentClient : IDisposable
     public bool Enrolled => State.DeviceId is not null && _key is not null && State.ServerPublicKeyPem is not null;
     public SupportRequestBookmark? ActiveSupportRequest => State.ActiveSupportRequest;
 
-    private void Persist() => _store.Save("state.json", JsonSerializer.SerializeToUtf8Bytes(State));
+    private void PersistLocked() => _store.Save("state.json", JsonSerializer.SerializeToUtf8Bytes(State));
 
     public async Task EnrollAsync(string code, string hostname, string osName, string osVersion, IEnumerable<string> capabilities,
         string? enrolledUserSid = null, CancellationToken ct = default)
@@ -86,13 +87,17 @@ public sealed class AgentClient : IDisposable
         var text = await resp.Content.ReadAsStringAsync(ct);
         if (!resp.IsSuccessStatusCode) throw new AgentProtocolException($"Enrollment failed ({(int)resp.StatusCode}): {Truncate(text)}");
         var j = JsonNode.Parse(text)!;
-        State.DeviceId = j["device_id"]!.GetValue<string>();
-        State.OrgId = j["org_id"]!.GetValue<string>();
-        State.ServerPublicKeyPem = j["server_public_key_pem"]!.GetValue<string>();
-        State.EnrolledUserSid = enrolledUserSid;
-        State.Counter = 0;
-        _store.Save("device.key", _key.ExportPkcs8());
-        Persist();
+        lock (_stateLock)
+        {
+            State.DeviceId = j["device_id"]!.GetValue<string>();
+            State.OrgId = j["org_id"]!.GetValue<string>();
+            State.ServerPublicKeyPem = j["server_public_key_pem"]!.GetValue<string>();
+            State.EnrolledUserSid = enrolledUserSid;
+            State.Counter = 0;
+            State.ActiveSupportRequest = null;
+            _store.Save("device.key", _key.ExportPkcs8());
+            PersistLocked();
+        }
     }
 
     public async Task<JsonNode?> SendAsync(HttpMethod method, string relPath, object? payload = null, CancellationToken ct = default)
@@ -122,25 +127,38 @@ public sealed class AgentClient : IDisposable
         CancellationToken ct)
     {
         if (!Enrolled) throw new InvalidOperationException("not enrolled");
-        var path = ApiPrefix + relPath;
-        string ctr;
-        lock (_ctrLock) { State.Counter++; ctr = State.Counter.ToString(); Persist(); }
-        var ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
-        var nonce = RequestSigning.NewNonce();
-        var sig = _key!.Sign(RequestSigning.StringToSign(method.Method, path, ts, nonce, ctr, body));
-        using var req = new HttpRequestMessage(method, State.ServerUrl + path);
-        if (mediaType is not null)
-            req.Content = new ByteArrayContent(body) { Headers = { ContentType = new MediaTypeHeaderValue(mediaType) } };
-        req.Headers.Add("X-JQ-Device", State.DeviceId);
-        req.Headers.Add("X-JQ-Timestamp", ts);
-        req.Headers.Add("X-JQ-Nonce", nonce);
-        req.Headers.Add("X-JQ-Counter", ctr);
-        req.Headers.Add("X-JQ-Signature", sig);
-        using var resp = await _http.SendAsync(req, ct);
-        var text = await resp.Content.ReadAsStringAsync(ct);
-        if ((int)resp.StatusCode == 403 && text.Contains("device_revoked")) throw new DeviceRevokedException();
-        if (!resp.IsSuccessStatusCode) throw new AgentProtocolException($"{method} {relPath} failed ({(int)resp.StatusCode}): {Truncate(text)}");
-        return text.Length == 0 ? null : JsonNode.Parse(text);
+        await _sendGate.WaitAsync(ct);
+        try
+        {
+            var path = ApiPrefix + relPath;
+            string ctr;
+            lock (_stateLock)
+            {
+                State.Counter++;
+                ctr = State.Counter.ToString();
+                PersistLocked();
+            }
+            var ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
+            var nonce = RequestSigning.NewNonce();
+            var sig = _key!.Sign(RequestSigning.StringToSign(method.Method, path, ts, nonce, ctr, body));
+            using var req = new HttpRequestMessage(method, State.ServerUrl + path);
+            if (mediaType is not null)
+                req.Content = new ByteArrayContent(body) { Headers = { ContentType = new MediaTypeHeaderValue(mediaType) } };
+            req.Headers.Add("X-JQ-Device", State.DeviceId);
+            req.Headers.Add("X-JQ-Timestamp", ts);
+            req.Headers.Add("X-JQ-Nonce", nonce);
+            req.Headers.Add("X-JQ-Counter", ctr);
+            req.Headers.Add("X-JQ-Signature", sig);
+            using var resp = await _http.SendAsync(req, ct);
+            var text = await resp.Content.ReadAsStringAsync(ct);
+            if ((int)resp.StatusCode == 403 && text.Contains("device_revoked")) throw new DeviceRevokedException();
+            if (!resp.IsSuccessStatusCode) throw new AgentProtocolException($"{method} {relPath} failed ({(int)resp.StatusCode}): {Truncate(text)}");
+            return text.Length == 0 ? null : JsonNode.Parse(text);
+        }
+        finally
+        {
+            _sendGate.Release();
+        }
     }
 
     public Task<JsonNode?> SendCommandResultAsync(PendingCommandReport report, CancellationToken ct = default) =>
@@ -180,27 +198,36 @@ public sealed class AgentClient : IDisposable
         var id = NormalizeRunId(runId);
         var node = await SendAsync(HttpMethod.Get, $"/support-requests/{id}", ct: ct);
         var detail = ParseResponse<SupportRequestDetail>(node, "get support request");
-        if (State.ActiveSupportRequest is { } active && active.RunId == detail.Id)
+        lock (_stateLock)
         {
-            State.ActiveSupportRequest = active with { State = detail.State };
-            Persist();
+            if (State.ActiveSupportRequest is { } active && active.RunId == detail.Id)
+            {
+                State.ActiveSupportRequest = active with { State = detail.State };
+                PersistLocked();
+            }
         }
         return detail;
     }
 
     private void RememberSupportRequest(SupportRequestResult result)
     {
-        State.ActiveSupportRequest = new SupportRequestBookmark(result.TicketId, result.TicketNumber, result.RunId, result.State);
-        Persist();
+        lock (_stateLock)
+        {
+            State.ActiveSupportRequest = new SupportRequestBookmark(result.TicketId, result.TicketNumber, result.RunId, result.State);
+            PersistLocked();
+        }
     }
 
     public void ForgetEnrollment()
     {
-        _store.Delete("device.key");
-        _store.Delete("state.json");
-        _key?.Dispose();
-        _key = null;
-        State = new AgentState { ServerUrl = State.ServerUrl };
+        lock (_stateLock)
+        {
+            _store.Delete("device.key");
+            _store.Delete("state.json");
+            _key?.Dispose();
+            _key = null;
+            State = new AgentState { ServerUrl = State.ServerUrl };
+        }
     }
 
     private static T ParseResponse<T>(JsonNode? node, string operation)
@@ -230,7 +257,7 @@ public sealed class AgentClient : IDisposable
         var redacted = Redactor.Redact(s);
         return redacted.Length > 300 ? redacted[..300] : redacted;
     }
-    public void Dispose() { _http.Dispose(); _key?.Dispose(); }
+    public void Dispose() { _http.Dispose(); _key?.Dispose(); _sendGate.Dispose(); }
 }
 
 public class AgentProtocolException : Exception

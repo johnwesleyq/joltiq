@@ -228,6 +228,42 @@ await TA("direct help bookmark survives a client restart", async () =>
     }, "active support request was not restored");
 });
 
+await TA("signed requests remain ordered while concurrent callers wait", async () =>
+{
+    var handler = new OrderedSendProbeHandler();
+    using var client = DirectHelpClient(handler);
+    var first = client.GetSupportRequestAsync("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", default);
+    await handler.FirstEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+    var second = client.GetSupportRequestAsync("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", default);
+    await Task.Delay(100);
+    Assert(handler.Entered == 1, "a later signed request reached the network before the earlier request completed");
+    handler.ReleaseFirst.TrySetResult();
+    await Task.WhenAll(first, second);
+    Assert(handler.Counters.SequenceEqual(new[] { 1L, 2L }), "signed counters arrived out of order");
+});
+
+await TA("concurrent status responses never overlap state-file saves", async () =>
+{
+    var store = new ConcurrentSaveProbeStore();
+    using var key = DeviceKey.Create();
+    store.Save("device.key", key.ExportPkcs8());
+    store.Save("state.json", JsonSerializer.SerializeToUtf8Bytes(new AgentState
+    {
+        ServerUrl = "http://localhost",
+        DeviceId = "11111111-1111-1111-1111-111111111111",
+        OrgId = "22222222-2222-2222-2222-222222222222",
+        ServerPublicKeyPem = "enrolled",
+        ActiveSupportRequest = new SupportRequestBookmark(
+            "cccccccc-cccc-cccc-cccc-cccccccccccc", 42,
+            "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "CLARIFYING"),
+    }));
+    store.ResetProbe();
+    using var client = new AgentClient("http://localhost", store, new ConcurrentStatusHandler());
+    await Task.WhenAll(Enumerable.Range(0, 12).Select(_ =>
+        client.GetSupportRequestAsync("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", default)));
+    Assert(!store.OverlapDetected, "state saves overlapped on the fixed temporary file");
+});
+
 await TA("direct help client redacts server errors and honors cancellation", async () =>
 {
     var failing = new DirectHelpHandler();
@@ -554,6 +590,26 @@ sealed class MemoryKeyStore : IKeyStore
     public void Delete(string name) => _data.Remove(name);
 }
 
+sealed class ConcurrentSaveProbeStore : IKeyStore
+{
+    private readonly Dictionary<string, byte[]> _data = new(StringComparer.Ordinal);
+    private int _activeSaves;
+    public bool OverlapDetected { get; private set; }
+    public byte[]? Load(string name) { lock (_data) return _data.TryGetValue(name, out var value) ? value.ToArray() : null; }
+    public void Save(string name, byte[] data)
+    {
+        if (Interlocked.Increment(ref _activeSaves) > 1) OverlapDetected = true;
+        try
+        {
+            Thread.Sleep(15);
+            lock (_data) _data[name] = data.ToArray();
+        }
+        finally { Interlocked.Decrement(ref _activeSaves); }
+    }
+    public void Delete(string name) { lock (_data) _data.Remove(name); }
+    public void ResetProbe() => OverlapDetected = false;
+}
+
 sealed class ProtocolHandler : HttpMessageHandler
 {
     private readonly Queue<JsonArray> _polls = new();
@@ -636,6 +692,43 @@ sealed class DirectHelpHandler : HttpMessageHandler
         if (_responses.Count == 0) throw new InvalidOperationException("No direct-help response was queued");
         return _responses.Dequeue();
     }
+}
+
+sealed class OrderedSendProbeHandler : HttpMessageHandler
+{
+    public int Entered;
+    public List<long> Counters { get; } = [];
+    public TaskCompletionSource FirstEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource ReleaseFirst { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        var entered = Interlocked.Increment(ref Entered);
+        lock (Counters) Counters.Add(long.Parse(request.Headers.GetValues("X-JQ-Counter").Single()));
+        if (entered == 1)
+        {
+            FirstEntered.TrySetResult();
+            await ReleaseFirst.Task.WaitAsync(cancellationToken);
+        }
+        return ConcurrentStatusHandler.Response();
+    }
+}
+
+sealed class ConcurrentStatusHandler : HttpMessageHandler
+{
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        await Task.Delay(20, cancellationToken);
+        return Response();
+    }
+
+    public static HttpResponseMessage Response() => new(System.Net.HttpStatusCode.OK)
+    {
+        Content = new StringContent(
+            "{\"id\":\"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\",\"ticket_id\":\"cccccccc-cccc-cccc-cccc-cccccccccccc\",\"state\":\"CLARIFYING\",\"paused_for\":\"customer\",\"outcome_stage\":null,\"messages\":[]}",
+            Encoding.UTF8,
+            "application/json"),
+    };
 }
 
 sealed class RuntimeHarness : IDisposable
