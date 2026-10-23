@@ -34,7 +34,14 @@ if ($ValidateComputerUseHarness) { & $computerUseRunner -ValidateHarness; exit $
 if ($ValidateHarness -or $PSCmdlet.ParameterSetName -eq 'Validate') { & $runner -ValidateHarness; exit $LASTEXITCODE }
 
 if ($InstallerLifecycle) {
-    if (-not $IsWindows) { throw 'Installer lifecycle validation requires a clean Windows VM.' }
+    # $IsWindows is defined by PowerShell Core, but the supported Windows 10/11
+    # acceptance hosts may still use the built-in Windows PowerShell 5.1.
+    $isWindowsHost = if (Get-Variable IsWindows -ErrorAction SilentlyContinue) {
+        [bool]$IsWindows
+    } else {
+        $env:OS -eq 'Windows_NT'
+    }
+    if (-not $isWindowsHost) { throw 'Installer lifecycle validation requires a clean Windows VM.' }
     Import-Module $gate -Force
     $Msi = (Resolve-Path $Msi).Path
     if ($PreviousMsi) { $PreviousMsi = (Resolve-Path $PreviousMsi).Path }

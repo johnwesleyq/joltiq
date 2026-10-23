@@ -137,6 +137,15 @@ Test 'build disables reusable dotnet workers so captured output cannot hang' {
         throw 'build.ps1 must shut down stale dotnet build servers before the first captured build'
     }
 }
+Test 'installer lifecycle host detection supports Windows PowerShell 5.1' {
+    $lifecycleScript = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\test-on-windows.ps1') -Raw
+    if ($lifecycleScript -match 'if \(-not \$IsWindows\)') {
+        throw 'installer lifecycle still reads the PowerShell Core-only variable directly'
+    }
+    if ($lifecycleScript -notmatch [regex]::Escape("`$env:OS -eq 'Windows_NT'")) {
+        throw 'installer lifecycle lacks a Windows PowerShell 5.1 host fallback'
+    }
+}
 Test 'missing package inputs and checksum mismatches fail the gate' {
     $temp = Join-Path ([IO.Path]::GetTempPath()) ('joltiq-build-gate-' + [guid]::NewGuid().ToString('N'))
     try {
