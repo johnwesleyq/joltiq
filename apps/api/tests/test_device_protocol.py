@@ -100,6 +100,97 @@ def test_revoked_device_is_refused_and_envelopes_are_signed(app, owner):
     assert r.status_code == 403 and r.json()["error"]["code"] == "device_revoked"
 
 
+def test_signed_device_support_request_links_identity_and_creates_no_control_artifacts(app, owner):
+    from sqlalchemy import func, select
+
+    from joltiq.db import session_scope
+    from joltiq.models import Approval, Device, DeviceCommand, SupportSession, Ticket
+
+    d = FakeDevice(app)
+    assert d.enroll(_code(owner)).status_code == 200
+
+    created = d.post("/support-requests", {"message": "Outlook cannot find Adobe Sign."})
+    assert created.status_code == 201, created.text
+    result = created.json()
+    assert set(result) == {"ticket_id", "ticket_number", "run_id", "state"}
+
+    with session_scope(uuid.UUID(owner.org_id)) as db:
+        device = db.get(Device, uuid.UUID(d.device_id))
+        ticket = db.get(Ticket, uuid.UUID(result["ticket_id"]))
+        assert ticket.org_id == device.org_id
+        assert ticket.customer_id == device.customer_id
+        assert ticket.requester_id == device.owner_user_id
+        assert ticket.device_id == device.id
+        assert ticket.source == "device_chat"
+        assert db.scalar(select(func.count()).select_from(SupportSession)) == 0
+        assert db.scalar(select(func.count()).select_from(Approval)) == 0
+        assert db.scalar(select(func.count()).select_from(DeviceCommand)) == 0
+
+
+def test_device_support_request_status_is_customer_safe_and_can_continue(app, owner):
+    from sqlalchemy import select
+
+    from joltiq.db import session_scope
+    from joltiq.models import AgentMessage, AuditEvent
+
+    d = FakeDevice(app)
+    assert d.enroll(_code(owner)).status_code == 200
+    created = d.post("/support-requests", {"message": "Please help with Outlook."})
+    assert created.status_code == 201, created.text
+    run_id = created.json()["run_id"]
+
+    continued = d.post(f"/support-requests/{run_id}/messages", {"message": "It fails when I open a PDF."})
+    assert continued.status_code == 200, continued.text
+    assert continued.json()["run_id"] == run_id
+
+    status = d.get(f"/support-requests/{run_id}")
+    assert status.status_code == 200, status.text
+    body = status.json()
+    assert "model_calls" not in body
+    assert "observations" not in body
+    assert "hypotheses" not in body
+    assert [message["content"] for message in body["messages"]] == [
+        "Please help with Outlook.",
+        "It fails when I open a PDF.",
+    ]
+
+    with session_scope(uuid.UUID(owner.org_id)) as db:
+        messages = db.execute(select(AgentMessage).where(AgentMessage.run_id == uuid.UUID(run_id))).scalars().all()
+        assert [message.content for message in messages] == [
+            "Please help with Outlook.",
+            "It fails when I open a PDF.",
+        ]
+        actions = db.execute(
+            select(AuditEvent.action)
+            .where(AuditEvent.action.in_(("support_request.created", "support_request.message")))
+            .order_by(AuditEvent.id)
+        ).scalars().all()
+        assert actions == ["support_request.created", "support_request.message"]
+
+
+def test_device_support_request_is_private_to_its_device_even_in_same_tenant(app, owner):
+    first = FakeDevice(app)
+    second = FakeDevice(app)
+    assert first.enroll(_code(owner)).status_code == 200
+    assert second.enroll(_code(owner)).status_code == 200
+    created = first.post("/support-requests", {"message": "Private device issue."})
+    assert created.status_code == 201
+    run_id = created.json()["run_id"]
+
+    assert second.get(f"/support-requests/{run_id}").status_code == 404
+    assert second.post(f"/support-requests/{run_id}/messages", {"message": "Cross-device write."}).status_code == 404
+
+
+def test_revoked_device_cannot_create_support_request(app, owner):
+    d = FakeDevice(app)
+    assert d.enroll(_code(owner)).status_code == 200
+    assert owner.post(f"/api/v1/devices/{d.device_id}/revoke").status_code == 200
+
+    refused = d.post("/support-requests", {"message": "This must not create a ticket."})
+    assert refused.status_code == 403
+    assert refused.json()["error"]["code"] == "device_revoked"
+
+
 def test_server_envelope_signature_verifies(app, owner):
     from joltiq.services.devices import sign_envelope
 

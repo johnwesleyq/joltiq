@@ -5,7 +5,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -13,11 +13,13 @@ from ..config import get_settings
 from ..core.errors import AppError, Forbidden, NotFound
 from ..db import get_raw_session
 from ..deps import Ctx, get_ctx, perm
-from ..models import AgentRun, Device, DeviceCommand, SupportSession
+from ..models import AgentRun, Device, DeviceCommand, Membership, SupportSession, Ticket, User
+from ..models.enums import TERMINAL_RUN_STATES
 from ..services import agent as agent_svc
 from ..services import audit
 from ..services import devices as svc
 from ..services import sessions as session_svc
+from ..services import tickets as ticket_svc
 from ..services.actions.registry import ACTIONS
 from .common import page_params, paginate
 
@@ -110,6 +112,107 @@ async def device_auth(request: Request, db: Session = Depends(get_raw_session), 
     d = svc.authenticate_device(db, device_id=x_jq_device, ts=x_jq_timestamp, nonce=x_jq_nonce, counter=x_jq_counter, signature=x_jq_signature,
                                 method=request.method, path=request.url.path, body=body)
     return db, d
+
+
+class DeviceSupportMessageIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    message: str = Field(min_length=1, max_length=20_000)
+
+
+class DeviceSupportCreatedOut(BaseModel):
+    ticket_id: uuid.UUID
+    ticket_number: int
+    run_id: uuid.UUID
+    state: str
+
+
+class DeviceSupportMessageOut(BaseModel):
+    ticket_id: uuid.UUID
+    ticket_number: int
+    run_id: uuid.UUID
+    state: str
+
+
+def _support_owner(db: Session, device: Device) -> User:
+    if not device.owner_user_id:
+        raise Forbidden("This device is not assigned to an active user. Contact your administrator.")
+    owner = db.get(User, device.owner_user_id)
+    membership = db.execute(
+        select(Membership).where(Membership.user_id == device.owner_user_id, Membership.org_id == device.org_id)
+    ).scalar_one_or_none()
+    if not owner or owner.disabled or not membership:
+        raise Forbidden("This device owner is no longer active. Contact your administrator.")
+    return owner
+
+
+def _device_support_run(db: Session, device: Device, run_id: uuid.UUID) -> tuple[AgentRun, Ticket]:
+    run = db.get(AgentRun, run_id)
+    ticket = db.get(Ticket, run.ticket_id) if run and run.ticket_id else None
+    if not run or not ticket or ticket.device_id != device.id:
+        raise NotFound("Support request not found")
+    return run, ticket
+
+
+@agent_router.post("/support-requests", status_code=201, response_model=DeviceSupportCreatedOut)
+def create_device_support_request(body: DeviceSupportMessageIn, dd=Depends(device_auth)):
+    db, device = dd
+    owner = _support_owner(db, device)
+    subject = body.message.split("\n", 1)[0][:120].strip()
+    ticket = ticket_svc.create(
+        db,
+        device.org_id,
+        subject=subject if len(subject) >= 3 else "Support request",
+        description=body.message,
+        source="device_chat",
+        customer_id=device.customer_id,
+        requester_id=owner.id,
+        device_id=device.id,
+        actor_kind="device",
+    )
+    run = agent_svc.start_run(db, device.org_id, ticket=ticket, started_by=owner.id, first_message=body.message)
+    audit.record(
+        db,
+        org_id=device.org_id,
+        actor_kind="device",
+        actor_id=device.id,
+        action="support_request.created",
+        resource_type="agent_run",
+        resource_id=run.id,
+        data={"ticket_id": str(ticket.id)},
+    )
+    return {"ticket_id": ticket.id, "ticket_number": ticket.number, "run_id": run.id, "state": run.state}
+
+
+@agent_router.post("/support-requests/{run_id}/messages", response_model=DeviceSupportMessageOut)
+def continue_device_support_request(run_id: uuid.UUID, body: DeviceSupportMessageIn, dd=Depends(device_auth)):
+    db, device = dd
+    owner = _support_owner(db, device)
+    run, ticket = _device_support_run(db, device, run_id)
+    if run.state in TERMINAL_RUN_STATES:
+        run = agent_svc.start_run(db, device.org_id, ticket=ticket, started_by=owner.id, first_message=body.message)
+    else:
+        agent_svc.customer_message(db, run, body.message, owner.id)
+        ticket_svc.comment(db, ticket, body.message, author_id=owner.id, author_kind="device")
+    audit.record(
+        db,
+        org_id=device.org_id,
+        actor_kind="device",
+        actor_id=device.id,
+        action="support_request.message",
+        resource_type="agent_run",
+        resource_id=run.id,
+        data={"ticket_id": str(ticket.id)},
+    )
+    return {"ticket_id": ticket.id, "ticket_number": ticket.number, "run_id": run.id, "state": run.state}
+
+
+@agent_router.get("/support-requests/{run_id}")
+def get_device_support_request(run_id: uuid.UUID, dd=Depends(device_auth)):
+    db, device = dd
+    _support_owner(db, device)
+    run, _ = _device_support_run(db, device, run_id)
+    return agent_svc.device_run_detail(db, run)
 
 
 class HeartbeatIn(BaseModel):

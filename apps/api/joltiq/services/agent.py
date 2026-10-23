@@ -1739,4 +1739,27 @@ def run_detail(db: Session, run: AgentRun, *, customer_view: bool) -> dict[str, 
     return out
 
 
+def device_run_detail(db: Session, run: AgentRun) -> dict[str, Any]:
+    """Return the customer-safe conversation view used by an enrolled companion.
+
+    Keep the device contract narrower than the staff/portal representation so new
+    internal diagnostic fields cannot accidentally become companion-visible.
+    """
+    out = run_detail(db, run, customer_view=True)
+    for internal in (
+        "hypotheses",
+        "observations",
+        "model_calls",
+        "cost_usd",
+        "retries",
+        "max_retries",
+        "correlation_id",
+        "uses_test_fixture_model",
+        "article_id",
+        "research_query_id",
+    ):
+        out.pop(internal, None)
+    return out
+
+
 _ = timedelta
