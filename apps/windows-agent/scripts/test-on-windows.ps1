@@ -60,7 +60,9 @@ if ($InstallerLifecycle) {
     }
     function Get-JoltIqInstalledProduct {
         $roots = @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*')
-        @(Get-ItemProperty $roots -ErrorAction SilentlyContinue | Where-Object DisplayName -eq 'JoltIQ Companion') | Select-Object -First 1
+        @(Get-ItemProperty $roots -ErrorAction SilentlyContinue | Where-Object {
+            $_.PSObject.Properties.Match('DisplayName').Count -gt 0 -and $_.DisplayName -eq 'JoltIQ Companion'
+        }) | Select-Object -First 1
     }
     function Assert-Installed {
         $product = Get-JoltIqInstalledProduct

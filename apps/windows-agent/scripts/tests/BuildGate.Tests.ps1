@@ -146,6 +146,24 @@ Test 'installer lifecycle host detection supports Windows PowerShell 5.1' {
         throw 'installer lifecycle lacks a Windows PowerShell 5.1 host fallback'
     }
 }
+Test 'installer lifecycle ignores uninstall registry entries without DisplayName under strict mode' {
+    $lifecycleScript = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\test-on-windows.ps1') -Raw
+    if ($lifecycleScript -match 'Where-Object DisplayName') {
+        throw 'installer lifecycle still uses simplified property syntax that fails when a registry entry has no DisplayName'
+    }
+    if ($lifecycleScript -notmatch [regex]::Escape("`$_.PSObject.Properties.Match('DisplayName').Count -gt 0")) {
+        throw 'installer lifecycle does not guard access to optional uninstall registry values'
+    }
+}
+Test 'installer launch condition uses the real Windows build number' {
+    $installerSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\..\installer\Product.wxs') -Raw
+    if ($installerSource -match 'VersionNT64 &gt;= 1000') {
+        throw 'installer still assumes Windows 10 reports VersionNT64 1000; Windows Installer reports 603 by design'
+    }
+    if ($installerSource -notmatch 'Name="CurrentBuildNumber"' -or $installerSource -notmatch 'WINDOWSBUILDNUMBER &gt;= 10240') {
+        throw 'installer must detect Windows 10 or later using CurrentBuildNumber while separately requiring VersionNT64'
+    }
+}
 Test 'missing package inputs and checksum mismatches fail the gate' {
     $temp = Join-Path ([IO.Path]::GetTempPath()) ('joltiq-build-gate-' + [guid]::NewGuid().ToString('N'))
     try {
