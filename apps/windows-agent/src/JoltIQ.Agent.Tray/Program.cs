@@ -66,13 +66,19 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
         return m;
     }
 
-    private void Start()
+    private void Start(AgentClient? enrolledClient = null, DpapiCommandJournal? journal = null)
     {
-        if (string.IsNullOrEmpty(_cfg.ServerUrl)) return;
-        var keyStore = new DpapiKeyStore();
-        var journal = new DpapiCommandJournal(keyStore);
-        _client = new AgentClient(_cfg.ServerUrl, keyStore);
+        if (enrolledClient is null)
+        {
+            if (string.IsNullOrEmpty(_cfg.ServerUrl)) return;
+            var keyStore = new DpapiKeyStore();
+            journal = new DpapiCommandJournal(keyStore);
+            enrolledClient = new AgentClient(_cfg.ServerUrl, keyStore);
+        }
+
+        _client = enrolledClient;
         if (!_client.Enrolled) return;
+        journal ??= new DpapiCommandJournal(new DpapiKeyStore());
         var provider = CreateProvider(_client.State.EnrolledUserSid, journal);
         _runtime = new AgentRuntime(_client, provider, this, journal);
         _cts = new CancellationTokenSource();
@@ -95,8 +101,9 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
             var sid = WindowsIdentity.GetCurrent().User?.Value ?? throw new InvalidOperationException("Cannot identify the enrolling Windows user");
             var prov = CreateProvider(sid, journal);
             _client.EnrollAsync(f.Code, Environment.MachineName, "Windows", Environment.OSVersion.Version.ToString(), prov.Capabilities, sid).GetAwaiter().GetResult();
-            MessageBox.Show("This device is enrolled. Support sessions always ask for your permission first.", "JoltIQ", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            Start();
+            EnrollmentCompletion.Run(
+                () => Start(_client, journal),
+                () => MessageBox.Show("This device is enrolled. Support sessions always ask for your permission first.", "JoltIQ", MessageBoxButtons.OK, MessageBoxIcon.Information));
         }
         catch (Exception e) { MessageBox.Show(Redactor.Redact(e.Message), "Enrollment failed", MessageBoxButtons.OK, MessageBoxIcon.Error); }
     }
@@ -318,6 +325,17 @@ internal sealed class SessionBanner : Form
     }
     public void SetLast(string s) => _last.Text = "Last: " + s;
     protected override bool ShowWithoutActivation => true;
+}
+
+public static class EnrollmentCompletion
+{
+    public static void Run(Action startRuntime, Action showSuccessNotice)
+    {
+        ArgumentNullException.ThrowIfNull(startRuntime);
+        ArgumentNullException.ThrowIfNull(showSuccessNotice);
+        startRuntime();
+        showSuccessNotice();
+    }
 }
 
 internal sealed class EnrollForm : Form
