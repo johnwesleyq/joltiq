@@ -65,6 +65,7 @@ services:
     build: { context: ., dockerfile: infrastructure/docker/api.Dockerfile }
     environment: *api-env
     volumes: ["appdata:/app/.storage"]
+    command: ["uvicorn", "joltiq.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--proxy-headers", "--forwarded-allow-ips", "*"]
     ports: ["8000:8000"]
     depends_on: { migrate: { condition: service_completed_successfully }, redis: { condition: service_healthy } }
   worker:
