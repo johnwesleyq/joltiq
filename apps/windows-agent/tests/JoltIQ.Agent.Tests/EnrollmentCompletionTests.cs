@@ -16,4 +16,24 @@ public sealed class EnrollmentCompletionTests
 
         Assert.Equal(["runtime-started", "success-notice"], events);
     }
+
+    [Fact]
+    public async Task SlowEnrollmentDoesNotBlockBeforeRuntimeStartup()
+    {
+        var enrollment = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var events = new List<string>();
+
+        var completion = EnrollmentCompletion.RunAsync(
+            () => enrollment.Task,
+            () => events.Add("runtime-started"),
+            () => events.Add("success-notice"));
+
+        Assert.False(completion.IsCompleted);
+        Assert.Empty(events);
+
+        enrollment.SetResult();
+        await completion;
+
+        Assert.Equal(["runtime-started", "success-notice"], events);
+    }
 }

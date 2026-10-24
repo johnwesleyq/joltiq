@@ -55,13 +55,13 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
         m.Items.Add("Status…", null, (_, _) => ShowStatus());
         _askItem = new ToolStripMenuItem("Ask JoltIQ…", null, (_, _) => ShowSupportConversation()) { Enabled = false };
         m.Items.Add(_askItem);
-        m.Items.Add("Enroll this device…", null, (_, _) => Enroll());
+        m.Items.Add("Enroll this device…", null, async (_, _) => await EnrollAsync());
         m.Items.Add(new ToolStripSeparator());
         m.Items.Add("STOP active support session", null, (_, _) => StopActive("tray menu"));
         m.Items.Add("View activity log…", null, (_, _) => ShowLog());
         m.Items.Add(new ToolStripSeparator());
         m.Items.Add("Start with Windows", null, (s, _) => { var it = (ToolStripMenuItem)s!; _cfg.AutoStart = !_cfg.AutoStart; Autostart.Set(_cfg.AutoStart); it.Checked = _cfg.AutoStart; _cfg.Save(); });
-        m.Items.Add("Unenroll this device…", null, (_, _) => Unenroll());
+        m.Items.Add("Unenroll this device…", null, async (_, _) => await UnenrollAsync());
         m.Items.Add("Exit", null, (_, _) => ExitThread());
         return m;
     }
@@ -87,7 +87,7 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
         if (_askItem is not null) _askItem.Enabled = true;
     }
 
-    private void Enroll()
+    private async Task EnrollAsync()
     {
         using var f = new EnrollForm(_cfg.ServerUrl);
         if (f.ShowDialog() != DialogResult.OK) return;
@@ -100,20 +100,20 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
             _client = new AgentClient(f.ServerUrl, keyStore);
             var sid = WindowsIdentity.GetCurrent().User?.Value ?? throw new InvalidOperationException("Cannot identify the enrolling Windows user");
             var prov = CreateProvider(sid, journal);
-            _client.EnrollAsync(f.Code, Environment.MachineName, "Windows", Environment.OSVersion.Version.ToString(), prov.Capabilities, sid).GetAwaiter().GetResult();
-            EnrollmentCompletion.Run(
+            await EnrollmentCompletion.RunAsync(
+                () => _client.EnrollAsync(f.Code, Environment.MachineName, "Windows", Environment.OSVersion.Version.ToString(), prov.Capabilities, sid),
                 () => Start(_client, journal),
-                () => MessageBox.Show("This device is enrolled. Support sessions always ask for your permission first.", "JoltIQ", MessageBoxButtons.OK, MessageBoxIcon.Information));
+                () => { MessageBox.Show("This device is enrolled. Support sessions always ask for your permission first.", "JoltIQ", MessageBoxButtons.OK, MessageBoxIcon.Information); });
         }
         catch (Exception e) { MessageBox.Show(Redactor.Redact(e.Message), "Enrollment failed", MessageBoxButtons.OK, MessageBoxIcon.Error); }
     }
 
-    private void Unenroll()
+    private async Task UnenrollAsync()
     {
         if (_client is null || !_client.Enrolled) return;
         if (MessageBox.Show("Remove this device from your support organization?", "JoltIQ", MessageBoxButtons.YesNo) != DialogResult.Yes) return;
         StopActive("unenroll");
-        try { _client.SendAsync(HttpMethod.Post, "/unenroll", new { }).GetAwaiter().GetResult(); } catch (Exception) { /* revoke locally anyway */ }
+        try { await _client.SendAsync(HttpMethod.Post, "/unenroll", new { }); } catch (Exception) { /* revoke locally anyway */ }
         _cts?.Cancel();
         _client.ForgetEnrollment();
         _supportConversation?.Close();
@@ -335,6 +335,13 @@ public static class EnrollmentCompletion
         ArgumentNullException.ThrowIfNull(showSuccessNotice);
         startRuntime();
         showSuccessNotice();
+    }
+
+    public static async Task RunAsync(Func<Task> enroll, Action startRuntime, Action showSuccessNotice)
+    {
+        ArgumentNullException.ThrowIfNull(enroll);
+        await enroll();
+        Run(startRuntime, showSuccessNotice);
     }
 }
 
