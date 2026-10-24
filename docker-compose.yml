@@ -72,6 +72,8 @@ services:
     environment: *api-env
     volumes: ["appdata:/app/.storage"]
     command: ["python", "-m", "joltiq.worker"]
+    healthcheck:
+      disable: true
     depends_on: { migrate: { condition: service_completed_successfully } }
     stop_grace_period: 60s
   browser-worker:
