@@ -590,6 +590,7 @@ def test_ollama_computer_normalizes_one_structured_action(monkeypatch):
     )
     assert sent["url"] == "http://ollama.local:11434/api/chat"
     assert sent["body"]["stream"] is False and sent["body"]["format"]["type"] == "object"
+    assert sent["body"]["options"]["num_predict"] == 384
     assert sent["body"]["messages"][-1]["images"] == ["aGVsbG8="]
     assert turn.text == "Opening Outlook."
     assert [(u.name, u.input, u.computer) for u in turn.tool_uses] == [

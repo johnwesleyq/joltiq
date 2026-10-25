@@ -223,7 +223,9 @@ class OllamaComputer:
             "model": model,
             "stream": False,
             "format": schema,
-            "options": {"temperature": 0, "num_predict": max_tokens},
+            # One action is deliberately small. A large generation budget can make small on-prem models spend
+            # minutes elaborating instead of returning the single policy-constrained decision we asked for.
+            "options": {"temperature": 0, "num_predict": min(max_tokens, 384)},
             "messages": [{"role": "system", "content": prompt}, *[_ollama_message(m) for m in messages]],
         }
         t0 = time.perf_counter()
