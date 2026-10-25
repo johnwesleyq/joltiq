@@ -13,7 +13,17 @@ from ..config import get_settings
 from ..core.errors import AppError, Forbidden, NotFound
 from ..db import get_raw_session
 from ..deps import Ctx, get_ctx, perm
-from ..models import AgentRun, Device, DeviceCommand, DeviceSupportRequest, Membership, SupportSession, Ticket, User
+from ..models import (
+    AgentRun,
+    ComputerUseRun,
+    Device,
+    DeviceCommand,
+    DeviceSupportRequest,
+    Membership,
+    SupportSession,
+    Ticket,
+    User,
+)
 from ..models.enums import TERMINAL_RUN_STATES
 from ..services import agent as agent_svc
 from ..services import audit
@@ -243,6 +253,90 @@ def get_device_support_request(run_id: uuid.UUID, dd=Depends(device_auth)):
     return agent_svc.device_run_detail(db, run)
 
 
+class DirectComputerUseIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: str = Field(pattern="^(guide|fix)$")
+
+
+def _direct_computer_use_response(db: Session, session: SupportSession, mode: str) -> dict:
+    cu = db.execute(
+        select(ComputerUseRun)
+        .where(ComputerUseRun.session_id == session.id)
+        .order_by(ComputerUseRun.created_at.desc())
+    ).scalars().first()
+    return {
+        "session_id": str(session.id),
+        "computer_use_run_id": str(cu.id) if cu else None,
+        "mode": cu.mode if cu else mode,
+        "state": cu.state if cu else "waiting_session_consent",
+    }
+
+
+@agent_router.post("/support-requests/{run_id}/computer-use")
+def start_direct_computer_use(run_id: uuid.UUID, body: DirectComputerUseIn, dd=Depends(device_auth)):
+    """Turn this device's own support request into Guide/Fix without weakening either native consent gate."""
+    db, device = dd
+    owner = _support_owner(db, device)
+    _run, ticket = _device_support_run(db, device, run_id)
+    active = db.execute(
+        select(SupportSession).where(
+            SupportSession.ticket_id == ticket.id,
+            SupportSession.device_id == device.id,
+            SupportSession.kind == "desktop",
+            SupportSession.state.in_(["pending_consent", "active", "paused"]),
+        ).order_by(SupportSession.created_at.desc())
+    ).scalars().all()
+    for existing in active:
+        details = existing.request_details or {}
+        if details.get("direct_device_request") and details.get("computer_use_mode") == body.mode:
+            return JSONResponse(_direct_computer_use_response(db, existing, body.mode), status_code=200)
+
+    from ..services.ai.computer import SUPPORTED_PROVIDERS
+    from ..services.ai.router import available_providers
+
+    if not [candidate for candidate in available_providers(db, device.org_id, "computer_use") if candidate[0] in SUPPORTED_PROVIDERS]:
+        raise AppError(
+            "Fix it for me needs the company's approved local computer-use model gateway.",
+            code="computer_use_not_configured",
+        )
+    goal = (ticket.description or ticket.subject).strip()
+    session = session_svc.start(
+        db,
+        device.org_id,
+        kind="desktop",
+        owner_id=owner.id,
+        ticket_id=ticket.id,
+        device_id=device.id,
+        run_id=run_id,
+        request_details={
+            "direct_device_request": True,
+            "computer_use_mode": body.mode,
+            "computer_use_goal": goal,
+        },
+    )
+    session_svc.give_consent(
+        db,
+        session,
+        user_id=owner.id,
+        customer_id=device.customer_id,
+        is_staff=True,
+        actions=[],
+        recording=False,
+    )
+    audit.record(
+        db,
+        org_id=device.org_id,
+        actor_kind="device",
+        actor_id=device.id,
+        action="support_request.computer_use_requested",
+        resource_type="support_session",
+        resource_id=session.id,
+        data={"ticket_id": str(ticket.id), "mode": body.mode},
+    )
+    return JSONResponse(_direct_computer_use_response(db, session, body.mode), status_code=201)
+
+
 class HeartbeatIn(BaseModel):
     agent_version: str = Field(max_length=40)
     facts: dict = Field(default_factory=dict)
@@ -285,6 +379,20 @@ def local_consent(sid: uuid.UUID, body: LocalConsentIn, dd=Depends(device_auth))
                  resource_id=s.id, data={"accepted": body.accepted})
     if not body.accepted:
         session_svc.terminate(db, s, by_kind="device", reason="declined on device")
+    elif (s.request_details or {}).get("direct_device_request"):
+        from ..services import computer_use as computer_use_svc
+
+        existing = db.execute(select(ComputerUseRun.id).where(ComputerUseRun.session_id == s.id)).first()
+        if not existing:
+            owner = _support_owner(db, d)
+            computer_use_svc.start(
+                db,
+                s,
+                goal=str(s.request_details.get("computer_use_goal") or "Help with this support request"),
+                user_id=owner.id,
+                approved_by_customer=True,
+                mode=str(s.request_details.get("computer_use_mode") or "fix"),
+            )
     if s.run_id:
         run = db.get(AgentRun, s.run_id)
         if run:

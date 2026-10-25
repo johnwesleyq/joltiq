@@ -39,6 +39,12 @@ public sealed record SupportRequestDetail(
     [property: JsonPropertyName("outcome_stage")] string? OutcomeStage,
     [property: JsonPropertyName("messages")] IReadOnlyList<SupportConversationMessage> Messages);
 
+public sealed record DirectComputerUseResult(
+    [property: JsonPropertyName("session_id")] string SessionId,
+    [property: JsonPropertyName("computer_use_run_id")] string? ComputerUseRunId,
+    [property: JsonPropertyName("mode")] string Mode,
+    [property: JsonPropertyName("state")] string State);
+
 /// <summary>Signed HTTPS client for the companion protocol (PROTOCOL.md). Persists device key + counter via IKeyStore.</summary>
 public sealed class AgentClient : IDisposable
 {
@@ -207,6 +213,14 @@ public sealed class AgentClient : IDisposable
             }
         }
         return detail;
+    }
+
+    public async Task<DirectComputerUseResult> StartComputerUseAsync(string runId, string mode, CancellationToken ct = default)
+    {
+        var id = NormalizeRunId(runId);
+        if (mode != "guide" && mode != "fix") throw new ArgumentException("Mode must be guide or fix", nameof(mode));
+        var node = await SendAsync(HttpMethod.Post, $"/support-requests/{id}/computer-use", new { mode }, ct);
+        return ParseResponse<DirectComputerUseResult>(node, $"start {mode} help");
     }
 
     private void RememberSupportRequest(SupportRequestResult result)

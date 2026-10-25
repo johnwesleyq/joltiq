@@ -120,6 +120,23 @@ public sealed class SupportConversationTests
         Assert.Equal(0, client.ControlOrSessionCalls);
     }
 
+    [Theory]
+    [InlineData("guide")]
+    [InlineData("fix")]
+    public async Task CustomerCanStartGuideOrFixFromTheSameTicket(string mode)
+    {
+        var client = new FakeSupportClient();
+        var controller = new SupportConversationController(client);
+        controller.SetDraft("I can't find Adobe Sign in Outlook.");
+        await controller.SendAsync(default);
+
+        await controller.StartComputerUseAsync(mode, default);
+
+        Assert.Equal(("run-1", mode), Assert.Single(client.ComputerUseStarts));
+        Assert.Equal("session-1", controller.State.ComputerUseSessionId);
+        Assert.Equal("Waiting for approval on this PC", controller.State.ComputerUseStatus);
+    }
+
     private static SupportRequestDetail Detail(string state, string content) => new(
         "run-1",
         "ticket-1",
@@ -135,6 +152,7 @@ public sealed class SupportConversationTests
         public List<(string RunId, string Message)> Continues { get; } = [];
         public int Gets { get; private set; }
         public int ControlOrSessionCalls { get; private set; }
+        public List<(string RunId, string Mode)> ComputerUseStarts { get; } = [];
         public int FailCreates { get; set; }
         public bool Revoked { get; set; }
         public SupportRequestDetail Detail { get; set; } = SupportConversationTests.Detail("CLARIFYING", "What happens when you try?");
@@ -159,6 +177,13 @@ public sealed class SupportConversationTests
         {
             Gets++;
             return Task.FromResult(Detail);
+        }
+
+        public Task<DirectComputerUseResult> StartComputerUseAsync(string runId, string mode, CancellationToken ct)
+        {
+            ComputerUseStarts.Add((runId, mode));
+            ControlOrSessionCalls++;
+            return Task.FromResult(new DirectComputerUseResult("session-1", null, mode, "waiting_session_consent"));
         }
     }
 }

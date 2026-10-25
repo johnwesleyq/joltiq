@@ -189,6 +189,46 @@ def test_device_support_request_is_private_to_its_device_even_in_same_tenant(app
     assert second.post(f"/support-requests/{run_id}/messages", {"message": "Cross-device write."}).status_code == 404
 
 
+def test_device_support_request_can_start_fix_with_two_local_consent_gates(app, owner):
+    capabilities = [
+        "system.info", "screen.capture", "input.click", "input.type", "input.key", "input.scroll", "input.move",
+        "url.open", "guide.highlight", "guide.clear",
+    ]
+    device = FakeDevice(app)
+    other = FakeDevice(app)
+    assert device.enroll(_code(owner), caps=capabilities).status_code == 200
+    assert other.enroll(_code(owner), caps=capabilities).status_code == 200
+    created = device.post(
+        "/support-requests",
+        {"client_request_id": str(uuid.uuid4()), "message": "I can't find Adobe Sign in Outlook."},
+    ).json()
+
+    started = device.post(f"/support-requests/{created['run_id']}/computer-use", {"mode": "fix"})
+    assert started.status_code == 201, started.text
+    body = started.json()
+    assert body["mode"] == "fix" and body["state"] == "waiting_session_consent"
+    assert body["computer_use_run_id"] is None
+    assert other.post(f"/support-requests/{created['run_id']}/computer-use", {"mode": "fix"}).status_code == 404
+
+    begin = [json.loads(base64.b64decode(e["payload"])) for e in device.get("/poll").json()["envelopes"]]
+    session_begin = next(e for e in begin if e["type"] == "session.begin")
+    assert session_begin["request_details"]["computer_use_mode"] == "fix"
+    assert device.post(
+        f"/sessions/{body['session_id']}/local-consent",
+        {"accepted": True, "user_display_name": "John"},
+    ).status_code == 200
+
+    pending = [json.loads(base64.b64decode(e["payload"])) for e in device.get("/poll").json()["envelopes"]]
+    run_begin = next(e for e in pending if e["type"] == "computer_use.begin")
+    assert run_begin["mode"] == "fix"
+    assert run_begin["goal"] == "I can't find Adobe Sign in Outlook."
+
+    repeated = device.post(f"/support-requests/{created['run_id']}/computer-use", {"mode": "fix"})
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json()["session_id"] == body["session_id"]
+    assert repeated.json()["computer_use_run_id"] == run_begin["computer_use_run_id"]
+
+
 def test_revoked_device_cannot_create_support_request(app, owner):
     d = FakeDevice(app)
     assert d.enroll(_code(owner)).status_code == 200
