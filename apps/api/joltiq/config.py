@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
     gemini_api_key: str | None = None
+    # Customer-controlled local model gateway. Deployment-owned so tenants cannot turn it into an SSRF target.
+    ollama_base_url: str | None = None
+    ollama_model: str = "gemma3:4b"
     # When true, a deterministic local model fixture is registered. Never enabled in production.
     enable_local_fixture_providers: bool = True
     # Development-only escape hatch. Production computer use must use a customer-controlled local model gateway.

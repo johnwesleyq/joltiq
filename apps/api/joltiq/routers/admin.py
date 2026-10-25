@@ -46,13 +46,14 @@ from .common import page_params, paginate
 router = APIRouter(tags=["admin"])
 
 # ======================= Models / AI =======================
-PROVIDERS = ["openai", "anthropic", "gemini", "local_fixture"]
+PROVIDERS = ["openai", "anthropic", "gemini", "ollama", "local_fixture"]
 
 
 def ser_provider(c: ModelProviderConfig, db: Session) -> dict:
     cred = db.get(Credential, c.credential_id) if c.credential_id else None
     s = get_settings()
-    platform_key = bool({"openai": s.openai_api_key, "anthropic": s.anthropic_api_key, "gemini": s.gemini_api_key}.get(c.provider))
+    platform_key = bool({"openai": s.openai_api_key, "anthropic": s.anthropic_api_key, "gemini": s.gemini_api_key,
+                         "ollama": s.ollama_base_url}.get(c.provider))
     return {"provider": c.provider, "enabled": c.enabled, "approved_for_tenant_data": c.approved_for_tenant_data, "models": c.models,
             "input_cost_per_mtok": c.input_cost_per_mtok, "output_cost_per_mtok": c.output_cost_per_mtok, "timeout_seconds": c.timeout_seconds,
             "max_retries": c.max_retries, "key_fingerprint": cred.fingerprint if cred and not cred.revoked_at else None,
@@ -125,6 +126,25 @@ def test_provider(provider: str, ctx: Ctx = Depends(perm("models.manage"))):
     c = _cfg(ctx.db, ctx.org_id, provider)
     if provider == "local_fixture":
         return {"ok": True, "detail": "local test fixture (not an AI model)"}
+    if provider == "ollama":
+        import httpx
+
+        base = get_settings().ollama_base_url
+        if not c.enabled or not base:
+            c.last_test_ok, c.last_test_error = False, "Ollama is disabled or its deployment URL is not configured"
+            return {"ok": False, "detail": c.last_test_error}
+        try:
+            response = httpx.get(f"{base.rstrip('/')}/api/tags", timeout=20)
+            response.raise_for_status()
+            names = [m.get("name") for m in response.json().get("models", [])]
+            model = (c.models or {}).get("computer_use") or get_settings().ollama_model
+            ok, detail = any(n == model or str(n).startswith(model + ":") for n in names), f"local gateway reachable; model {model}"
+            if not ok:
+                detail += " is not installed"
+        except (httpx.HTTPError, ValueError) as e:
+            ok, detail = False, f"Ollama connection failed: {type(e).__name__}"
+        c.last_test_at, c.last_test_ok, c.last_test_error = utcnow(), ok, None if ok else detail
+        return {"ok": ok, "detail": detail}
     key = provider_credentials(ctx.db, ctx.org_id, provider, require_tenant_data_approval=False) if c.enabled else None
     if not key:
         c.last_test_ok, c.last_test_error = False, "Provider is disabled or has no API key"

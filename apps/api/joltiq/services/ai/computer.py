@@ -8,7 +8,9 @@ The local fixture is a scripted, clearly labelled stand-in for tests/demos (live
 """
 from __future__ import annotations
 
+import json
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -39,6 +41,12 @@ CONTROL_TOOLS: list[dict[str, Any]] = [
                       "required": ["success", "summary"]}},
 ]
 CONTROL_NAMES = {t["name"] for t in CONTROL_TOOLS}
+COMPUTER_NAMES = {
+    "screenshot", "left_click", "right_click", "middle_click", "double_click", "triple_click",
+    "left_click_drag", "mouse_move", "left_mouse_down", "left_mouse_up", "scroll", "type", "key",
+    "hold_key", "wait", "cursor_position",
+}
+OLLAMA_ACTIONS = sorted(COMPUTER_NAMES | CONTROL_NAMES)
 
 
 @dataclass
@@ -160,12 +168,112 @@ class FixtureComputer:
                     self.name, False, 1)
 
 
+def _ollama_message(message: dict) -> dict:
+    """Convert the normalized computer-use transcript into Ollama chat text plus image payloads."""
+    content = message.get("content")
+    if not isinstance(content, list):
+        return {"role": message.get("role", "user"), "content": str(content or "")}
+    text: list[str] = []
+    images: list[str] = []
+    for block in content:
+        kind = block.get("type")
+        if kind == "text":
+            text.append(str(block.get("text", "")))
+        elif kind == "image":
+            source = block.get("source") or {}
+            if source.get("type") == "base64" and source.get("data"):
+                images.append(str(source["data"]))
+        elif kind == "tool_use":
+            text.append(f"Previous action: {block.get('name')} {json.dumps(block.get('input') or {}, separators=(',', ':'))}")
+        elif kind == "tool_result":
+            nested = _ollama_message({"role": "user", "content": block.get("content") or []})
+            text.append(f"Result of {block.get('tool_use_id')}: {nested.get('content', '')}")
+            images.extend(nested.get("images") or [])
+    out = {"role": "assistant" if message.get("role") == "assistant" else "user", "content": "\n".join(x for x in text if x)}
+    if images:
+        out["images"] = images
+    return out
+
+
+class OllamaComputer:
+    """Customer-network multimodal model. It selects one normalized action; JoltIQ policy still validates/executes it."""
+
+    name = "ollama"
+    live = True
+
+    def __init__(self, base_url: str, timeout: int = 120):
+        self.base_url, self.timeout = base_url.rstrip("/"), timeout
+
+    def turn(self, *, model: str, system: str, messages: list[dict], display: dict[str, int], max_tokens: int = 2048) -> Turn:
+        schema = {
+            "type": "object",
+            "properties": {
+                "narration": {"type": "string"},
+                "action": {"type": "string", "enum": OLLAMA_ACTIONS},
+                "params": {"type": "object"},
+            },
+            "required": ["narration", "action", "params"],
+            "additionalProperties": False,
+        }
+        prompt = (
+            system + f"\n\nThe screen is {int(display['width'])}x{int(display['height'])}. "
+            "Choose exactly one next action. Coordinates are screenshot pixels. Return only the requested JSON object."
+        )
+        body = {
+            "model": model,
+            "stream": False,
+            "format": schema,
+            "options": {"temperature": 0, "num_predict": max_tokens},
+            "messages": [{"role": "system", "content": prompt}, *[_ollama_message(m) for m in messages]],
+        }
+        t0 = time.perf_counter()
+        try:
+            response = httpx.post(f"{self.base_url}/api/chat", json=body, timeout=self.timeout)
+        except httpx.HTTPError as e:
+            raise ProviderError(f"ollama transport error: {type(e).__name__}") from e
+        if response.status_code >= 400:
+            raise ProviderError(f"ollama HTTP {response.status_code}: {response.text[:300]}", retryable=response.status_code >= 500)
+        try:
+            raw = response.json()
+            decision = json.loads(raw.get("message", {}).get("content") or "")
+        except (ValueError, TypeError) as e:
+            raise ProviderError("ollama returned invalid structured output", retryable=False) from e
+        name = decision.get("action")
+        params = decision.get("params")
+        narration = str(decision.get("narration") or "").strip()
+        if name not in OLLAMA_ACTIONS:
+            raise ProviderError(f"ollama returned unsupported action: {name}", retryable=False)
+        if not isinstance(params, dict):
+            raise ProviderError("ollama returned invalid action parameters", retryable=False)
+        tool_id = f"toolu_ollama_{uuid.uuid4().hex}"
+        computer = name in COMPUTER_NAMES
+        block = {"type": "tool_use", "id": tool_id, "name": name, "input": params}
+        if computer:
+            block["toolset_name"] = "computer"
+        return Turn(
+            narration,
+            [ToolUse(tool_id, name, params, computer)],
+            [{"type": "text", "text": narration}, block],
+            int(raw.get("prompt_eval_count") or 0),
+            int(raw.get("eval_count") or 0),
+            str(raw.get("model") or model),
+            self.name,
+            True,
+            int((time.perf_counter() - t0) * 1000),
+        )
+
+
 def build(provider: str, key: str | None, timeout: int = 120):
     if provider == "local_fixture":
         return FixtureComputer()
     if provider == "anthropic" and key:
         return AnthropicComputer(key, timeout=timeout)
+    if provider == "ollama":
+        from ...config import get_settings
+
+        if get_settings().ollama_base_url:
+            return OllamaComputer(get_settings().ollama_base_url, timeout=timeout)
     return None
 
 
-SUPPORTED_PROVIDERS = ("anthropic", "local_fixture")
+SUPPORTED_PROVIDERS = ("ollama", "anthropic", "local_fixture")

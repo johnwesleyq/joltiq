@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import struct
+import uuid
 import zlib
 from types import SimpleNamespace
 
@@ -526,3 +527,92 @@ def test_successful_run_is_remembered_and_recalled_next_time(app, owner):
     with session_scope(_uuid.UUID(owner.org_id)) as db:
         first = db.get(ComputerUseRun, _uuid.UUID(rid2)).transcript[0]["content"][0]["text"]
     assert "fixed similar problems before" in first and "Learned fix" in first
+
+
+def test_ollama_is_tenant_approved_local_computer_provider(owner, monkeypatch):
+    from joltiq.config import get_settings
+    from joltiq.db import session_scope
+    from joltiq.services.ai.router import available_providers
+
+    monkeypatch.setattr(get_settings(), "ollama_base_url", "http://host.docker.internal:11434")
+    created = owner.patch("/api/v1/admin/models/ollama", json={
+        "enabled": True,
+        "approved_for_tenant_data": True,
+        "models": {"computer_use": "gemma3:4b"},
+    })
+    assert created.status_code == 200, created.text
+    with session_scope(uuid.UUID(owner.org_id)) as db:
+        providers = available_providers(db, uuid.UUID(owner.org_id), "computer_use")
+    assert [(provider, model, key) for provider, model, _cfg, key in providers if provider == "ollama"] == [
+        ("ollama", "gemma3:4b", None),
+    ]
+
+    owner.patch("/api/v1/admin/models/ollama", json={"approved_for_tenant_data": False})
+    with session_scope(uuid.UUID(owner.org_id)) as db:
+        assert "ollama" not in [p[0] for p in available_providers(db, uuid.UUID(owner.org_id), "computer_use")]
+
+
+def test_ollama_computer_normalizes_one_structured_action(monkeypatch):
+    from joltiq.services.ai.computer import OllamaComputer
+
+    class Response:
+        status_code = 200
+        text = ""
+
+        @staticmethod
+        def json():
+            return {
+                "model": "gemma3:4b",
+                "message": {"content": json.dumps({
+                    "narration": "Opening Outlook.",
+                    "action": "left_click",
+                    "params": {"coordinate": [125, 77]},
+                })},
+                "prompt_eval_count": 91,
+                "eval_count": 13,
+            }
+
+    sent = {}
+
+    def fake_post(url, *, json, timeout):
+        sent.update({"url": url, "body": json, "timeout": timeout})
+        return Response()
+
+    monkeypatch.setattr("joltiq.services.ai.computer.httpx.post", fake_post)
+    turn = OllamaComputer("http://ollama.local:11434").turn(
+        model="gemma3:4b",
+        system="stay safe",
+        messages=[{"role": "user", "content": [
+            {"type": "text", "text": "GOAL: open Outlook"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="}},
+        ]}],
+        display={"width": 1280, "height": 800},
+    )
+    assert sent["url"] == "http://ollama.local:11434/api/chat"
+    assert sent["body"]["stream"] is False and sent["body"]["format"]["type"] == "object"
+    assert sent["body"]["messages"][-1]["images"] == ["aGVsbG8="]
+    assert turn.text == "Opening Outlook."
+    assert [(u.name, u.input, u.computer) for u in turn.tool_uses] == [
+        ("left_click", {"coordinate": [125, 77]}, True),
+    ]
+    assert turn.input_tokens == 91 and turn.output_tokens == 13 and turn.live is True
+
+
+def test_ollama_computer_refuses_malformed_or_unknown_action(monkeypatch):
+    from joltiq.services.ai.computer import OllamaComputer
+    from joltiq.services.ai.providers import ProviderError
+
+    class Response:
+        status_code = 200
+        text = ""
+
+        @staticmethod
+        def json():
+            return {"message": {"content": '{"narration":"no","action":"run_powershell","params":{}}'}}
+
+    monkeypatch.setattr("joltiq.services.ai.computer.httpx.post", lambda *a, **kw: Response())
+    with pytest.raises(ProviderError, match="unsupported action"):
+        OllamaComputer("http://ollama.local:11434").turn(
+            model="gemma3:4b", system="safe", messages=[{"role": "user", "content": "look"}],
+            display={"width": 1280, "height": 800},
+        )

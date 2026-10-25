@@ -23,7 +23,7 @@ T = TypeVar("T", bound=BaseModel)
 
 TASKS = ["intent", "clarify", "retrieval", "diagnosis", "candidate_selection", "research", "planning", "vision", "tool_selection",
          "verification_analysis", "article_drafting", "summary", "chat", "computer_use"]
-DEFAULT_ORDER = ["anthropic", "openai", "gemini"]
+DEFAULT_ORDER = ["ollama", "anthropic", "openai", "gemini"]
 TASK_TIER = {"planning": "planning", "diagnosis": "planning", "vision": "vision", "computer_use": "computer_use"}
 
 
@@ -38,6 +38,14 @@ def available_providers(db: Session, org_id: uuid.UUID, task: str) -> list[tuple
         if prov == "local_fixture":
             continue
         cfg = cfgs.get(prov)
+        if prov == "ollama":
+            s = get_settings()
+            if cfg is None or not cfg.enabled or not cfg.approved_for_tenant_data or not s.ollama_base_url:
+                continue
+            model = (cfg.models or {}).get(task) or (cfg.models or {}).get(TASK_TIER.get(task, "default")) or \
+                DEFAULT_MODELS[prov].get(TASK_TIER.get(task, "default"), s.ollama_model)
+            out.append((prov, model, cfg, None))
+            continue
         key = provider_credentials(db, org_id, prov, require_tenant_data_approval=True)
         if cfg is None or not key:
             continue
@@ -46,7 +54,7 @@ def available_providers(db: Session, org_id: uuid.UUID, task: str) -> list[tuple
         out.append((prov, model, cfg, key))
     s = get_settings()
     if task == "computer_use" and not s.allow_external_computer_use_models:
-        out = []
+        out = [candidate for candidate in out if candidate[0] == "ollama"]
     fixture_cfg = cfgs.get("local_fixture")
     if s.enable_local_fixture_providers and s.env != "production" and (not out or (fixture_cfg and fixture_cfg.enabled)):
         out.append(("local_fixture", "local-rules-v1", fixture_cfg, None))

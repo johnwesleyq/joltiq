@@ -47,6 +47,7 @@ CAPABILITIES: dict[str, dict[str, bool]] = {
     "openai": {"tools": True, "vision": True, "structured": True},
     "anthropic": {"tools": True, "vision": True, "structured": True},
     "gemini": {"tools": True, "vision": True, "structured": True},
+    "ollama": {"tools": True, "vision": True, "structured": True},
     "local_fixture": {"tools": True, "vision": False, "structured": True},
 }
 
@@ -55,6 +56,7 @@ DEFAULT_MODELS: dict[str, dict[str, str]] = {
     "openai": {"default": "gpt-4.1-mini", "planning": "gpt-4.1", "vision": "gpt-4.1"},
     "anthropic": {"default": "claude-sonnet-5-5", "planning": "claude-opus-5-5", "vision": "claude-sonnet-5-5", "computer_use": "claude-sonnet-5-5"},
     "gemini": {"default": "gemini-2.5-flash", "planning": "gemini-2.5-pro", "vision": "gemini-2.5-flash"},
+    "ollama": {"default": "gemma3:4b", "vision": "gemma3:4b", "computer_use": "gemma3:4b"},
     "local_fixture": {"default": "local-rules-v1"},
 }
 
