@@ -36,4 +36,18 @@ public sealed class EnrollmentCompletionTests
 
         Assert.Equal(["runtime-started", "success-notice"], events);
     }
+
+    [Fact]
+    public async Task PreparedRuntimeDependencyIsPassedThroughWithoutRecreatingIt()
+    {
+        var prepared = new object();
+        object? startedWith = null;
+
+        await EnrollmentCompletion.RunAsync(
+            () => Task.FromResult(prepared),
+            value => startedWith = value,
+            () => { });
+
+        Assert.Same(prepared, startedWith);
+    }
 }

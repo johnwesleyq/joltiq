@@ -66,7 +66,7 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
         return m;
     }
 
-    private void Start(AgentClient? enrolledClient = null, DpapiCommandJournal? journal = null)
+    private void Start(AgentClient? enrolledClient = null, DpapiCommandJournal? journal = null, IActionProvider? provider = null)
     {
         if (enrolledClient is null)
         {
@@ -79,7 +79,7 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
         _client = enrolledClient;
         if (!_client.Enrolled) return;
         journal ??= new DpapiCommandJournal(new DpapiKeyStore());
-        var provider = CreateProvider(_client.State.EnrolledUserSid, journal);
+        provider ??= CreateProvider(_client.State.EnrolledUserSid, journal);
         _runtime = new AgentRuntime(_client, provider, this, journal);
         _cts = new CancellationTokenSource();
         _ = Task.Run(() => _runtime.RunAsync(_cts.Token));
@@ -101,8 +101,12 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
             var sid = WindowsIdentity.GetCurrent().User?.Value ?? throw new InvalidOperationException("Cannot identify the enrolling Windows user");
             var prov = CreateProvider(sid, journal);
             await EnrollmentCompletion.RunAsync(
-                () => _client.EnrollAsync(f.Code, Environment.MachineName, "Windows", Environment.OSVersion.Version.ToString(), prov.Capabilities, sid),
-                () => Start(_client, journal),
+                async () =>
+                {
+                    await _client.EnrollAsync(f.Code, Environment.MachineName, "Windows", Environment.OSVersion.Version.ToString(), prov.Capabilities, sid);
+                    return prov;
+                },
+                enrolledProvider => Start(_client, journal, enrolledProvider),
                 () => { MessageBox.Show("This device is enrolled. Support sessions always ask for your permission first.", "JoltIQ", MessageBoxButtons.OK, MessageBoxIcon.Information); });
         }
         catch (Exception e) { MessageBox.Show(Redactor.Redact(e.Message), "Enrollment failed", MessageBoxButtons.OK, MessageBoxIcon.Error); }
@@ -342,6 +346,16 @@ public static class EnrollmentCompletion
         ArgumentNullException.ThrowIfNull(enroll);
         await enroll();
         Run(startRuntime, showSuccessNotice);
+    }
+
+    public static async Task RunAsync<T>(Func<Task<T>> enroll, Action<T> startRuntime, Action showSuccessNotice)
+    {
+        ArgumentNullException.ThrowIfNull(enroll);
+        ArgumentNullException.ThrowIfNull(startRuntime);
+        ArgumentNullException.ThrowIfNull(showSuccessNotice);
+        var preparedRuntimeDependency = await enroll();
+        startRuntime(preparedRuntimeDependency);
+        showSuccessNotice();
     }
 }
 
