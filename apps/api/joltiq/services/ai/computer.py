@@ -1,5 +1,7 @@
 """Computer-use model adapters: one turn of "here is the screen → what do you do next".
 
+OpenAI: Responses API with one strict function per JoltIQ-normalized computer/control action. Each call is stateless,
+sends only the compact action history and latest screenshot, and requires exactly one next action.
 Anthropic: Messages API with the computer toolset (`computer_toolset_20260801`, no beta header) for current models,
 or the legacy single `computer` tool (`computer_20251124` + beta header) for older models. Both are normalised to
 the toolset shape: each action is a member name (left_click, type, key, …) with that member's own input.
@@ -49,6 +51,57 @@ COMPUTER_NAMES = {
 OLLAMA_ACTIONS = sorted(COMPUTER_NAMES | CONTROL_NAMES)
 
 
+def _strict_function(name: str, description: str, properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "name": name,
+        "description": description,
+        "parameters": {
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": False,
+        },
+        "strict": True,
+    }
+
+
+_COORD = {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2}
+OPENAI_COMPUTER_TOOLS: list[dict[str, Any]] = [
+    _strict_function("screenshot", "Capture the current screen before deciding what to do.", {}, []),
+    *[
+        _strict_function(name, f"{label} at screenshot pixel coordinates.", {"coordinate": _COORD}, ["coordinate"])
+        for name, label in (
+            ("left_click", "Left-click"), ("right_click", "Right-click"), ("middle_click", "Middle-click"),
+            ("double_click", "Double-click"), ("triple_click", "Triple-click"),
+        )
+    ],
+    _strict_function("left_click_drag", "Drag from one screenshot coordinate to another.",
+                     {"start_coordinate": _COORD, "coordinate": _COORD}, ["start_coordinate", "coordinate"]),
+    _strict_function("mouse_move", "Move the pointer to screenshot coordinates.", {"coordinate": _COORD}, ["coordinate"]),
+    _strict_function("left_mouse_down", "Hold the left mouse button down.", {}, []),
+    _strict_function("left_mouse_up", "Release the left mouse button.", {}, []),
+    _strict_function("scroll", "Scroll at screenshot coordinates.", {
+        "coordinate": _COORD,
+        "scroll_direction": {"type": "string", "enum": ["up", "down", "left", "right"]},
+        "scroll_amount": {"type": "integer", "minimum": 1, "maximum": 20},
+    }, ["coordinate", "scroll_direction", "scroll_amount"]),
+    _strict_function("type", "Type non-secret text into the active control.", {"text": {"type": "string"}}, ["text"]),
+    _strict_function("key", "Press a key or key combination.", {"text": {"type": "string"}}, ["text"]),
+    _strict_function("hold_key", "Hold a key combination for a bounded duration.", {
+        "text": {"type": "string"}, "duration": {"type": "integer", "minimum": 1, "maximum": 10},
+    }, ["text", "duration"]),
+    _strict_function("wait", "Wait briefly for the interface to update.", {
+        "duration": {"type": "integer", "minimum": 1, "maximum": 30},
+    }, ["duration"]),
+    _strict_function("cursor_position", "Read the current cursor position.", {}, []),
+    *[
+        _strict_function(t["name"], t["description"], t["input_schema"]["properties"], t["input_schema"]["required"])
+        for t in CONTROL_TOOLS
+    ],
+]
+
+
 @dataclass
 class ToolUse:
     id: str
@@ -75,6 +128,128 @@ def uses_legacy_tool(model: str) -> bool:
     """Claude 5.5+ (and the toolset compatibility list) take the toolset; older 4.x ids take the legacy tool."""
     m = model.lower()
     return any(t in m for t in ("-4-", "-4.", "claude-3"))
+
+
+def _openai_context(messages: list[dict]) -> list[dict[str, Any]]:
+    """Flatten the normalized provider-neutral transcript and attach only the newest hydrated screenshot."""
+    lines: list[str] = []
+    latest_image: dict[str, str] | None = None
+
+    def consume(block: dict, role: str) -> None:
+        nonlocal latest_image
+        kind = block.get("type")
+        if kind == "text" and block.get("text"):
+            lines.append(f"{role}: {block['text']}")
+        elif kind == "image":
+            source = block.get("source") or {}
+            if source.get("type") == "base64" and source.get("data"):
+                latest_image = {"media_type": str(source.get("media_type") or "image/png"), "data": str(source["data"])}
+        elif kind == "tool_use":
+            lines.append(f"assistant requested {block.get('name')}: {json.dumps(block.get('input') or {}, separators=(',', ':'))}")
+        elif kind == "tool_result":
+            for nested in block.get("content") or []:
+                if isinstance(nested, dict):
+                    consume(nested, f"result for {block.get('tool_use_id')}")
+
+    for message in messages:
+        role = "assistant" if message.get("role") == "assistant" else "customer/device"
+        content = message.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    consume(block, role)
+        elif content:
+            lines.append(f"{role}: {content}")
+    parts: list[dict[str, Any]] = [{"type": "input_text", "text": "\n".join(lines) or "Inspect the current screen and choose the next safe action."}]
+    if latest_image:
+        parts.append({
+            "type": "input_image",
+            "image_url": f"data:{latest_image['media_type']};base64,{latest_image['data']}",
+            "detail": "original",
+        })
+    return [{"role": "user", "content": parts}]
+
+
+class OpenAIComputer:
+    """OpenAI Responses adapter. JoltIQ still validates and executes every selected action itself."""
+
+    name = "openai"
+    live = True
+
+    def __init__(self, key: str, base_url: str = "https://api.openai.com/v1", timeout: int = 120):
+        self.key, self.base_url, self.timeout = key, base_url.rstrip("/"), timeout
+
+    def turn(self, *, model: str, system: str, messages: list[dict], display: dict[str, int], max_tokens: int = 2048) -> Turn:
+        body = {
+            "model": model,
+            "instructions": (
+                system + f"\n\nThe current screenshot is {int(display['width'])}x{int(display['height'])} pixels. "
+                "Choose exactly one next action. Use screenshot coordinates. Never claim success without visible verification."
+            ),
+            "input": _openai_context(messages),
+            "tools": OPENAI_COMPUTER_TOOLS,
+            "tool_choice": "required",
+            "parallel_tool_calls": False,
+            "max_output_tokens": max_tokens,
+            "store": False,
+        }
+        t0 = time.perf_counter()
+        try:
+            response = httpx.post(
+                f"{self.base_url}/responses",
+                headers={"authorization": f"Bearer {self.key}", "content-type": "application/json"},
+                json=body,
+                timeout=self.timeout,
+            )
+        except httpx.HTTPError as e:
+            raise ProviderError(f"openai transport error: {type(e).__name__}") from e
+        if response.status_code >= 400:
+            raise ProviderError(
+                f"openai HTTP {response.status_code}: {response.text[:300]}",
+                retryable=response.status_code in (408, 429, 500, 502, 503, 504),
+            )
+        try:
+            raw = response.json()
+        except ValueError as e:
+            raise ProviderError("openai returned invalid JSON", retryable=False) from e
+        output = raw.get("output") or []
+        calls = [item for item in output if item.get("type") == "function_call"]
+        if len(calls) != 1:
+            raise ProviderError("openai must return exactly one action", retryable=False)
+        call = calls[0]
+        name = str(call.get("name") or "")
+        if name not in COMPUTER_NAMES | CONTROL_NAMES:
+            raise ProviderError(f"openai returned unsupported action: {name}", retryable=False)
+        try:
+            arguments = call.get("arguments") or "{}"
+            params = json.loads(arguments) if isinstance(arguments, str) else arguments
+        except (TypeError, ValueError) as e:
+            raise ProviderError("openai returned invalid action arguments", retryable=False) from e
+        if not isinstance(params, dict):
+            raise ProviderError("openai returned invalid action arguments", retryable=False)
+        narration = "".join(
+            str(part.get("text") or "")
+            for item in output if item.get("type") == "message"
+            for part in item.get("content") or [] if part.get("type") == "output_text"
+        ).strip()
+        tool_id = str(call.get("call_id") or call.get("id") or f"call_openai_{uuid.uuid4().hex}")
+        computer = name in COMPUTER_NAMES
+        block = {"type": "tool_use", "id": tool_id, "name": name, "input": params}
+        if computer:
+            block["toolset_name"] = "computer"
+        usage = raw.get("usage") or {}
+        return Turn(
+            narration,
+            [ToolUse(tool_id, name, params, computer)],
+            *([[{"type": "text", "text": narration}, block]] if narration else [[block]]),
+            int(usage.get("input_tokens") or 0),
+            int(usage.get("output_tokens") or 0),
+            str(raw.get("model") or model),
+            self.name,
+            True,
+            int((time.perf_counter() - t0) * 1000),
+            {"response_id": raw.get("id")},
+        )
 
 
 class AnthropicComputer:
@@ -270,6 +445,8 @@ def build(provider: str, key: str | None, timeout: int = 120):
         return FixtureComputer()
     if provider == "anthropic" and key:
         return AnthropicComputer(key, timeout=timeout)
+    if provider == "openai" and key:
+        return OpenAIComputer(key, timeout=timeout)
     if provider == "ollama":
         from ...config import get_settings
 
@@ -278,4 +455,4 @@ def build(provider: str, key: str | None, timeout: int = 120):
     return None
 
 
-SUPPORTED_PROVIDERS = ("ollama", "anthropic", "local_fixture")
+SUPPORTED_PROVIDERS = ("ollama", "openai", "anthropic", "local_fixture")

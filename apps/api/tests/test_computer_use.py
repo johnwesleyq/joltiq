@@ -617,3 +617,104 @@ def test_ollama_computer_refuses_malformed_or_unknown_action(monkeypatch):
             model="gemma3:4b", system="safe", messages=[{"role": "user", "content": "look"}],
             display={"width": 1280, "height": 800},
         )
+
+
+def test_openai_responses_computer_sends_latest_screen_and_normalizes_one_action(monkeypatch):
+    from joltiq.services.ai.computer import OpenAIComputer
+
+    class Response:
+        status_code = 200
+        text = ""
+
+        @staticmethod
+        def json():
+            return {
+                "id": "resp_123",
+                "model": "gpt-6.1-sol",
+                "output": [
+                    {"type": "message", "role": "assistant", "content": [
+                        {"type": "output_text", "text": "Opening the Apps settings."},
+                    ]},
+                    {"type": "function_call", "call_id": "call_123", "name": "left_click",
+                     "arguments": '{"coordinate":[125,77]}'},
+                ],
+                "usage": {"input_tokens": 91, "output_tokens": 13},
+            }
+
+    sent = {}
+
+    def fake_post(url, *, headers, json, timeout):
+        sent.update({"url": url, "headers": headers, "body": json, "timeout": timeout})
+        return Response()
+
+    monkeypatch.setattr("joltiq.services.ai.computer.httpx.post", fake_post)
+    turn = OpenAIComputer("sk-test", timeout=45).turn(
+        model="gpt-6.1-sol",
+        system="stay safe",
+        messages=[
+            {"role": "user", "content": [
+                {"type": "text", "text": "GOAL: open Apps settings"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "b2xk"}},
+            ]},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "old", "name": "screenshot", "input": {}, "toolset_name": "computer"},
+            ]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "old", "content": [
+                {"type": "text", "text": "OK"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "bmV3"}},
+            ], "toolset_name": "computer"}]},
+        ],
+        display={"width": 1280, "height": 800},
+    )
+
+    assert sent["url"] == "https://api.openai.com/v1/responses"
+    assert sent["headers"]["authorization"] == "Bearer sk-test" and sent["timeout"] == 45
+    assert sent["body"]["store"] is False and sent["body"]["parallel_tool_calls"] is False
+    assert sent["body"]["tool_choice"] == "required"
+    assert sent["body"]["instructions"].startswith("stay safe")
+    tool_names = {tool["name"] for tool in sent["body"]["tools"]}
+    assert {"screenshot", "left_click", "request_approval", "request_secure_input", "finish"} <= tool_names
+    assert "run_powershell" not in tool_names
+    image_parts = [part for item in sent["body"]["input"] for part in item.get("content", []) if part.get("type") == "input_image"]
+    assert image_parts == [{"type": "input_image", "image_url": "data:image/png;base64,bmV3", "detail": "original"}]
+    assert turn.text == "Opening the Apps settings."
+    assert [(u.id, u.name, u.input, u.computer) for u in turn.tool_uses] == [
+        ("call_123", "left_click", {"coordinate": [125, 77]}, True),
+    ]
+    assert (turn.input_tokens, turn.output_tokens, turn.model, turn.provider, turn.live) == (
+        91, 13, "gpt-6.1-sol", "openai", True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("output", "error"),
+    [
+        ([{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "done"}]}],
+         "exactly one action"),
+        ([{"type": "function_call", "call_id": "c1", "name": "left_click", "arguments": "not-json"}],
+         "invalid action arguments"),
+        ([{"type": "function_call", "call_id": "c1", "name": "run_powershell", "arguments": "{}"}],
+         "unsupported action"),
+        ([{"type": "function_call", "call_id": "c1", "name": "screenshot", "arguments": "{}"},
+          {"type": "function_call", "call_id": "c2", "name": "left_click", "arguments": '{"coordinate":[1,2]}'}],
+         "exactly one action"),
+    ],
+)
+def test_openai_responses_computer_fails_closed_on_invalid_actions(monkeypatch, output, error):
+    from joltiq.services.ai.computer import OpenAIComputer
+    from joltiq.services.ai.providers import ProviderError
+
+    class Response:
+        status_code = 200
+        text = ""
+
+        @staticmethod
+        def json():
+            return {"id": "resp_bad", "model": "gpt-6.1-sol", "output": output, "usage": {}}
+
+    monkeypatch.setattr("joltiq.services.ai.computer.httpx.post", lambda *a, **kw: Response())
+    with pytest.raises(ProviderError, match=error):
+        OpenAIComputer("sk-test").turn(
+            model="gpt-6.1-sol", system="safe", messages=[{"role": "user", "content": "look"}],
+            display={"width": 1280, "height": 800},
+        )
