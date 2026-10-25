@@ -552,6 +552,34 @@ def test_ollama_is_tenant_approved_local_computer_provider(owner, monkeypatch):
         assert "ollama" not in [p[0] for p in available_providers(db, uuid.UUID(owner.org_id), "computer_use")]
 
 
+def test_openai_computer_provider_requires_deployment_and_tenant_approval(owner, monkeypatch):
+    from joltiq.config import get_settings
+    from joltiq.db import session_scope
+    from joltiq.services.ai.router import available_providers
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "allow_external_computer_use_models", False)
+    created = owner.patch("/api/v1/admin/models/openai", json={
+        "enabled": True,
+        "approved_for_tenant_data": True,
+        "api_key": "sk-test-openai-computer-0000000000",
+    })
+    assert created.status_code == 200, created.text
+    org_id = uuid.UUID(owner.org_id)
+    with session_scope(org_id) as db:
+        assert "openai" not in [p[0] for p in available_providers(db, org_id, "computer_use")]
+
+    monkeypatch.setattr(settings, "allow_external_computer_use_models", True)
+    with session_scope(org_id) as db:
+        selected = [(provider, model, key) for provider, model, _cfg, key in available_providers(db, org_id, "computer_use")]
+    assert ("openai", "gpt-6.1-sol", "sk-test-openai-computer-0000000000") in selected
+    assert "local_fixture" not in [provider for provider, _model, _key in selected]
+
+    owner.patch("/api/v1/admin/models/openai", json={"approved_for_tenant_data": False})
+    with session_scope(org_id) as db:
+        assert "openai" not in [p[0] for p in available_providers(db, org_id, "computer_use")]
+
+
 def test_ollama_computer_normalizes_one_structured_action(monkeypatch):
     from joltiq.services.ai.computer import OllamaComputer
 

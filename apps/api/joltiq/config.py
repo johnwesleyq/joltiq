@@ -55,7 +55,8 @@ class Settings(BaseSettings):
     ollama_model: str = "gemma3:4b"
     # When true, a deterministic local model fixture is registered. Never enabled in production.
     enable_local_fixture_providers: bool = True
-    # Development-only escape hatch. Production computer use must use a customer-controlled local model gateway.
+    # Deployment-level opt-in for sending computer screenshots/task context to a tenant-approved external model.
+    # Tenant provider enablement + approved_for_tenant_data are independently required.
     allow_external_computer_use_models: bool = False
 
     # Research providers
@@ -99,8 +100,6 @@ class Settings(BaseSettings):
                 raise RuntimeError(f"Refusing to start in production with dev secrets: {bad or ['encryption_key']}")
             if self.enable_local_fixture_providers:
                 raise RuntimeError("Local fixture providers must be disabled in production")
-            if self.allow_external_computer_use_models:
-                raise RuntimeError("Production refuses external computer-use models")
             if not self.cookie_secure:
                 raise RuntimeError("cookie_secure must be true in production")
 

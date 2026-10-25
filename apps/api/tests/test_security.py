@@ -938,7 +938,7 @@ def test_production_refuses_dev_secrets(monkeypatch):
         s.assert_production_safe()
 
 
-def test_production_refuses_external_computer_use_models():
+def test_production_allows_explicit_external_computer_use_deployment():
     from joltiq.config import Settings
 
     s = Settings(
@@ -950,8 +950,7 @@ def test_production_refuses_external_computer_use_models():
         cookie_secure=True,
         allow_external_computer_use_models=True,
     )
-    with pytest.raises(RuntimeError, match="external computer-use models"):
-        s.assert_production_safe()
+    s.assert_production_safe()
 
 
 def _runtime_browser_procedure():

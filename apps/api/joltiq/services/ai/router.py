@@ -141,7 +141,7 @@ def computer_turn(db: Session, org_id: uuid.UUID, *, system: str, messages: list
     check_entitlement(db, org_id, "ai_usd", adding=0.0)
     candidates = [c for c in available_providers(db, org_id, "computer_use") if c[0] in computer.SUPPORTED_PROVIDERS]
     if not candidates:
-        raise Unavailable("Computer use needs a customer-controlled local model gateway. External computer-use models are disabled by default.",
+        raise Unavailable("Computer use needs an approved local model or an explicitly enabled and tenant-approved external model.",
                           code="computer_use_not_configured")
     errors: list[str] = []
     for prov, model, cfg, key in candidates:
