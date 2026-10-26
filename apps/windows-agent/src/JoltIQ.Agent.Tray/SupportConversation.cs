@@ -1,7 +1,111 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using JoltIQ.Agent.Core;
 
 namespace JoltIQ.Agent.Tray;
+
+public enum SupportPromptKind
+{
+    LocalSessionConsent,
+    ConsequentialActionApproval,
+    OrdinaryQuestion,
+    StatusUpdate,
+}
+
+public enum ForegroundPromptResult
+{
+    Activated,
+    ActivationRefused,
+    Blocked,
+    Duplicate,
+    Ignored,
+    Scheduled,
+}
+
+public interface ISupportPromptWindow
+{
+    bool IsMinimized { get; }
+    bool IsVisible { get; }
+    void Restore();
+    void Show();
+    bool TryActivate();
+}
+
+public sealed class SupportPromptForeground(Action<string>? diagnostic = null)
+{
+    private readonly HashSet<string> _requested = new(StringComparer.Ordinal);
+    private readonly Action<string> _diagnostic = diagnostic ?? (message => Trace.TraceWarning(message));
+
+    public ForegroundPromptResult ShowForegroundPrompt(
+        string promptId,
+        SupportPromptKind kind,
+        ISupportPromptWindow window,
+        bool screenLocked)
+    {
+        if (kind == SupportPromptKind.StatusUpdate) return ForegroundPromptResult.Ignored;
+        if (screenLocked)
+        {
+            _diagnostic($"event=joltiq_prompt_foreground outcome=blocked reason=screen_locked kind={kind} prompt_id={promptId}");
+            return ForegroundPromptResult.Blocked;
+        }
+        if (!_requested.Add(promptId)) return ForegroundPromptResult.Duplicate;
+        if (window.IsMinimized) window.Restore();
+        if (!window.IsVisible) window.Show();
+        if (window.TryActivate()) return ForegroundPromptResult.Activated;
+        _diagnostic($"event=joltiq_prompt_foreground outcome=refused reason=windows_activation_refused kind={kind} prompt_id={promptId}");
+        return ForegroundPromptResult.ActivationRefused;
+    }
+
+    public ForegroundPromptResult ShowForegroundPrompt(
+        string promptId,
+        SupportPromptKind kind,
+        Form form,
+        bool screenLocked)
+    {
+        if (form.InvokeRequired)
+        {
+            form.BeginInvoke(() => ShowForegroundPrompt(promptId, kind, form, screenLocked));
+            return ForegroundPromptResult.Scheduled;
+        }
+        return ShowForegroundPrompt(promptId, kind, new WinFormsSupportPromptWindow(form), screenLocked);
+    }
+
+    public static bool IsScreenLocked()
+    {
+        var desktop = OpenInputDesktop(0, false, 0x0001);
+        if (desktop == IntPtr.Zero) return true;
+        try { return !string.Equals(GetDesktopName(desktop), "Default", StringComparison.OrdinalIgnoreCase); }
+        finally { CloseDesktop(desktop); }
+    }
+
+    private static string? GetDesktopName(IntPtr desktop)
+    {
+        GetUserObjectInformation(desktop, 2, null, 0, out var needed);
+        if (needed == 0) return null;
+        var value = new System.Text.StringBuilder((int)needed / 2 + 1);
+        return GetUserObjectInformation(desktop, 2, value, needed, out _) ? value.ToString() : null;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool CloseDesktop(IntPtr desktop);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool GetUserObjectInformation(IntPtr obj, int index, System.Text.StringBuilder? info, uint length, out uint needed);
+}
+
+internal sealed class WinFormsSupportPromptWindow(Form form) : ISupportPromptWindow
+{
+    public bool IsMinimized => form.WindowState == FormWindowState.Minimized;
+    public bool IsVisible => form.Visible;
+    public void Restore() => form.WindowState = FormWindowState.Normal;
+    public void Show() => form.Show();
+    public bool TryActivate()
+    {
+        form.BringToFront();
+        form.Activate();
+        return form.ContainsFocus || Form.ActiveForm == form || SetForegroundWindow(form.Handle);
+    }
+
+    [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr window);
+}
 
 public interface ISupportRequestClient
 {
@@ -44,6 +148,7 @@ public sealed record SupportConversationState
     public string? ComputerUseMode { get; init; }
     public string? ComputerUseStatus { get; init; }
     public bool IsStartingComputerUse { get; init; }
+    public string? PausedFor { get; init; }
 }
 
 public sealed class SupportConversationController
@@ -63,12 +168,14 @@ public sealed class SupportConversationController
         _client = client;
         if (client.ActiveRequest is { } active)
         {
+            var isTerminal = TerminalStates.Contains(active.State);
             State = State with
             {
                 TicketId = active.TicketId,
                 TicketNumber = active.TicketNumber,
                 RunId = active.RunId,
                 Status = active.State,
+                IsTerminal = isTerminal,
             };
         }
     }
@@ -83,7 +190,7 @@ public sealed class SupportConversationController
         try
         {
             SupportRequestResult result;
-            if (State.RunId is null)
+            if (State.RunId is null || State.IsTerminal)
             {
                 _pendingCreateId ??= Guid.NewGuid();
                 result = await _client.CreateSupportRequestAsync(_pendingCreateId.Value, message, ct);
@@ -142,6 +249,7 @@ public sealed class SupportConversationController
                 TicketId = detail.TicketId,
                 RunId = detail.Id,
                 Status = detail.State,
+                PausedFor = detail.PausedFor,
                 Messages = detail.Messages,
                 IsTerminal = TerminalStates.Contains(detail.State),
                 Error = null,
@@ -174,6 +282,8 @@ public sealed class SupportConversationController
             SetState(State with
             {
                 IsStartingComputerUse = false,
+                IsTerminal = false,
+                Status = "AI_INVESTIGATING",
                 ComputerUseSessionId = result.SessionId,
                 ComputerUseRunId = result.ComputerUseRunId,
                 ComputerUseMode = result.Mode,
@@ -221,6 +331,7 @@ public sealed class SupportConversationForm : Form
     private readonly System.Windows.Forms.Timer _poll = new() { Interval = 2000 };
     private readonly CancellationTokenSource _closed = new();
     private readonly string _serverUrl;
+    private readonly SupportPromptForeground _foreground = new();
     private bool _refreshing;
 
     public SupportConversationForm(SupportConversationController controller, string serverUrl, string computerName)
@@ -347,6 +458,11 @@ public sealed class SupportConversationForm : Form
         _transcript.Text = string.Join(
             Environment.NewLine + Environment.NewLine,
             state.Messages.Select(message => $"{(message.Role == "assistant" ? "JoltIQ" : "You")}: {message.Content}"));
+        var question = state.PausedFor == "customer"
+            ? state.Messages.LastOrDefault(message => message.Role == "assistant")
+            : null;
+        if (question is not null)
+            _foreground.ShowForegroundPrompt(question.Id, SupportPromptKind.OrdinaryQuestion, this, SupportPromptForeground.IsScreenLocked());
     }
 
     private static string FriendlyState(string state) => state.Replace('_', ' ').ToLowerInvariant() switch

@@ -6,6 +6,76 @@ namespace JoltIQ.Agent.Tests;
 
 public sealed class SupportConversationTests
 {
+    [Theory]
+    [InlineData(SupportPromptKind.LocalSessionConsent)]
+    [InlineData(SupportPromptKind.ConsequentialActionApproval)]
+    [InlineData(SupportPromptKind.OrdinaryQuestion)]
+    public void ActionablePromptRequestsForegroundExactlyOnce(SupportPromptKind kind)
+    {
+        var window = new FakePromptWindow();
+        var foreground = new SupportPromptForeground();
+
+        var result = foreground.ShowForegroundPrompt("prompt-1", kind, window, screenLocked: false);
+
+        Assert.Equal(ForegroundPromptResult.Activated, result);
+        Assert.Equal(1, window.ShowCalls);
+        Assert.Equal(1, window.ActivateCalls);
+    }
+
+    [Fact]
+    public void StatusUpdateNeverRequestsForeground()
+    {
+        var window = new FakePromptWindow();
+        var foreground = new SupportPromptForeground();
+
+        var result = foreground.ShowForegroundPrompt("status-1", SupportPromptKind.StatusUpdate, window, screenLocked: false);
+
+        Assert.Equal(ForegroundPromptResult.Ignored, result);
+        Assert.Equal(0, window.ShowCalls);
+        Assert.Equal(0, window.ActivateCalls);
+    }
+
+    [Fact]
+    public void DuplicatePromptDoesNotRequestForegroundAgain()
+    {
+        var window = new FakePromptWindow();
+        var foreground = new SupportPromptForeground();
+
+        foreground.ShowForegroundPrompt("approval-1", SupportPromptKind.ConsequentialActionApproval, window, screenLocked: false);
+        var duplicate = foreground.ShowForegroundPrompt("approval-1", SupportPromptKind.ConsequentialActionApproval, window, screenLocked: false);
+
+        Assert.Equal(ForegroundPromptResult.Duplicate, duplicate);
+        Assert.Equal(1, window.ActivateCalls);
+    }
+
+    [Fact]
+    public void LockedScreenBlocksForegroundAndRecordsDiagnostic()
+    {
+        var diagnostics = new List<string>();
+        var window = new FakePromptWindow();
+        var foreground = new SupportPromptForeground(diagnostics.Add);
+
+        var result = foreground.ShowForegroundPrompt("consent-locked", SupportPromptKind.LocalSessionConsent, window, screenLocked: true);
+
+        Assert.Equal(ForegroundPromptResult.Blocked, result);
+        Assert.Equal(0, window.ActivateCalls);
+        Assert.Contains("screen_locked", Assert.Single(diagnostics), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AlreadyVisiblePromptIsActivatedWithoutShowingOrRestoringIt()
+    {
+        var window = new FakePromptWindow { IsVisible = true };
+        var foreground = new SupportPromptForeground();
+
+        var result = foreground.ShowForegroundPrompt("question-1", SupportPromptKind.OrdinaryQuestion, window, screenLocked: false);
+
+        Assert.Equal(ForegroundPromptResult.Activated, result);
+        Assert.Equal(0, window.ShowCalls);
+        Assert.Equal(0, window.RestoreCalls);
+        Assert.Equal(1, window.ActivateCalls);
+    }
+
     [Fact]
     public async Task FirstSendCreatesDeviceRequestAndClearsDraftOnlyAfterSuccess()
     {
@@ -93,6 +163,40 @@ public sealed class SupportConversationTests
     }
 
     [Fact]
+    public async Task MessageAfterTerminalTicketCreatesANewRequest()
+    {
+        var client = new FakeSupportClient();
+        var controller = new SupportConversationController(client);
+        controller.SetDraft("First issue");
+        await controller.SendAsync(default);
+        client.Detail = Detail("ESCALATED", "A technician will take it from here.");
+        await controller.RefreshAsync(default);
+        controller.SetDraft("A different issue");
+
+        await controller.SendAsync(default);
+
+        Assert.Equal(2, client.Creates.Count);
+        Assert.Empty(client.Continues);
+        Assert.Equal("A different issue", client.Creates[1].Message);
+    }
+
+    [Fact]
+    public async Task ReopenedTerminalTicketStartsANewRequest()
+    {
+        var client = new FakeSupportClient
+        {
+            ActiveRequestOverride = new SupportRequestBookmark("ticket-old", 41, "run-old", "ESCALATED"),
+        };
+        var controller = new SupportConversationController(client);
+        controller.SetDraft("A different issue after reopening");
+
+        await controller.SendAsync(default);
+
+        Assert.Single(client.Creates);
+        Assert.Empty(client.Continues);
+    }
+
+    [Fact]
     public async Task RevokedDeviceFailsClosedAndKeepsWhatTheUserTyped()
     {
         var client = new FakeSupportClient { Revoked = true };
@@ -137,6 +241,26 @@ public sealed class SupportConversationTests
         Assert.Equal("Waiting for approval on this PC", controller.State.ComputerUseStatus);
     }
 
+    [Fact]
+    public async Task StartingFixAfterTicketEscalationKeepsPollingTheDirectControlConversation()
+    {
+        var client = new FakeSupportClient();
+        var controller = new SupportConversationController(client);
+        controller.SetDraft("Uninstall Adobe Acrobat but keep Adobe Genuine Service.");
+        await controller.SendAsync(default);
+        client.Detail = Detail("ESCALATED", "I've handed this to a technician.");
+        await controller.RefreshAsync(default);
+        Assert.True(controller.State.IsTerminal);
+
+        await controller.StartComputerUseAsync("fix", default);
+        client.Detail = Detail("AI_INVESTIGATING", "Which Adobe application should I uninstall?");
+        await controller.RefreshAsync(default);
+
+        Assert.False(controller.State.IsTerminal);
+        Assert.Equal(2, client.Gets);
+        Assert.Equal("Which Adobe application should I uninstall?", Assert.Single(controller.State.Messages).Content);
+    }
+
     private static SupportRequestDetail Detail(string state, string content) => new(
         "run-1",
         "ticket-1",
@@ -147,7 +271,9 @@ public sealed class SupportConversationTests
 
     private sealed class FakeSupportClient : ISupportRequestClient
     {
-        public SupportRequestBookmark? ActiveRequest { get; private set; }
+        private SupportRequestBookmark? _activeRequest;
+        public SupportRequestBookmark? ActiveRequest => ActiveRequestOverride ?? _activeRequest;
+        public SupportRequestBookmark? ActiveRequestOverride { get; init; }
         public List<(Guid RequestId, string Message)> Creates { get; } = [];
         public List<(string RunId, string Message)> Continues { get; } = [];
         public int Gets { get; private set; }
@@ -162,14 +288,14 @@ public sealed class SupportConversationTests
             Creates.Add((requestId, message));
             if (Revoked) throw new DeviceRevokedException();
             if (FailCreates-- > 0) throw new AgentProtocolException("network unavailable");
-            ActiveRequest = new SupportRequestBookmark("ticket-1", 42, "run-1", "NEW");
+            _activeRequest = new SupportRequestBookmark("ticket-1", 42, "run-1", "NEW");
             return Task.FromResult(new SupportRequestResult("ticket-1", 42, "run-1", "NEW"));
         }
 
         public Task<SupportRequestResult> ContinueSupportRequestAsync(string runId, string message, CancellationToken ct)
         {
             Continues.Add((runId, message));
-            ActiveRequest = new SupportRequestBookmark("ticket-1", 42, runId, "CLARIFYING");
+            _activeRequest = new SupportRequestBookmark("ticket-1", 42, runId, "CLARIFYING");
             return Task.FromResult(new SupportRequestResult("ticket-1", 42, runId, "CLARIFYING"));
         }
 
@@ -184,6 +310,23 @@ public sealed class SupportConversationTests
             ComputerUseStarts.Add((runId, mode));
             ControlOrSessionCalls++;
             return Task.FromResult(new DirectComputerUseResult("session-1", null, mode, "waiting_session_consent"));
+        }
+    }
+
+    private sealed class FakePromptWindow : ISupportPromptWindow
+    {
+        public bool IsMinimized { get; init; }
+        public bool IsVisible { get; init; }
+        public int RestoreCalls { get; private set; }
+        public int ShowCalls { get; private set; }
+        public int ActivateCalls { get; private set; }
+
+        public void Restore() => RestoreCalls++;
+        public void Show() => ShowCalls++;
+        public bool TryActivate()
+        {
+            ActivateCalls++;
+            return true;
         }
     }
 }

@@ -17,11 +17,17 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
-        using var mutex = new Mutex(true, @"Local\JoltIQ.Companion", out var first);
-        if (!first) return;
+        var request = CompanionLaunchRequest.Parse(args);
+        using var mutex = new Mutex(true, CompanionActivation.MutexName, out var first);
+        if (!first)
+        {
+            CompanionActivation.RequestOpenSupport();
+            return;
+        }
+        using var activation = new CompanionActivation();
         ApplicationConfiguration.Initialize();
         CrashLog.Install();
-        Application.Run(new TrayContext(args));
+        Application.Run(new TrayContext(request, activation.OpenSupportWaitHandle));
     }
 }
 
@@ -33,6 +39,7 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
     private AgentClient? _client;
     private AgentRuntime? _runtime;
     private CancellationTokenSource? _cts;
+    private Task? _runtimeTask;
     private SessionBanner? _banner;
     private GuideOverlay? _guideOverlay;
     private GuideControlBar? _guideControls;
@@ -40,13 +47,23 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
     private ToolStripMenuItem? _askItem;
     private string? _activeSession;
     private readonly HotkeyWindow _hotkey;
+    private readonly RegisteredWaitHandle _activationRegistration;
+    private readonly SupportPromptForeground _foreground = new();
 
-    public TrayContext(string[] args)
+    public TrayContext(CompanionLaunchRequest launchRequest, WaitHandle openSupportWaitHandle)
     {
         _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         _icon = new NotifyIcon { Icon = SystemIcons.Shield, Text = "JoltIQ Companion", Visible = true, ContextMenuStrip = BuildMenu() };
         _hotkey = new HotkeyWindow(() => StopActive("hotkey"));
+        _activationRegistration = ThreadPool.RegisterWaitForSingleObject(
+            openSupportWaitHandle,
+            (_, _) => _ui.Post(_ => ShowSupportConversation(), null),
+            null,
+            Timeout.Infinite,
+            executeOnlyOnce: false);
         Start();
+        if (launchRequest.OpenSupportConversation)
+            _ui.Post(_ => ShowSupportConversation(), null);
     }
 
     private ContextMenuStrip BuildMenu()
@@ -82,7 +99,7 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
         provider ??= CreateProvider(_client.State.EnrolledUserSid, journal);
         _runtime = new AgentRuntime(_client, provider, this, journal);
         _cts = new CancellationTokenSource();
-        _ = Task.Run(() => _runtime.RunAsync(_cts.Token));
+        _runtimeTask = Task.Run(() => _runtime.RunAsync(_cts.Token));
         _icon.Text = $"JoltIQ Companion — connected ({_client.State.DeviceId?[..8]})";
         if (_askItem is not null) _askItem.Enabled = true;
     }
@@ -93,23 +110,59 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
         if (f.ShowDialog() != DialogResult.OK) return;
         try
         {
-            _cts?.Cancel();
             _cfg.ServerUrl = f.ServerUrl; _cfg.Save();
             var keyStore = new DpapiKeyStore();
             var journal = new DpapiCommandJournal(keyStore);
-            _client = new AgentClient(f.ServerUrl, keyStore);
+            var enrolledClient = new AgentClient(f.ServerUrl, keyStore);
+            var previousClient = _client;
             var sid = WindowsIdentity.GetCurrent().User?.Value ?? throw new InvalidOperationException("Cannot identify the enrolling Windows user");
             var prov = CreateProvider(sid, journal);
             await EnrollmentCompletion.RunAsync(
+                StopRuntimeAsync,
+                CloseSupportConversation,
                 async () =>
                 {
-                    await _client.EnrollAsync(f.Code, Environment.MachineName, "Windows", Environment.OSVersion.Version.ToString(), prov.Capabilities, sid);
+                    await enrolledClient.EnrollAsync(f.Code, Environment.MachineName, "Windows", Environment.OSVersion.Version.ToString(), prov.Capabilities, sid);
                     return prov;
                 },
-                enrolledProvider => Start(_client, journal, enrolledProvider),
+                enrolledProvider =>
+                {
+                    previousClient?.Dispose();
+                    Start(enrolledClient, journal, enrolledProvider);
+                },
                 () => { MessageBox.Show("This device is enrolled. Support sessions always ask for your permission first.", "JoltIQ", MessageBoxButtons.OK, MessageBoxIcon.Information); });
         }
-        catch (Exception e) { MessageBox.Show(Redactor.Redact(e.Message), "Enrollment failed", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+        catch (Exception e)
+        {
+            if (_runtime is null && _client?.Enrolled == true) Start(_client);
+            MessageBox.Show(Redactor.Redact(e.Message), "Enrollment failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private async Task StopRuntimeAsync()
+    {
+        var cts = _cts;
+        var task = _runtimeTask;
+        _cts = null;
+        _runtimeTask = null;
+        _runtime = null;
+        if (cts is null) return;
+        cts.Cancel();
+        try
+        {
+            if (task is not null) await task.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        catch (OperationCanceledException) { }
+        finally
+        {
+            cts.Dispose();
+        }
+    }
+
+    private void CloseSupportConversation()
+    {
+        _supportConversation?.Close();
+        _supportConversation = null;
     }
 
     private async Task UnenrollAsync()
@@ -167,6 +220,8 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
         _ui.Post(_ =>
         {
             using var dlg = new ConsentForm(request, timeout);
+            dlg.Shown += (_, _) => _foreground.ShowForegroundPrompt(
+                $"native-consent:{sessionId}", SupportPromptKind.LocalSessionConsent, dlg, SupportPromptForeground.IsScreenLocked());
             tcs.TrySetResult(dlg.ShowDialog() == DialogResult.Yes);
         }, null);
         return tcs.Task;
@@ -197,6 +252,21 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
         _ui.Post(_ =>
         {
             using var dlg = new ComputerUseConsentForm(request, timeout);
+            dlg.Shown += (_, _) => _foreground.ShowForegroundPrompt(
+                $"computer-use-consent:{request.SessionId}", SupportPromptKind.LocalSessionConsent, dlg, SupportPromptForeground.IsScreenLocked());
+            tcs.TrySetResult(dlg.ShowDialog() == DialogResult.Yes);
+        }, null);
+        return tcs.Task;
+    }
+
+    public Task<bool> AskComputerUseActionApprovalAsync(ComputerUseActionApprovalRequest request, TimeSpan timeout, CancellationToken ct)
+    {
+        var tcs = new TaskCompletionSource<bool>();
+        _ui.Post(_ =>
+        {
+            using var dlg = new ComputerUseActionApprovalForm(request, timeout);
+            dlg.Shown += (_, _) => _foreground.ShowForegroundPrompt(
+                $"computer-use-approval:{request.InteractionId}", SupportPromptKind.ConsequentialActionApproval, dlg, SupportPromptForeground.IsScreenLocked());
             tcs.TrySetResult(dlg.ShowDialog() == DialogResult.Yes);
         }, null);
         return tcs.Task;
@@ -264,6 +334,7 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
         _cts?.Cancel();
         _supportConversation?.Close();
         _icon.Visible = false;
+        _activationRegistration.Unregister(null);
         _hotkey.Dispose();
         base.ExitThreadCore();
     }
@@ -284,6 +355,37 @@ internal sealed class ComputerUseConsentForm : Form
         var deny = new Button { Text = "Decline", DialogResult = DialogResult.No, Width = 120, Left = 440, Top = 240 };
         Controls.AddRange(new Control[] { allow, deny });
         AcceptButton = deny; CancelButton = deny;
+        var timer = new System.Windows.Forms.Timer { Interval = (int)timeout.TotalMilliseconds };
+        timer.Tick += (_, _) => { timer.Stop(); DialogResult = DialogResult.No; };
+        timer.Start();
+    }
+}
+
+internal sealed class ComputerUseActionApprovalForm : Form
+{
+    public ComputerUseActionApprovalForm(ComputerUseActionApprovalRequest request, TimeSpan timeout)
+    {
+        Text = "JoltIQ — approve this fix action?";
+        TopMost = true;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        StartPosition = FormStartPosition.CenterScreen;
+        Width = 620;
+        Height = 320;
+        MaximizeBox = MinimizeBox = false;
+        Controls.Add(new Label
+        {
+            Text = $"JoltIQ wants to perform this exact action:\n\n{request.Text}\n\nAllowing this applies only to this action. Any different action requires another approval.",
+            Left = 20,
+            Top = 18,
+            Width = 565,
+            Height = 210,
+            Font = new Font("Segoe UI", 10),
+        });
+        var allow = new Button { Text = "Allow fix", DialogResult = DialogResult.Yes, Width = 140, Left = 310, Top = 235 };
+        var deny = new Button { Text = "Deny", DialogResult = DialogResult.No, Width = 120, Left = 465, Top = 235 };
+        Controls.AddRange(new Control[] { allow, deny });
+        AcceptButton = deny;
+        CancelButton = deny;
         var timer = new System.Windows.Forms.Timer { Interval = (int)timeout.TotalMilliseconds };
         timer.Tick += (_, _) => { timer.Stop(); DialogResult = DialogResult.No; };
         timer.Start();
@@ -353,6 +455,25 @@ public static class EnrollmentCompletion
         ArgumentNullException.ThrowIfNull(enroll);
         ArgumentNullException.ThrowIfNull(startRuntime);
         ArgumentNullException.ThrowIfNull(showSuccessNotice);
+        var preparedRuntimeDependency = await enroll();
+        startRuntime(preparedRuntimeDependency);
+        showSuccessNotice();
+    }
+
+    public static async Task RunAsync<T>(
+        Func<Task> stopOldRuntime,
+        Action closeOldConversation,
+        Func<Task<T>> enroll,
+        Action<T> startRuntime,
+        Action showSuccessNotice)
+    {
+        ArgumentNullException.ThrowIfNull(stopOldRuntime);
+        ArgumentNullException.ThrowIfNull(closeOldConversation);
+        ArgumentNullException.ThrowIfNull(enroll);
+        ArgumentNullException.ThrowIfNull(startRuntime);
+        ArgumentNullException.ThrowIfNull(showSuccessNotice);
+        await stopOldRuntime();
+        closeOldConversation();
         var preparedRuntimeDependency = await enroll();
         startRuntime(preparedRuntimeDependency);
         showSuccessNotice();
