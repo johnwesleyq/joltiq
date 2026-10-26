@@ -85,3 +85,29 @@ select.input option { background: var(--color-surface); }
 @keyframes demo-new { 0%, 64% { opacity: 0; } 65%, 100% { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .demo-step { opacity: 1; } .demo-value-old { opacity: 0; } .demo-value-new { opacity: 1; } }
 .text-gradient { background: linear-gradient(95deg, var(--color-ion), var(--color-plasma) 50%, var(--color-jolt)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+
+/* Remote support keeps the transport subordinate to JoltIQ's consent and audit state. */
+.remote-workspace { display: grid; min-height: calc(100vh - 8.5rem); overflow: hidden; border: 1px solid var(--color-line); border-radius: 20px;
+  background: rgb(8 13 38 / .82); box-shadow: 0 28px 80px -48px rgb(92 225 255 / .45); }
+.remote-workspace-rail { display: flex; min-width: 0; flex-direction: column; gap: 1.5rem; padding: 1.4rem; border-bottom: 1px solid var(--color-line);
+  background: linear-gradient(160deg, rgb(28 37 88 / .96), rgb(13 19 48 / .98)); }
+.remote-eyebrow, .remote-canvas-kicker { display: block; margin-bottom: .35rem; color: var(--color-ion); font-family: var(--font-mono); font-size: .68rem;
+  font-weight: 500; letter-spacing: .13em; text-transform: uppercase; }
+.remote-session-status { display: grid; grid-template-columns: auto 1fr; gap: .75rem; border: 1px solid rgb(92 225 255 / .32); border-radius: 14px; padding: .9rem;
+  background: rgb(92 225 255 / .07); }
+.remote-session-status p { margin-top: .25rem; color: var(--color-slate); font-size: .78rem; line-height: 1.45; }
+.remote-status-dot { width: .65rem; height: .65rem; margin-top: .35rem; border-radius: 999px; background: var(--color-ion); box-shadow: 0 0 0 5px rgb(92 225 255 / .11), 0 0 20px rgb(92 225 255 / .55); animation: remote-status-pulse 2s ease-in-out infinite; }
+.remote-session-reason { border-top: 1px solid var(--color-line); padding-top: 1.1rem; }
+.remote-session-reason span { color: var(--color-slate); font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; }
+.remote-session-reason p { margin-top: .45rem; font-size: .9rem; line-height: 1.5; }
+.remote-canvas { display: grid; min-height: 560px; grid-template-rows: auto 1fr; background: #080d26; }
+.remote-canvas-bar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .8rem 1rem; border-bottom: 1px solid var(--color-line); background: rgb(13 19 48 / .92); }
+.remote-canvas-bar strong { display: block; font-size: .88rem; }
+.remote-canvas-kicker { margin: 0; font-size: .6rem; }
+.remote-desktop-frame { width: 100%; height: 100%; min-height: 520px; border: 0; background: #070a15; }
+.remote-transport-missing { place-self: center; max-width: 32rem; padding: 2rem; text-align: center; }
+.remote-transport-missing p { margin-top: .45rem; color: var(--color-slate); font-size: .88rem; }
+.remote-workspace-state { max-width: 620px; margin: 8vh auto 0; border: 1px solid var(--color-line); border-radius: 18px; padding: 2rem; background: rgb(21 28 69 / .82); }
+@keyframes remote-status-pulse { 50% { opacity: .55; box-shadow: 0 0 0 8px rgb(92 225 255 / .04), 0 0 12px rgb(92 225 255 / .35); } }
+@media (min-width: 900px) { .remote-workspace { grid-template-columns: 280px minmax(0, 1fr); } .remote-workspace-rail { border-right: 1px solid var(--color-line); border-bottom: 0; } }
+@media (prefers-reduced-motion: reduce) { .remote-status-dot { animation: none; } }
