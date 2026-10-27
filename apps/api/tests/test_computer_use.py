@@ -14,7 +14,7 @@ from test_device_protocol import FakeDevice, _code
 
 pytestmark = pytest.mark.mocked
 CU_CAPS = (
-    "system.info", "screen.capture", "input.click", "input.type", "input.key", "input.scroll", "input.move", "url.open",
+    "system.info", "app.info", "screen.capture", "input.click", "input.type", "input.key", "input.scroll", "input.move", "url.open",
     "guide.highlight", "guide.clear",
 )
 
@@ -90,6 +90,58 @@ def _pump(d, owner, rid, log, until=("waiting_customer", "completed", "failed", 
         if run["state"] in until:
             return run
     return run
+
+
+def _adobe_verification_run(app, owner, monkeypatch):
+    from joltiq.services.ai import computer as C
+
+    def finish_after_first_screen(self, **kw):
+        inp = {"success": True, "summary": "Adobe Acrobat was removed and Adobe Genuine Service remains installed."}
+        block = {"type": "tool_use", "id": "t_finish", "name": "finish", "input": inp}
+        return C.Turn(
+            "The requested uninstall appears complete.",
+            [C.ToolUse("t_finish", "finish", inp, False)],
+            [{"type": "text", "text": "The requested uninstall appears complete."}, block],
+            live=False,
+            provider="local_fixture",
+            model="verification-test",
+        )
+
+    monkeypatch.setattr(C.FixtureComputer, "turn", finish_after_first_screen)
+    d = CUDevice(app)
+    assert d.enroll(_code(owner), caps=CU_CAPS).status_code == 200
+    ticket = owner.post("/api/v1/tickets", json={
+        "subject": "Uninstall Adobe Acrobat Reader 64-bit",
+        "description": "Remove Acrobat but leave Adobe Genuine Service installed.",
+        "device_id": d.device_id,
+    }).json()
+    session = owner.post("/api/v1/sessions", json={
+        "kind": "desktop", "device_id": d.device_id, "ticket_id": ticket["id"],
+    }).json()
+    assert owner.post(f"/api/v1/sessions/{session['id']}/consent", json={"minutes": 30}).status_code == 200
+    d.answer_all([])
+    run = owner.post(f"/api/v1/sessions/{session['id']}/computer-use", json={
+        "goal": "Uninstall Adobe Acrobat Reader 64-bit from this Windows computer, but leave Adobe Genuine Service installed.",
+        "mode": "fix",
+    }).json()
+    assert d.post(f"/computer-use/{run['id']}/local-consent", {"accepted": True}).status_code == 200
+    capture = next(e for e in d.envelopes() if e["type"] == "action")
+    assert capture["action"] == "screen.capture"
+    assert d.post(f"/commands/{capture['command_id']}/screenshot", raw=png(), ctype="image/png").status_code == 200
+    assert d.post(f"/commands/{capture['command_id']}/result", {"status": "done", "result": {
+        "ok": True, "width": 1280, "height": 800, "frame_generation": 17, "layout_hash": "a" * 64,
+    }}).status_code == 200
+    drain()
+    return d, ticket, run
+
+
+def _answer_inventory(d, envelope, apps):
+    assert envelope["action"] == "app.info"
+    response = d.post(f"/commands/{envelope['command_id']}/result", {
+        "status": "done", "result": {"ok": True, "apps": apps},
+    })
+    assert response.status_code == 200, response.text
+    drain()
 
 
 def test_frame_binding_is_required_and_copied_from_latest_device_screenshot(app, owner):
@@ -349,6 +401,57 @@ def test_full_run_with_approval_pause_and_screens(app, owner):
     assert owner.get(f"/api/v1/sessions/{sid}/frame").status_code == 200
     ev = [e["kind"] for e in owner.get(f"/api/v1/sessions/{sid}/events").json()]
     assert "computer_use.started" in ev and "computer_use.completed" in ev
+
+
+def test_adobe_finish_requires_inventory_and_resolves_verified_ticket(app, owner, monkeypatch):
+    d, ticket, run = _adobe_verification_run(app, owner, monkeypatch)
+
+    absent = next(e for e in d.envelopes() if e["type"] == "action")
+    assert absent["action"] == "app.info"
+    assert absent["params"] == {"name_filter": "Adobe Acrobat"}
+    _answer_inventory(d, absent, [])
+
+    present = next(e for e in d.envelopes() if e["type"] == "action")
+    assert present["action"] == "app.info"
+    assert present["params"] == {"name_filter": "Adobe Genuine Service"}
+    _answer_inventory(d, present, [{"name": "Adobe Genuine Service", "version": "9.1.0.52", "publisher": "Adobe Inc."}])
+
+    completed = owner.get(f"/api/v1/computer-use/{run['id']}").json()
+    assert completed["state"] == "completed" and completed["success"] is True
+    assert "independently verified" in completed["summary"].lower()
+    assert [s["kind"] for s in completed["steps"]][-3:] == ["finish", "verify.app_absent", "verify.app_present"]
+    resolved = owner.get(f"/api/v1/tickets/{ticket['id']}").json()
+    assert resolved["status"] == "RESOLVED" and resolved["resolution_verified"] is True
+
+
+def test_adobe_inventory_contradiction_fails_closed_and_does_not_resolve(app, owner, monkeypatch):
+    d, ticket, run = _adobe_verification_run(app, owner, monkeypatch)
+
+    absent = next(e for e in d.envelopes() if e["type"] == "action")
+    _answer_inventory(d, absent, [{"name": "Adobe Acrobat (64-bit)", "version": "25.001", "publisher": "Adobe Inc."}])
+
+    failed = owner.get(f"/api/v1/computer-use/{run['id']}").json()
+    assert failed["state"] == "failed" and failed["success"] is False
+    assert "still installed" in failed["summary"].lower()
+    unresolved = owner.get(f"/api/v1/tickets/{ticket['id']}").json()
+    assert unresolved["status"] != "RESOLVED" and unresolved["resolution_verified"] is False
+
+
+def test_adobe_unreadable_inventory_fails_closed_and_does_not_resolve(app, owner, monkeypatch):
+    d, ticket, run = _adobe_verification_run(app, owner, monkeypatch)
+
+    absent = next(e for e in d.envelopes() if e["type"] == "action")
+    response = d.post(f"/commands/{absent['command_id']}/result", {
+        "status": "done", "result": {"ok": True, "unexpected": []},
+    })
+    assert response.status_code == 200, response.text
+    drain()
+
+    failed = owner.get(f"/api/v1/computer-use/{run['id']}").json()
+    assert failed["state"] == "failed" and failed["success"] is False
+    assert "could not be read reliably" in failed["summary"].lower()
+    unresolved = owner.get(f"/api/v1/tickets/{ticket['id']}").json()
+    assert unresolved["status"] != "RESOLVED" and unresolved["resolution_verified"] is False
 
 
 def test_denied_approval_finishes_without_change(app, owner):

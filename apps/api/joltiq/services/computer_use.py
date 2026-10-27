@@ -40,6 +40,21 @@ KEEP_IMAGES = 3
 DEVICE_TIMEOUT_S = 150
 MAX_SCREENSHOT_BYTES = 4 * 1024 * 1024
 
+ADOBE_REMOVAL_CHECKS = (
+    {
+        "kind": "verify.app_absent",
+        "name_filter": "Adobe Acrobat",
+        "expected_name": "Adobe Acrobat",
+        "expect": "absent",
+    },
+    {
+        "kind": "verify.app_present",
+        "name_filter": "Adobe Genuine Service",
+        "expected_name": "Adobe Genuine Service",
+        "expect": "present",
+    },
+)
+
 SYSTEM = """You are JoltIQ, an IT support technician operating a customer's computer with their permission.
 The customer is watching. You see their real screen; every click and keystroke happens on their machine.
 
@@ -121,6 +136,128 @@ def _end(db: Session, run: ComputerUseRun, state: str, summary: str, success: bo
             tickets.comment(db, tickets.get(db, run.ticket_id), f"Computer-use session {state}: {summary[:1500]}", author_kind="ai", internal=True)
         except Exception:  # noqa: BLE001 - ticket note is best effort
             log.exception("ticket note failed")
+
+
+def _completion_checks(goal: str) -> tuple[dict[str, str], ...]:
+    """Return only server-owned verification contracts; the model cannot author expectations."""
+    normalized = " ".join(goal.casefold().split())
+    removes_acrobat = "uninstall adobe acrobat" in normalized or "remove adobe acrobat" in normalized
+    preserves_genuine = "adobe genuine service" in normalized and any(
+        word in normalized for word in ("leave", "keep", "remain", "preserve")
+    )
+    return ADOBE_REMOVAL_CHECKS if removes_acrobat and preserves_genuine else ()
+
+
+def _begin_completion_verification(db: Session, run: ComputerUseRun, summary: str) -> bool:
+    checks = _completion_checks(run.goal)
+    if not checks:
+        return False
+    verification = {"summary": summary[:1500], "checks": list(checks), "index": 0}
+    check = checks[0]
+    _dispatch(
+        db,
+        run,
+        "completion-verification-0",
+        "app.info",
+        {"name_filter": check["name_filter"]},
+        f"Independently checking Windows inventory for {check['expected_name']}.",
+        kind=check["kind"],
+    )
+    if run.waiting_for:
+        run.waiting_for = {**run.waiting_for, "completion_verification": verification}
+    return True
+
+
+def _inventory_names(result: dict) -> list[str] | None:
+    apps = result.get("apps")
+    if not isinstance(apps, list):
+        return None
+    names: list[str] = []
+    for app in apps:
+        if not isinstance(app, dict) or not isinstance(app.get("name"), str):
+            return None
+        names.append(app["name"].strip())
+    return names
+
+
+def _resolve_verified_ticket(db: Session, run: ComputerUseRun, summary: str) -> None:
+    if not run.ticket_id:
+        return
+    from . import tickets
+
+    ticket = tickets.get(db, run.ticket_id)
+    tickets.transition(
+        db,
+        ticket,
+        "RESOLVED",
+        actor_kind="ai",
+        reason=summary[:1500],
+        verified=True,
+    )
+
+
+def _handle_completion_verification(
+    db: Session,
+    run: ComputerUseRun,
+    result: dict,
+    ok: bool,
+    verification: dict,
+    step: ComputerUseStep | None,
+) -> None:
+    checks = verification.get("checks")
+    index = verification.get("index")
+    if not isinstance(checks, list) or not isinstance(index, int) or not 0 <= index < len(checks):
+        _end(db, run, "failed", "The independent software verification state was invalid. The ticket was not resolved.", False)
+        return
+    check = checks[index]
+    names = _inventory_names(result) if ok else None
+    if names is None:
+        if step:
+            step.status, step.error = "failed", "Windows inventory could not be read reliably."
+        _end(db, run, "failed", "Windows inventory could not be read reliably. The ticket was not resolved.", False)
+        return
+    expected = str(check.get("expected_name") or "").casefold()
+    matches = [name for name in names if expected in name.casefold()]
+    passed = (not matches) if check.get("expect") == "absent" else bool(matches)
+    if not passed:
+        if step:
+            step.status = "failed"
+            step.error = (
+                f"{check['expected_name']} is still installed."
+                if check.get("expect") == "absent"
+                else f"{check['expected_name']} was not found."
+            )
+        summary = (
+            f"Independent verification failed: {check['expected_name']} is still installed. The ticket was not resolved."
+            if check.get("expect") == "absent"
+            else f"Independent verification failed: {check['expected_name']} was not found. The ticket was not resolved."
+        )
+        _end(db, run, "failed", summary, False)
+        return
+    next_index = index + 1
+    if next_index < len(checks):
+        next_check = checks[next_index]
+        _dispatch(
+            db,
+            run,
+            f"completion-verification-{next_index}",
+            "app.info",
+            {"name_filter": next_check["name_filter"]},
+            f"Independently checking Windows inventory for {next_check['expected_name']}.",
+            kind=next_check["kind"],
+        )
+        if run.waiting_for:
+            run.waiting_for = {
+                **run.waiting_for,
+                "completion_verification": {**verification, "index": next_index},
+            }
+        return
+    summary = (
+        "Independently verified from Windows inventory: Adobe Acrobat is not installed and "
+        "Adobe Genuine Service remains installed."
+    )
+    _end(db, run, "completed", summary, True)
+    _resolve_verified_ticket(db, run, summary)
 
 
 # ---------------- memory: learn from successful runs, recall on the next one ----------------
@@ -453,6 +590,10 @@ def on_device_result(db: Session, cmd: DeviceCommand) -> bool:
         }
     run.pending_command_id, run.waiting_for, run.state = None, None, "running"
     tid = w.get("tool_use_id")
+    completion_verification = w.get("completion_verification")
+    if completion_verification:
+        _handle_completion_verification(db, run, res, ok, completion_verification, st)
+        return True
     if tid is None:  # the opening screenshot
         dev = db.get(Device, cmd.device_id)
         os_line = f" The computer runs {dev.os_name} {dev.os_version}." if dev else ""
@@ -726,7 +867,10 @@ def _execute(db: Session, run: ComputerUseRun, tu: dict) -> None:
         return
     if name == "finish":
         _add_step(db, run, "finish", {"success": bool(inp.get("success"))}, narr, status="done")
-        _end(db, run, "completed" if inp.get("success") else "failed", str(inp.get("summary") or narr or "Finished."), bool(inp.get("success")))
+        summary = str(inp.get("summary") or narr or "Finished.")
+        if inp.get("success") and _begin_completion_verification(db, run, summary):
+            return
+        _end(db, run, "completed" if inp.get("success") else "failed", summary, bool(inp.get("success")))
         return
     _refuse(db, run, tid, name, inp, narr, f"Unknown tool {name}", computer=False)
 
