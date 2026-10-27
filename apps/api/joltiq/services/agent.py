@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import timedelta
@@ -144,6 +145,10 @@ def add_message(db: Session, run: AgentRun, role: str, content: str, *, author_i
 
 def customer_message(db: Session, run: AgentRun, content: str, author_id) -> dict:
     add_message(db, run, "user", content, author_id=author_id)
+    if run.paused_for == "customer" and is_resolution_message(content):
+        # At any point where JoltIQ is waiting on the customer, "fixed"/"that worked" ends the run as customer-confirmed.
+        _customer_confirmed_resolution(db, run)
+        return {"resumed": False, "resolved": True}
     if run.paused_for == "customer":
         run.paused_for = None
         enqueue(db, "agent.advance", {"run_id": str(run.id)}, org_id=run.org_id)
@@ -318,13 +323,17 @@ def h_intake(db, run):
 def h_collect(db, run):
     ctx = run.context
     clar = _model(db, run, "clarify", S.Clarification, {"text": _customer_text(db, run), "rounds": ctx.get("clarify_rounds", 0)})
-    if not clar.sufficient and clar.questions and ctx.get("clarify_rounds", 0) < 2:
+    # Ask first only when the request is too vague to act on. Ordinary "guide me" requests go straight to steps; the
+    # open questions are passed to guidance so it can branch ("if X, try Y") instead of interrogating the customer.
+    said = " ".join(m["content"] for m in _transcript(db, run) if m["role"] == "user") or _customer_text(db, run)
+    too_vague = len(said.split()) < MIN_WORDS_TO_SKIP_CLARIFY
+    if not clar.sufficient and clar.questions and ctx.get("clarify_rounds", 0) < 1 and too_vague:
         _ctx_update(run, clarify_rounds=ctx.get("clarify_rounds", 0) + 1)
         _say(db, run, "To diagnose this I need a bit more detail:\n" + "\n".join(f"• {q}" for q in clar.questions[:5]))
         _set_ticket(db, run, TS.AWAITING_CUSTOMER, "waiting for diagnostic answers")
         run.paused_for = "customer"
         return
-    _ctx_update(run, known_facts=clar.known_facts)
+    _ctx_update(run, known_facts=clar.known_facts, open_questions=clar.questions[:5])
     if _maybe_collect_diagnostics(db, run):
         return
     transition(db, run, R.SEARCHING_INTERNAL, "context sufficient")
@@ -868,13 +877,26 @@ def h_plan(db, run):
 
 
 
+MIN_WORDS_TO_SKIP_CLARIFY = 8
+_NEGATION = re.compile(r"\b(not|nothing|none|n't|didn't|didnt|doesn't|doesnt|isn't|isnt|still|no luck|never (?:worked|fixed|resolved)|nope|won't|wont|can't|cant)\b")
+_RESOLVED = re.compile(r"\b(fixed|worked|works now|working now|working again|works again|resolved|"
+                       r"solved|all good|sorted|problem gone|back to normal)\b")
+
+
+def is_resolution_message(text: str) -> bool:
+    """Deterministic check for 'it's fixed' replies, so resolution never depends on a model call."""
+    low = " ".join((text or "").lower().replace("’", "'").split())
+    return bool(_RESOLVED.search(low)) and not _NEGATION.search(low)
+
+
 # ---------------- guided self-service (the person does the steps; JoltIQ never executes them) ----------------
 MAX_GUIDANCE_ROUNDS = 2
 GUIDANCE_PROMPT = (
     "No approved automated fix exists, so act as an experienced IT technician guiding the person to fix this themselves. "
     "Cover any IT topic: Windows, macOS, Linux, Microsoft 365, networking, VPN, DNS, printers, cloud (AWS, Azure, GCP), "
     "security, scripting and programming. Give a short plain-language answer, then at most 8 ordered steps from safest and "
-    "most likely to least. Prefer steps backed by evidence ids; when a step comes from general knowledge, keep it standard and "
+    "most likely to least. Do NOT ask the person questions instead of giving steps: give useful first-line steps now, and where an open_question "
+    "matters, fold it into a step (for example 'If only this laptop is affected, ...'). Prefer steps backed by evidence ids; when a step comes from general knowledge, keep it standard and "
     "low risk. Never tell the person to disable security software, run untrusted scripts, delete data without a backup, or share "
     "passwords. If previous_attempts is non-empty, do not repeat those steps; use what the person reported. Set needs_technician "
     "when the fix needs admin rights the person likely lacks, physical repair, data-loss risk, or account/billing changes."
@@ -898,6 +920,7 @@ def _give_guidance(db, run) -> bool:
     ev = ctx.get("evidence", [])
     payload = {"subject": t.subject, "customer_text": _customer_text(db, run)[:4000], "intent": ctx.get("intent"),
                "evidence": ev, "hypotheses": ctx.get("hypotheses", []), "observations": ctx.get("observations", []),
+               "known_facts": ctx.get("known_facts", {}), "open_questions": ctx.get("open_questions", []),
                "previous_attempts": ctx.get("guidance_history", [])}
     try:
         guide = _model(db, run, "guidance", S.TroubleshootingGuide, payload, GUIDANCE_PROMPT)
@@ -932,6 +955,9 @@ def _handle_guidance_feedback(db, run) -> None:
     reply = _latest_user_message(db, run)
     _ctx_update(run, awaiting_guidance_feedback=False)
     low = reply.lower()
+    if is_resolution_message(reply):
+        _customer_confirmed_resolution(db, run)
+        return
     if any(w in low for w in ("technician", "human", "real person", "escalate")):
         _escalate(db, run, "Customer asked for a technician after self-service guidance")
         return

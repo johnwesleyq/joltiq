@@ -490,3 +490,46 @@ def test_emergency_stop_terminates_and_escalates(services, app, team):
 
 
 _ = select
+
+
+def _questions_always(self, ctx, messages):
+    # Mimic the live model in demo ticket #1008: it judged an ordinary Wi-Fi request "insufficient" and asked questions.
+    return {"sufficient": False, "questions": ["Which Wi-Fi network?", "Windows or Mac?", "Any error message?",
+                                               "Did anything change?", "Do other devices connect?"], "known_facts": {}}
+
+
+def test_ordinary_request_gets_steps_even_when_model_wants_to_ask_questions(services, app, team, monkeypatch):
+    from joltiq.services.ai.fixture import LocalFixtureProvider
+    monkeypatch.setattr(LocalFixtureProvider, "_Clarification", _questions_always)
+    owner, tech, customer = team
+    r = customer.post("/api/v1/agents/chat", json={"message": "My laptop won't connect to the office Wi-Fi but my phone connects fine."})
+    run_id, ticket_id = r.json()["run_id"], r.json()["ticket_id"]
+    run = wait_state(customer, run_id, _awaiting_guidance)
+    ai_msgs = [m for m in run["messages"] if m["role"] == "assistant"]
+    assert not any("need a bit more detail" in m["content"] for m in ai_msgs), "should give steps, not interrogate"
+    customer.post("/api/v1/agents/chat", json={"ticket_id": ticket_id, "message": "that worked, it’s fixed"})
+    run = wait_state(customer, run_id, lambda r: r["state"] in ("RESOLVED", "ESCALATED"))
+    assert run["state"] == "RESOLVED"
+    assert customer.get(f"/api/v1/tickets/{ticket_id}").json()["resolution_verified"] is False
+
+
+def test_fixed_reply_resolves_even_during_clarifying_questions(services, app, team, monkeypatch):
+    from joltiq.services.ai.fixture import LocalFixtureProvider
+    monkeypatch.setattr(LocalFixtureProvider, "_Clarification", _questions_always)
+    owner, tech, customer = team
+    r = customer.post("/api/v1/agents/chat", json={"message": "Internet broken"})  # too vague -> one round of questions
+    run_id, ticket_id = r.json()["run_id"], r.json()["ticket_id"]
+    run = wait_state(customer, run_id, lambda r: r["paused_for"] == "customer")
+    assert any("need a bit more detail" in m["content"] for m in run["messages"] if m["role"] == "assistant")
+    customer.post("/api/v1/agents/chat", json={"ticket_id": ticket_id, "message": "Never mind, restarted the router and it works now"})
+    run = wait_state(customer, run_id, lambda r: r["state"] in ("RESOLVED", "ESCALATED"))
+    assert run["state"] == "RESOLVED"
+    assert customer.get(f"/api/v1/tickets/{ticket_id}").json()["status"] in ("RESOLVED", "OPEN")
+
+
+def test_not_fixed_reply_is_not_mistaken_for_resolution():
+    from joltiq.services.agent import is_resolution_message as f
+    for yes in ("that worked, it’s fixed", "Fixed!", "works now thanks", "The fix worked", "resolved", "all good now", "Never mind, restarted the router and it works now"):
+        assert f(yes), yes
+    for no in ("not fixed", "still broken", "didn't work", "nothing worked", "it never worked", "nope", "Wi-Fi isn't working"):
+        assert not f(no), no
