@@ -490,6 +490,42 @@ def test_secret_typing_refused_server_side(app, owner, monkeypatch):
     assert blocked and "secret" in blocked[0]["error"] and "Hunter22" not in json.dumps(run)
 
 
+def test_repeated_screenshot_loop_stops_instead_of_spending_all_steps(app, owner, monkeypatch):
+    from joltiq.services.ai import computer as C
+
+    def screenshot_forever(self, **kw):
+        block = {"type": "tool_use", "id": "t_screenshot", "name": "screenshot", "input": {},
+                 "toolset_name": "computer"}
+        return C.Turn(
+            "Checking again.",
+            [C.ToolUse("t_screenshot", "screenshot", {}, True)],
+            [{"type": "text", "text": "Checking again."}, block],
+            live=False,
+            provider="local_fixture",
+            model="x",
+        )
+
+    monkeypatch.setattr(C.FixtureComputer, "turn", screenshot_forever)
+    d, sid = _setup(app, owner)
+    rid = owner.post(f"/api/v1/sessions/{sid}/computer-use", json={"goal": "Inspect Adobe applications"}).json()["id"]
+    log: list = []
+
+    run = _pump(d, owner, rid, log, until=("failed",), rounds=20)
+
+    assert run["state"] == "failed"
+    assert "observation loop" in run["summary"].lower()
+    assert [action for action, _ in log].count("screen.capture") <= 6
+
+
+def test_computer_prompt_tells_model_to_clear_obstructions_before_observing_again():
+    from joltiq.services.computer_use import SYSTEM
+
+    prompt = SYSTEM.lower()
+    assert "obstruct" in prompt
+    assert "close" in prompt
+    assert "another screenshot" in prompt
+
+
 def test_technician_request_needs_customer_and_session_end_stops_run(app, owner, org_team):
     d, sid = _setup(app, owner)
     tech = org_team["tech"]
@@ -675,7 +711,7 @@ def test_openai_computer_provider_requires_deployment_and_tenant_approval(owner,
     monkeypatch.setattr(settings, "allow_external_computer_use_models", True)
     with session_scope(org_id) as db:
         selected = [(provider, model, key) for provider, model, _cfg, key in available_providers(db, org_id, "computer_use")]
-    assert ("openai", "gpt-6.1-sol", "sk-test-openai-computer-0000000000") in selected
+    assert ("openai", "gpt-6.1-terra", "sk-test-openai-computer-0000000000") in selected
     assert "local_fixture" not in [provider for provider, _model, _key in selected]
 
     owner.patch("/api/v1/admin/models/openai", json={"approved_for_tenant_data": False})

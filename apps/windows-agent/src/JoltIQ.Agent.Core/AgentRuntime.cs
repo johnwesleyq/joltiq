@@ -32,6 +32,7 @@ public interface IUserInteraction
     void ActionPerformed(string sessionId, string summary);
     string CurrentUserDisplayName { get; }
     Task<bool> AskComputerUseConsentAsync(ComputerUseConsentRequest request, TimeSpan timeout, CancellationToken ct) => Task.FromResult(false);
+    Task<bool> AskComputerUseActionApprovalAsync(ComputerUseActionApprovalRequest request, TimeSpan timeout, CancellationToken ct) => Task.FromResult(false);
     void ComputerUseStarted(ComputerUseGrant grant, Func<GuideResponse, Task> respond, Action stopRequested) { }
     void ComputerUseEnded(string runId, string reason) { }
     void ShowGuide(GuideInstruction instruction) { }
@@ -40,6 +41,7 @@ public interface IUserInteraction
 
 public sealed record NativeConsentRequest(string Title, string Body, string? AddinName, string? AddinProgId, string ActiveMessage);
 public sealed record ComputerUseConsentRequest(string RunId, string SessionId, string Mode, string Goal);
+public sealed record ComputerUseActionApprovalRequest(string RunId, string SessionId, string InteractionId, string Text);
 public sealed record ComputerUseGrant(string RunId, string SessionId, string Mode, string Goal);
 public sealed record GuideInstruction(int X, int Y, int Width, int Height, int FrameWidth, int FrameHeight, string Instruction, string ExpectedControlLabel);
 public enum GuideResponse { Done, SwitchToFix }
@@ -56,6 +58,7 @@ public sealed class AgentRuntime
     private readonly ICommandJournal _journal;
     private readonly ReplayGuard _replay = new();
     private readonly Dictionary<string, LocalSession> _sessions = new();
+    private readonly HashSet<string> _handledComputerUseInteractions = new(StringComparer.Ordinal);
     private readonly List<StopTiming> _stopEvents = new();
     private EnvelopeVerifier? _verifier;
     public List<RuntimeLogEntry> Log { get; } = new();
@@ -177,6 +180,9 @@ public sealed class AgentRuntime
             case "computer_use.end":
                 EndComputerUse(b, sessionId, "ended by server");
                 break;
+            case "computer_use.approval":
+                await ApproveComputerUseActionAsync(b, sessionId, ct);
+                break;
             case "action":
                 await RunActionAsync(b, sessionId, ct);
                 break;
@@ -224,6 +230,36 @@ public sealed class AgentRuntime
         session.ComputerUseMode = null;
         _ui.ClearGuide();
         _ui.ComputerUseEnded(runId, reason);
+    }
+
+    private async Task ApproveComputerUseActionAsync(JsonElement envelope, string? sessionId, CancellationToken ct)
+    {
+        var runId = envelope.TryGetProperty("computer_use_run_id", out var runEl) ? runEl.GetString() : null;
+        var interactionId = envelope.TryGetProperty("interaction_id", out var interactionEl) ? interactionEl.GetString() : null;
+        var text = envelope.TryGetProperty("text", out var textEl) ? textEl.GetString() : null;
+        if (sessionId is null || !_sessions.TryGetValue(sessionId, out var session) || !session.Active || session.Expired ||
+            string.IsNullOrWhiteSpace(runId) || session.ComputerUseRunId != runId || session.ComputerUseMode != "fix" ||
+            string.IsNullOrWhiteSpace(interactionId) || string.IsNullOrWhiteSpace(text) || text.Length > 2000)
+        {
+            L("warn", "computer-use action approval refused: invalid or inactive Fix grant");
+            return;
+        }
+
+        var key = $"{runId}:{interactionId}";
+        lock (_handledComputerUseInteractions)
+            if (!_handledComputerUseInteractions.Add(key)) return;
+        try
+        {
+            var approved = await _ui.AskComputerUseActionApprovalAsync(
+                new(runId, sessionId, interactionId, text), ConsentTimeout, ct);
+            await _client.SendAsync(HttpMethod.Post, $"/computer-use/{runId}/respond", new { approved }, ct);
+            L("info", $"computer-use action {interactionId} {(approved ? "approved" : "denied")} locally");
+        }
+        catch
+        {
+            lock (_handledComputerUseInteractions) _handledComputerUseInteractions.Remove(key);
+            throw;
+        }
     }
 
     private Task RespondToGuideAsync(string runId, GuideResponse response)

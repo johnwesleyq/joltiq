@@ -12,7 +12,8 @@ public sealed record InputTargetSnapshot(
     string Name,
     string AutomationId,
     string ControlType,
-    DesktopRectangle Bounds);
+    DesktopRectangle Bounds,
+    int ProcessId);
 
 public interface IInputTargetInspector
 {
@@ -113,7 +114,8 @@ public sealed class WindowsInputTargetInspector : IInputTargetInspector
                 current.AutomationId ?? "",
                 current.ControlType?.ProgrammaticName ?? "",
                 new DesktopRectangle((int)Math.Floor(bounds.Left), (int)Math.Floor(bounds.Top),
-                    Math.Max(0, (int)Math.Ceiling(bounds.Width)), Math.Max(0, (int)Math.Ceiling(bounds.Height))));
+                    Math.Max(0, (int)Math.Ceiling(bounds.Width)), Math.Max(0, (int)Math.Ceiling(bounds.Height))),
+                current.ProcessId);
         }
         catch (ElementNotAvailableException) { return null; }
     }

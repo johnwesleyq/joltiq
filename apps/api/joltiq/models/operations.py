@@ -93,6 +93,36 @@ class DeviceCommand(IdMixin, TimestampMixin, TenantMixin, Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class RemoteAccessBinding(IdMixin, TimestampMixin, TenantMixin, Base):
+    """Maps one JoltIQ device to an opaque node in a deployment-owned remote access provider."""
+
+    __tablename__ = "remote_access_bindings"
+    __table_args__ = (UniqueConstraint("device_id"), UniqueConstraint("org_id", "provider", "node_id"))
+    device_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("devices.id", ondelete="CASCADE"), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(30), default="meshcentral")
+    node_id: Mapped[str] = mapped_column(String(300))
+    created_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"))
+
+
+class RemoteAccessSession(IdMixin, TimestampMixin, TenantMixin, Base):
+    """JoltIQ's auditable authorization record; the provider enforces endpoint consent."""
+
+    __tablename__ = "remote_access_sessions"
+    __table_args__ = (CheckConstraint("state IN ('active', 'ended')", name="ck_remote_access_session_state"),)
+    device_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("devices.id", ondelete="CASCADE"), index=True
+    )
+    binding_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("remote_access_bindings.id", ondelete="RESTRICT"), index=True
+    )
+    operator_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"))
+    reason: Mapped[str] = mapped_column(String(500))
+    state: Mapped[str] = mapped_column(String(20), default="active", index=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 # ---------------- Live support sessions ----------------
 class SupportSession(IdMixin, TimestampMixin, TenantMixin, Base):
     __tablename__ = "support_sessions"

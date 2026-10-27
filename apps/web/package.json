@@ -8,6 +8,7 @@
     "start": "next start -p 3000",
     "lint": "eslint src",
     "typecheck": "tsc --noEmit",
+    "test:config": "node scripts/check-remote-csp.mjs",
     "test:e2e": "playwright test"
   },
   "dependencies": {

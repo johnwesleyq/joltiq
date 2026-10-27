@@ -219,14 +219,199 @@ def test_device_support_request_can_start_fix_with_two_local_consent_gates(app, 
     ).status_code == 200
 
     pending = [json.loads(base64.b64decode(e["payload"])) for e in device.get("/poll").json()["envelopes"]]
+    # The companion keeps the locally-consented session only in memory. Re-send the
+    # idempotent session grant so a restarted tray can safely ask again and recover.
+    recovered_session = next(e for e in pending if e["type"] == "session.begin")
+    assert recovered_session["session_id"] == body["session_id"]
     run_begin = next(e for e in pending if e["type"] == "computer_use.begin")
     assert run_begin["mode"] == "fix"
     assert run_begin["goal"] == "I can't find Adobe Sign in Outlook."
+
+    assert device.post(
+        f"/computer-use/{run_begin['computer_use_run_id']}/local-consent",
+        {"accepted": True},
+    ).status_code == 200
+    restarted = [json.loads(base64.b64decode(e["payload"])) for e in device.get("/poll").json()["envelopes"]]
+    recovered_run = next(e for e in restarted if e["type"] == "computer_use.begin")
+    assert recovered_run["computer_use_run_id"] == run_begin["computer_use_run_id"]
+    assert device.post(
+        f"/computer-use/{run_begin['computer_use_run_id']}/local-consent",
+        {"accepted": True},
+    ).status_code == 200
 
     repeated = device.post(f"/support-requests/{created['run_id']}/computer-use", {"mode": "fix"})
     assert repeated.status_code == 200, repeated.text
     assert repeated.json()["session_id"] == body["session_id"]
     assert repeated.json()["computer_use_run_id"] == run_begin["computer_use_run_id"]
+
+    conflicting = device.post(f"/support-requests/{created['run_id']}/computer-use", {"mode": "guide"})
+    assert conflicting.status_code == 200, conflicting.text
+    assert conflicting.json()["session_id"] == body["session_id"]
+    assert conflicting.json()["computer_use_run_id"] == run_begin["computer_use_run_id"]
+    assert conflicting.json()["mode"] == "fix"
+
+
+def test_active_direct_computer_use_accepts_device_result_after_ticket_run_escalated(app, owner):
+    from joltiq.db import session_scope
+    from joltiq.models import AgentRun, DeviceCommand
+
+    capabilities = [
+        "system.info", "screen.capture", "input.click", "input.type", "input.key", "input.scroll", "input.move",
+        "url.open", "guide.highlight", "guide.clear",
+    ]
+    device = FakeDevice(app)
+    assert device.enroll(_code(owner), caps=capabilities).status_code == 200
+    created = device.post(
+        "/support-requests",
+        {"client_request_id": str(uuid.uuid4()), "message": "Please uninstall Adobe Acrobat DC."},
+    ).json()
+
+    started = device.post(f"/support-requests/{created['run_id']}/computer-use", {"mode": "fix"}).json()
+    pending = [json.loads(base64.b64decode(e["payload"])) for e in device.get("/poll").json()["envelopes"]]
+    session_begin = next(e for e in pending if e["type"] == "session.begin")
+    assert device.post(
+        f"/sessions/{session_begin['session_id']}/local-consent",
+        {"accepted": True, "user_display_name": "John"},
+    ).status_code == 200
+
+    pending = [json.loads(base64.b64decode(e["payload"])) for e in device.get("/poll").json()["envelopes"]]
+    run_begin = next(e for e in pending if e["type"] == "computer_use.begin")
+    assert device.post(
+        f"/computer-use/{run_begin['computer_use_run_id']}/local-consent",
+        {"accepted": True},
+    ).status_code == 200
+    pending = [json.loads(base64.b64decode(e["payload"])) for e in device.get("/poll").json()["envelopes"]]
+    action = next(e for e in pending if e["type"] == "action")
+
+    with session_scope(uuid.UUID(owner.org_id)) as db:
+        ticket_run = db.get(AgentRun, uuid.UUID(created["run_id"]))
+        ticket_run.state = "ESCALATED"
+
+    response = device.post(
+        f"/commands/{action['command_id']}/result",
+        {"status": "failed", "result": {"ok": False, "error": "Desktop capture refused: remote_session"}},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "status": "failed", "late": False, "idempotent": False}
+    with session_scope(uuid.UUID(owner.org_id)) as db:
+        command = db.get(DeviceCommand, uuid.UUID(action["command_id"]))
+        assert command.status == "failed"
+        assert command.result == {"ok": False, "error": "Desktop capture refused: remote_session"}
+
+
+def test_active_direct_computer_use_owns_native_conversation_after_ticket_agent_escalates(app, owner):
+    from joltiq.db import session_scope
+    from joltiq.models import AgentRun, ComputerUseRun
+    from joltiq.services.agent import add_message
+
+    capabilities = [
+        "system.info", "screen.capture", "input.click", "input.type", "input.key", "input.scroll", "input.move",
+        "url.open", "guide.highlight", "guide.clear",
+    ]
+    device = FakeDevice(app)
+    assert device.enroll(_code(owner), caps=capabilities).status_code == 200
+    created = device.post(
+        "/support-requests",
+        {"client_request_id": str(uuid.uuid4()), "message": "Please uninstall Adobe Acrobat DC."},
+    ).json()
+
+    started = device.post(f"/support-requests/{created['run_id']}/computer-use", {"mode": "fix"}).json()
+    pending = [json.loads(base64.b64decode(e["payload"])) for e in device.get("/poll").json()["envelopes"]]
+    session_begin = next(e for e in pending if e["type"] == "session.begin")
+    assert device.post(
+        f"/sessions/{session_begin['session_id']}/local-consent",
+        {"accepted": True, "user_display_name": "John"},
+    ).status_code == 200
+    pending = [json.loads(base64.b64decode(e["payload"])) for e in device.get("/poll").json()["envelopes"]]
+    run_begin = next(e for e in pending if e["type"] == "computer_use.begin")
+    computer_run_id = run_begin["computer_use_run_id"]
+
+    with session_scope(uuid.UUID(owner.org_id)) as db:
+        ticket_run = db.get(AgentRun, uuid.UUID(created["run_id"]))
+        ticket_run.state = "ESCALATED"
+        add_message(
+            db,
+            ticket_run,
+            "assistant",
+            "I've handed this to a technician so a person can take it from here. You'll get an update on your ticket.",
+            data={"escalation_reason": "No approved procedure matched"},
+        )
+        computer_run = db.get(ComputerUseRun, uuid.UUID(computer_run_id))
+        computer_run.local_consent_state = "approved"
+        computer_run.state = "waiting_customer"
+        computer_run.waiting_for = {
+            "kind": "question",
+            "text": "I can't capture the screen. Is Adobe Acrobat listed in Installed apps?",
+            "tool_use_id": "call-question",
+        }
+    detail = device.get(f"/support-requests/{created['run_id']}")
+    assert detail.status_code == 200, detail.text
+    body = detail.json()
+    assert body["state"] == "AI_INVESTIGATING"
+    assert not any("handed this to a technician" in message["content"] for message in body["messages"])
+    assert body["messages"][-1]["content"] == "I can't capture the screen. Is Adobe Acrobat listed in Installed apps?"
+
+    answer = device.post(
+        f"/support-requests/{created['run_id']}/messages",
+        {"message": "Yes, Adobe Acrobat is listed in Installed apps."},
+    )
+    assert answer.status_code == 200, answer.text
+    assert answer.json()["run_id"] == created["run_id"]
+    with session_scope(uuid.UUID(owner.org_id)) as db:
+        computer_run = db.get(ComputerUseRun, uuid.UUID(computer_run_id))
+        assert computer_run.state != "waiting_customer"
+        assert computer_run.waiting_for is None
+
+
+def test_device_poll_delivers_native_computer_use_action_approval(app, owner):
+    from joltiq.db import session_scope
+    from joltiq.models import ComputerUseRun
+
+    capabilities = [
+        "system.info", "screen.capture", "input.click", "input.type", "input.key", "input.scroll", "input.move",
+        "url.open", "guide.highlight", "guide.clear",
+    ]
+    device = FakeDevice(app)
+    assert device.enroll(_code(owner), caps=capabilities).status_code == 200
+    created = device.post(
+        "/support-requests",
+        {"client_request_id": str(uuid.uuid4()), "message": "Please uninstall Adobe Acrobat DC."},
+    ).json()
+    device.post(f"/support-requests/{created['run_id']}/computer-use", {"mode": "fix"})
+    begin = [json.loads(base64.b64decode(e["payload"])) for e in device.get("/poll").json()["envelopes"]]
+    session_begin = next(e for e in begin if e["type"] == "session.begin")
+    assert device.post(
+        f"/sessions/{session_begin['session_id']}/local-consent",
+        {"accepted": True, "user_display_name": "John"},
+    ).status_code == 200
+    pending = [json.loads(base64.b64decode(e["payload"])) for e in device.get("/poll").json()["envelopes"]]
+    run_begin = next(e for e in pending if e["type"] == "computer_use.begin")
+    run_id = uuid.UUID(run_begin["computer_use_run_id"])
+    assert device.post(f"/computer-use/{run_id}/local-consent", {"accepted": True}).status_code == 200
+
+    with session_scope(uuid.UUID(owner.org_id)) as db:
+        run = db.get(ComputerUseRun, run_id)
+        run.state = "waiting_customer"
+        run.waiting_for = {
+            "kind": "approval",
+            "text": "Uninstall Adobe Acrobat (64-bit) while leaving Adobe Genuine Service installed.",
+            "step_id": "approval-step-1",
+            "tool_use_id": "call-approval",
+        }
+
+    approval_poll = [json.loads(base64.b64decode(e["payload"])) for e in device.get("/poll").json()["envelopes"]]
+    approval = next(e for e in approval_poll if e["type"] == "computer_use.approval")
+    assert approval == {
+        "type": "computer_use.approval",
+        "session_id": session_begin["session_id"],
+        "computer_use_run_id": str(run_id),
+        "device_id": device.device_id,
+        "text": "Uninstall Adobe Acrobat (64-bit) while leaving Adobe Genuine Service installed.",
+        "interaction_id": "approval-step-1",
+        "issued_at": approval["issued_at"],
+        "expires_at": approval["expires_at"],
+        "nonce": approval["nonce"],
+    }
 
 
 def test_revoked_device_cannot_create_support_request(app, owner):

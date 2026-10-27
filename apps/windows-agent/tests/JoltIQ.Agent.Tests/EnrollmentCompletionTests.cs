@@ -50,4 +50,21 @@ public sealed class EnrollmentCompletionTests
 
         Assert.Same(prepared, startedWith);
     }
+
+    [Fact]
+    public async Task SuccessfulReEnrollmentStopsEveryOldWriterBeforeSavingTheNewIdentity()
+    {
+        var events = new List<string>();
+
+        await EnrollmentCompletion.RunAsync(
+            () => { events.Add("old-runtime-stopped"); return Task.CompletedTask; },
+            () => events.Add("conversation-closed"),
+            () => { events.Add("new-identity-saved"); return Task.FromResult(new object()); },
+            _ => events.Add("runtime-started"),
+            () => events.Add("success-notice"));
+
+        Assert.Equal(
+            ["old-runtime-stopped", "conversation-closed", "new-identity-saved", "runtime-started", "success-notice"],
+            events);
+    }
 }

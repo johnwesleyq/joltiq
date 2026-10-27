@@ -234,26 +234,49 @@ def session_begin_envelope(device: Device, s: SupportSession) -> dict:
 def pending_for(db: Session, device: Device) -> list[dict]:
     out = []
     now = utcnow()
-    # Sessions waiting for local consent on this device.
+    # Re-send every active session grant. The companion keeps accepted sessions
+    # only in memory and treats an already-known session.begin as idempotent. If
+    # the tray restarts, this makes it ask locally again before accepting any
+    # computer-use grant instead of silently losing the session forever.
     for s in db.execute(select(SupportSession).where(SupportSession.device_id == device.id, SupportSession.state == "active")).scalars():
-        c = s.consent or {}
-        if not c.get("device_local_consent") and not c.get("device_local_declined"):
-            out.append(session_begin_envelope(device, s))
+        out.append(session_begin_envelope(device, s))
     for s in db.execute(select(SupportSession).where(SupportSession.device_id == device.id, SupportSession.state == "terminated",
                                                      SupportSession.terminated_at > now - timedelta(minutes=5))).scalars():
         out.append(sign_envelope({"type": "session.end", "session_id": str(s.id), "issued_at": int(now.timestamp()), "nonce": new_token(12)}))
     from ..models import ComputerUseRun
 
     session_ids = select(SupportSession.id).where(SupportSession.device_id == device.id)
+    # The run grant is also in-memory on the companion. Re-send the exact grant
+    # throughout its active lifetime so a restarted tray can ask locally again
+    # before processing the next queued action.
     for run in db.execute(select(ComputerUseRun).where(
         ComputerUseRun.session_id.in_(session_ids),
-        ComputerUseRun.state == "waiting_local_consent",
-        ComputerUseRun.local_consent_state == "pending",
+        ComputerUseRun.state.in_(("waiting_local_consent", "running", "waiting_device", "waiting_customer")),
+        ComputerUseRun.local_consent_state.in_(("pending", "approved")),
     )).scalars():
         out.append(sign_envelope({
             "type": "computer_use.begin", "session_id": str(run.session_id),
             "computer_use_run_id": str(run.id), "device_id": str(device.id),
             "mode": run.mode, "goal": run.goal,
+            "issued_at": int(now.timestamp()), "expires_at": int((now + timedelta(seconds=COMMAND_TTL_S)).timestamp()),
+            "nonce": new_token(12),
+        }))
+    for run in db.execute(select(ComputerUseRun).where(
+        ComputerUseRun.session_id.in_(session_ids),
+        ComputerUseRun.state == "waiting_customer",
+        ComputerUseRun.local_consent_state == "approved",
+    )).scalars():
+        waiting = run.waiting_for or {}
+        if waiting.get("kind") != "approval":
+            continue
+        text = str(waiting.get("text") or "").strip()
+        interaction_id = str(waiting.get("step_id") or waiting.get("tool_use_id") or "").strip()
+        if not text or not interaction_id:
+            continue
+        out.append(sign_envelope({
+            "type": "computer_use.approval", "session_id": str(run.session_id),
+            "computer_use_run_id": str(run.id), "device_id": str(device.id),
+            "text": text, "interaction_id": interaction_id,
             "issued_at": int(now.timestamp()), "expires_at": int((now + timedelta(seconds=COMMAND_TTL_S)).timestamp()),
             "nonce": new_token(12),
         }))
@@ -288,18 +311,26 @@ def record_result(db: Session, device: Device, command_id: uuid.UUID, status: st
         raise AppError("bad status")
     clean = redact_obj(result)
     linked_run = None
+    linked_computer_use_run = None
     if cmd.execution_id:
-        from ..models import ActionExecution, AgentRun
+        from ..models import ActionExecution, AgentRun, ComputerUseRun
 
-        execution = db.get(ActionExecution, cmd.execution_id)
-        linked_run = db.get(AgentRun, execution.run_id) if execution and execution.run_id else None
-    if linked_run is None and cmd.session_id:
+        linked_computer_use_run = db.get(ComputerUseRun, cmd.execution_id)
+        if linked_computer_use_run is None:
+            execution = db.get(ActionExecution, cmd.execution_id)
+            linked_run = db.get(AgentRun, execution.run_id) if execution and execution.run_id else None
+    if linked_computer_use_run is None and linked_run is None and cmd.session_id:
         from ..models import AgentRun
 
         support_session = db.get(SupportSession, cmd.session_id)
         linked_run = db.get(AgentRun, support_session.run_id) if support_session and support_session.run_id else None
-    linked_run_terminal = bool(linked_run and linked_run.state in
-                               ("RESOLVED", "ESCALATED", "FAILED", "CANCELLED", "PARTIALLY_RESOLVED"))
+    linked_run_terminal = bool(
+        (linked_computer_use_run and (
+            linked_computer_use_run.state != "waiting_device" or linked_computer_use_run.pending_command_id != cmd.id
+        ))
+        or (linked_computer_use_run is None and linked_run and linked_run.state in
+            ("RESOLVED", "ESCALATED", "FAILED", "CANCELLED", "PARTIALLY_RESOLVED"))
+    )
     if cmd.status in ("done", "failed", "rejected"):
         if cmd.status == status and cmd.result == clean:
             return cmd, True, False, False

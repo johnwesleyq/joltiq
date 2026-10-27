@@ -20,6 +20,7 @@ from ..models import (
     DeviceCommand,
     DeviceSupportRequest,
     Membership,
+    RemoteAccessSession,
     SupportSession,
     Ticket,
     User,
@@ -83,6 +84,63 @@ def revoke(did: uuid.UUID, ctx: Ctx = Depends(get_ctx)):
         raise Forbidden("Not allowed")
     svc.revoke(ctx.db, d, ctx.p.user_id)
     return svc.ser(d)
+
+
+class RemoteAccessBindingIn(BaseModel):
+    node_id: str = Field(min_length=3, max_length=300, pattern=r"^[^\x00-\x1f\x7f]+$")
+
+
+class RemoteAccessStartIn(BaseModel):
+    reason: str = Field(min_length=5, max_length=500)
+
+
+@router.get("/devices/{did}/remote-access")
+def remote_access_status(did: uuid.UUID, ctx: Ctx = Depends(perm("devices.manage"))):
+    from ..services import remote_access
+
+    d = device_for(ctx, did)
+    binding = remote_access.binding_for(ctx.db, d.id)
+    active = ctx.db.execute(
+        select(RemoteAccessSession).where(
+            RemoteAccessSession.device_id == d.id, RemoteAccessSession.state == "active"
+        ).order_by(RemoteAccessSession.created_at.desc())
+    ).scalars().first()
+    return {
+        "enabled": bool(get_settings().meshcentral_url),
+        "configured": binding is not None,
+        "provider": binding.provider if binding else "meshcentral",
+        "node_id": binding.node_id if binding else None,
+        "active_session": remote_access.serialize(ctx.db, active) if active else None,
+    }
+
+
+@router.put("/devices/{did}/remote-access")
+def bind_remote_access(did: uuid.UUID, body: RemoteAccessBindingIn, ctx: Ctx = Depends(perm("devices.manage"))):
+    from ..services import remote_access
+
+    d = device_for(ctx, did)
+    binding = remote_access.bind(ctx.db, d, node_id=body.node_id.strip(), actor_id=ctx.p.user_id)
+    return {"enabled": True, "configured": True, "provider": binding.provider, "node_id": binding.node_id}
+
+
+@router.post("/devices/{did}/remote-access/sessions")
+def start_remote_access(did: uuid.UUID, body: RemoteAccessStartIn, ctx: Ctx = Depends(perm("devices.manage"))):
+    from ..services import remote_access
+
+    d = device_for(ctx, did)
+    session, created = remote_access.start(ctx.db, d, reason=body.reason.strip(), operator_id=ctx.p.user_id)
+    return JSONResponse(remote_access.serialize(ctx.db, session), status_code=201 if created else 200)
+
+
+@router.post("/devices/{did}/remote-access/sessions/{sid}/end")
+def end_remote_access(did: uuid.UUID, sid: uuid.UUID, ctx: Ctx = Depends(perm("devices.manage"))):
+    from ..services import remote_access
+
+    d = device_for(ctx, did)
+    session = ctx.db.get(RemoteAccessSession, sid)
+    if session is None or session.device_id != d.id:
+        raise NotFound("Remote access session not found")
+    return remote_access.serialize(ctx.db, remote_access.end(ctx.db, session, actor_id=ctx.p.user_id))
 
 
 @router.get("/devices/actions/catalog")
@@ -168,6 +226,60 @@ def _device_support_run(db: Session, device: Device, run_id: uuid.UUID) -> tuple
     return run, ticket
 
 
+def _active_direct_computer_use(db: Session, device: Device, run: AgentRun) -> ComputerUseRun | None:
+    """Return the active Fix/Guide run that owns this native conversation, if any."""
+    from ..services import computer_use
+
+    return db.execute(
+        select(ComputerUseRun)
+        .join(SupportSession, SupportSession.id == ComputerUseRun.session_id)
+        .where(
+            SupportSession.run_id == run.id,
+            SupportSession.device_id == device.id,
+            SupportSession.request_details["direct_device_request"].as_boolean().is_(True),
+            ComputerUseRun.state.in_(computer_use.ACTIVE),
+        )
+        .order_by(ComputerUseRun.created_at.desc())
+    ).scalars().first()
+
+
+def _native_computer_use_prompt(run: ComputerUseRun) -> str | None:
+    waiting = run.waiting_for or {}
+    text = waiting.get("text")
+    if not text:
+        return None
+    kind = waiting.get("kind")
+    if kind == "approval":
+        return f"{text}\n\nReply APPROVE or DENY. Your reply applies only to this exact action."
+    if kind == "secure_input":
+        return f"{text}\n\nComplete it yourself, then reply DONE, or reply CANCEL."
+    if kind == "guide_action":
+        return f"{text}\n\nReply DONE when you finish, or SWITCH TO FIX."
+    return text
+
+
+def _native_computer_use_response(body: DeviceSupportMessageIn, run: ComputerUseRun) -> dict:
+    waiting = run.waiting_for or {}
+    kind = waiting.get("kind")
+    response = body.message.strip()
+    if kind == "approval":
+        choice = response.upper()
+        if choice not in ("APPROVE", "DENY"):
+            raise AppError("Reply exactly APPROVE or DENY for this action", code="validation_error")
+        return {"approved": choice == "APPROVE"}
+    if kind == "secure_input":
+        choice = response.upper()
+        if choice not in ("DONE", "CANCEL"):
+            raise AppError("Reply exactly DONE or CANCEL", code="validation_error")
+        return {"done": choice == "DONE", "approved": False if choice == "CANCEL" else None}
+    if kind == "guide_action":
+        choice = response.upper()
+        if choice not in ("DONE", "SWITCH TO FIX"):
+            raise AppError("Reply exactly DONE or SWITCH TO FIX", code="validation_error")
+        return {"done": choice == "DONE", "switch_to_fix": choice == "SWITCH TO FIX"}
+    return {"answer": response}
+
+
 @agent_router.post("/support-requests", status_code=201, response_model=DeviceSupportCreatedOut)
 def create_device_support_request(body: DeviceSupportRequestIn, dd=Depends(device_auth)):
     db, device = dd
@@ -227,11 +339,20 @@ def continue_device_support_request(run_id: uuid.UUID, body: DeviceSupportMessag
     db, device = dd
     owner = _support_owner(db, device)
     run, ticket = _device_support_run(db, device, run_id)
-    if run.state in TERMINAL_RUN_STATES:
+    direct_run = _active_direct_computer_use(db, device, run)
+    if direct_run and direct_run.state == "waiting_customer" and direct_run.waiting_for:
+        from ..services import computer_use
+
+        response = _native_computer_use_response(body, direct_run)
+        computer_use.respond(db, direct_run, user_id=owner.id, via="device", **response)
+        state = "AI_INVESTIGATING"
+    elif run.state in TERMINAL_RUN_STATES:
         run = agent_svc.start_run(db, device.org_id, ticket=ticket, started_by=owner.id, first_message=body.message)
+        state = run.state
     else:
         agent_svc.customer_message(db, run, body.message, owner.id)
         ticket_svc.comment(db, ticket, body.message, author_id=owner.id, author_kind="device")
+        state = run.state
     audit.record(
         db,
         org_id=device.org_id,
@@ -242,7 +363,7 @@ def continue_device_support_request(run_id: uuid.UUID, body: DeviceSupportMessag
         resource_id=run.id,
         data={"ticket_id": str(ticket.id)},
     )
-    return {"ticket_id": ticket.id, "ticket_number": ticket.number, "run_id": run.id, "state": run.state}
+    return {"ticket_id": ticket.id, "ticket_number": ticket.number, "run_id": run.id, "state": state}
 
 
 @agent_router.get("/support-requests/{run_id}")
@@ -250,7 +371,35 @@ def get_device_support_request(run_id: uuid.UUID, dd=Depends(device_auth)):
     db, device = dd
     _support_owner(db, device)
     run, _ = _device_support_run(db, device, run_id)
-    return agent_svc.device_run_detail(db, run)
+    detail = agent_svc.run_detail(db, run, customer_view=True)
+    direct_run = _active_direct_computer_use(db, device, run)
+    messages = detail["messages"]
+    if direct_run:
+        # The ticket agent may have escalated because no approved procedure matched. Once the customer
+        # explicitly starts Fix/Guide, that separate run owns the native conversation until it ends.
+        messages = [m for m in messages if not (m.get("data") or {}).get("escalation_reason")]
+        prompt = _native_computer_use_prompt(direct_run)
+        if prompt:
+            messages = [
+                *messages,
+                {
+                    "id": f"computer-use-{direct_run.id}-{direct_run.step_count}",
+                    "role": "assistant",
+                    "content": prompt,
+                    "at": direct_run.updated_at.isoformat(),
+                },
+            ]
+    return {
+        "id": detail["id"],
+        "ticket_id": detail["ticket_id"],
+        "state": "AI_INVESTIGATING" if direct_run else detail["state"],
+        "paused_for": "customer" if direct_run and direct_run.state == "waiting_customer" else detail["paused_for"],
+        "outcome_stage": detail["outcome_stage"],
+        "messages": [
+            {key: message[key] for key in ("id", "role", "content", "at")}
+            for message in messages
+        ],
+    }
 
 
 class DirectComputerUseIn(BaseModel):
@@ -289,7 +438,7 @@ def start_direct_computer_use(run_id: uuid.UUID, body: DirectComputerUseIn, dd=D
     ).scalars().all()
     for existing in active:
         details = existing.request_details or {}
-        if details.get("direct_device_request") and details.get("computer_use_mode") == body.mode:
+        if details.get("direct_device_request"):
             return JSONResponse(_direct_computer_use_response(db, existing, body.mode), status_code=200)
 
     from ..services.ai.computer import SUPPORTED_PROVIDERS

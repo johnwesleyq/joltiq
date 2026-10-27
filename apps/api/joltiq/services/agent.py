@@ -715,6 +715,9 @@ def _hosts_from_steps(steps: list[dict]) -> list[str]:
 def h_plan(db, run):
     t = _ticket(db, run)
     ctx = run.context
+    if ctx.get("awaiting_guidance_feedback"):
+        _handle_guidance_feedback(db, run)
+        return
     if ctx.get("candidate_procedure"):
         if not (ctx.get("diagnostic_decision") or {}).get("allowed"):
             _escalate(db, run, "Canonical remediation planning was blocked because the diagnostic gate did not pass")
@@ -755,6 +758,15 @@ def h_plan(db, run):
              "If no safe plan exists, set escalate_instead.")
     plan = _model(db, run, "planning", S.ProposedPlan, payload, extra)
     if plan.escalate_instead or not plan.steps:
+        if ctx.get("failures"):
+            _escalate(
+                db,
+                run,
+                plan.escalation_reason or "Independent verification failed and no different safe automated plan is available",
+            )
+            return
+        if _give_guidance(db, run):
+            return
         if run.context.get("shared_known_fix"):
             _say(db, run, "I don't have an approved way to apply that fix for you automatically yet, so I won't change anything on your system.")
         else:
@@ -853,6 +865,112 @@ def h_plan(db, run):
     if run.state == R.AWAITING_APPROVAL:
         _set_ticket(db, run, TS.AWAITING_APPROVAL, "waiting for approval/consent")
         run.paused_for = "approval"
+
+
+
+# ---------------- guided self-service (the person does the steps; JoltIQ never executes them) ----------------
+MAX_GUIDANCE_ROUNDS = 2
+GUIDANCE_PROMPT = (
+    "No approved automated fix exists, so act as an experienced IT technician guiding the person to fix this themselves. "
+    "Cover any IT topic: Windows, macOS, Linux, Microsoft 365, networking, VPN, DNS, printers, cloud (AWS, Azure, GCP), "
+    "security, scripting and programming. Give a short plain-language answer, then at most 8 ordered steps from safest and "
+    "most likely to least. Prefer steps backed by evidence ids; when a step comes from general knowledge, keep it standard and "
+    "low risk. Never tell the person to disable security software, run untrusted scripts, delete data without a backup, or share "
+    "passwords. If previous_attempts is non-empty, do not repeat those steps; use what the person reported. Set needs_technician "
+    "when the fix needs admin rights the person likely lacks, physical repair, data-loss risk, or account/billing changes."
+)
+
+
+def _latest_user_message(db, run) -> str:
+    for m in reversed(_transcript(db, run, limit=10)):
+        if m["role"] == "user":
+            return m["content"]
+    return ""
+
+
+def _give_guidance(db, run) -> bool:
+    """Offer step-by-step self-service guidance before handing off. Returns False if the run should escalate instead."""
+    ctx = run.context
+    rounds = ctx.get("guidance_rounds", 0)
+    if rounds >= MAX_GUIDANCE_ROUNDS:
+        return False
+    t = _ticket(db, run)
+    ev = ctx.get("evidence", [])
+    payload = {"subject": t.subject, "customer_text": _customer_text(db, run)[:4000], "intent": ctx.get("intent"),
+               "evidence": ev, "hypotheses": ctx.get("hypotheses", []), "observations": ctx.get("observations", []),
+               "previous_attempts": ctx.get("guidance_history", [])}
+    try:
+        guide = _model(db, run, "guidance", S.TroubleshootingGuide, payload, GUIDANCE_PROMPT)
+    except AppError as e:
+        log.info("guidance unavailable: %s", e.message)
+        return False
+    if not guide.steps and not guide.answer.strip():
+        return False
+    by_id = {e["id"]: e for e in ev}
+    cited = [by_id[i] for i in guide.cited_evidence_ids if i in by_id]
+    lines = [guide.answer.strip()] if guide.answer.strip() else []
+    if guide.steps:
+        lines.append("")
+        lines += [f"{n}. {st.instruction.strip()}" for n, st in enumerate(guide.steps, start=1)]
+    if guide.needs_technician:
+        lines += ["", "Some of this may need a technician. "
+                      f"{(guide.technician_reason or '').strip()} Reply \"technician\" and I'll hand it over."]
+    lines += ["", "Did that fix it? Reply \"fixed\", or tell me what happened at the step where it went wrong."]
+    citations = [{"citation": e.get("citation"), "document_id": e.get("document_id"), "url": e.get("url"), "kind": e.get("kind")}
+                 for e in cited]
+    _say(db, run, "\n".join(lines).strip(), data={"kind": "guidance", "citations": citations, "round": rounds + 1,
+                                                   "steps": [st.model_dump() for st in guide.steps]})
+    _ctx_update(run, guidance_rounds=rounds + 1, awaiting_guidance_feedback=True,
+                guidance_history=ctx.get("guidance_history", []) + [{"round": rounds + 1,
+                                                                      "steps": [st.instruction for st in guide.steps]}])
+    _set_ticket(db, run, TS.AWAITING_CUSTOMER, "self-service steps sent; waiting for the customer's result")
+    run.paused_for = "customer"
+    return True
+
+
+def _handle_guidance_feedback(db, run) -> None:
+    reply = _latest_user_message(db, run)
+    _ctx_update(run, awaiting_guidance_feedback=False)
+    low = reply.lower()
+    if any(w in low for w in ("technician", "human", "real person", "escalate")):
+        _escalate(db, run, "Customer asked for a technician after self-service guidance")
+        return
+    try:
+        fb = _model(db, run, "guidance_feedback", S.GuidanceFeedback,
+                    {"guidance_steps": (run.context.get("guidance_history") or [{}])[-1].get("steps", []), "customer_reply": reply})
+        outcome = fb.outcome.strip().lower()
+        info = fb.new_information
+    except AppError:
+        outcome, info = ("fixed" if any(w in low for w in ("fixed", "works now", "working now", "resolved", "solved")) else "unclear"), reply
+    if outcome == "fixed":
+        _customer_confirmed_resolution(db, run)
+        return
+    hist = list(run.context.get("guidance_history", []))
+    if hist:
+        hist[-1] = {**hist[-1], "customer_result": (info or reply)[:1000]}
+    _ctx_update(run, guidance_history=hist)
+    if _give_guidance(db, run):
+        return
+    tried = "; ".join(s for h in hist for s in h.get("steps", []))[:1500]
+    _escalate(db, run, f"Self-service guidance did not resolve the issue. Already tried: {tried}")
+
+
+def _customer_confirmed_resolution(db, run) -> None:
+    """The customer, not the AI, confirms the fix. Recorded as unverified (no independent machine check)."""
+    t = _ticket(db, run)
+    reason = "Customer confirmed the self-service steps fixed the issue (not independently verified)"
+    customer_id = t.requester_id or run.started_by
+    try:
+        ticket_svc.transition(db, t, TS.RESOLVED, actor_kind="user", actor_id=customer_id, reason=reason)
+    except AppError as e:
+        log.info("customer resolution needs technician sign-off: %s", e.message)
+        ticket_svc.comment(db, t, f"{reason}. Org policy requires technician sign-off to resolve.", author_kind="ai", internal=True)
+        _set_ticket(db, run, TS.OPEN, "customer reports fixed; awaiting technician sign-off")
+    _say(db, run, "Great, glad that's working. I've noted what fixed it. If it comes back, just reply here.")
+    run.outcome_summary = reason
+    run.paused_for = None
+    transition(db, run, R.RESOLVED, reason, {"verified": False, "method": "customer_confirmed_guidance"})
+    _release_ai_control(db, run)
 
 
 def build_canonical_plan(db, run, article: KnowledgeArticle, procedure, session: SupportSession) -> AgentPlan:
@@ -1470,6 +1588,11 @@ def h_retry(db, run):
     _ctx_update(run, verification_id=None, pre_state_captured=False)
     if run.retries > run.max_retries:
         _escalate(db, run, "Retry limit reached")
+        return
+    current_plan_id = run.context.get("current_plan_id")
+    current_plan = db.get(AgentPlan, uuid.UUID(current_plan_id)) if current_plan_id else None
+    if current_plan and current_plan.procedure_article_id and current_plan.plan_hash in run.context.get("failed_plan_hashes", []):
+        _escalate(db, run, "Retry blocked: the exact published procedure already failed independent verification")
         return
     transition(db, run, R.PLANNING, f"retry {run.retries}/{run.max_retries}")
 

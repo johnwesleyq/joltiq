@@ -38,7 +38,7 @@
     </ComponentGroup>
 
     <Component Id="StartMenu" Directory="MenuFolder" Guid="2E6B1B6E-3C8B-4D46-9E31-6A0C4F1E8A11">
-      <Shortcut Id="TrayShortcut" Name="JoltIQ Companion" Target="[INSTALLFOLDER]JoltIQCompanion.exe" WorkingDirectory="INSTALLFOLDER" />
+      <Shortcut Id="TrayShortcut" Name="JoltIQ Companion" Target="[INSTALLFOLDER]JoltIQCompanion.exe" Arguments="--ask" WorkingDirectory="INSTALLFOLDER" />
       <RemoveFolder Id="RemoveMenu" On="uninstall" />
       <RegistryValue Root="HKCU" Key="Software\JoltIQ\Companion" Name="installed" Type="integer" Value="1" KeyPath="yes" />
     </Component>

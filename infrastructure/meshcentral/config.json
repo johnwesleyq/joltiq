@@ -1,0 +1,46 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Ylianst/MeshCentral/master/meshcentral-config-schema.json",
+  "settings": {
+    "cert": "192.168.0.56",
+    "port": 443,
+    "aliasPort": 8444,
+    "wanonly": true,
+    "allowFraming": true,
+    "sessionSameSite": "none",
+    "noAgentUpdate": 1,
+    "sessionKey": "change-this-before-any-shared-deployment"
+  },
+  "domains": {
+    "": {
+      "title": "JoltIQ Remote Support",
+      "title2": "Visible, permission-based technician access",
+      "newAccounts": false,
+      "userConsentFlags": {
+        "desktopnotify": true,
+        "desktopprompt": true,
+        "desktopprivacybar": true,
+        "terminalnotify": false,
+        "terminalprompt": false,
+        "filenotify": false,
+        "fileprompt": false
+      },
+      "consentMessages": {
+        "title": "JoltIQ remote support request",
+        "desktop": "{0} is asking to view and control this computer. Allow only if you requested support.",
+        "consentTimeout": 60,
+        "autoAcceptOnTimeout": false,
+        "autoAcceptIfNoUser": false,
+        "autoAcceptIfLocked": false,
+        "oldStyle": true
+      },
+      "desktopPrivacyBarText": "JoltIQ remote support is active — disconnect at any time",
+      "agentCustomization": {
+        "displayName": "JoltIQ Remote Support",
+        "description": "Permission-based remote support component",
+        "companyName": "JoltIQ",
+        "serviceName": "JoltIQMeshAgent",
+        "fileName": "JoltIQRemoteAgent"
+      }
+    }
+  }
+}

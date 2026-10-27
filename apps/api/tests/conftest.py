@@ -27,10 +27,16 @@ from alembic.config import Config  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import create_engine, select, text  # noqa: E402
 
+from database_guard import require_test_database_urls  # noqa: E402
+
 HERE = os.path.dirname(__file__)
 
 
 def _rebuild_db() -> None:
+    require_test_database_urls(
+        os.environ["JOLTIQ_DATABASE_URL"],
+        os.environ["JOLTIQ_MIGRATION_DATABASE_URL"],
+    )
     eng = create_engine(os.environ["JOLTIQ_MIGRATION_DATABASE_URL"])
     with eng.begin() as c:
         c.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO public;"))

@@ -66,6 +66,8 @@ Rules:
 - If something unexpected appears (warning dialogs, payment pages, anything asking for credentials you don't have),
   stop and ask_customer.
 - Prefer open_url for websites. Prefer keyboard shortcuts when reliable.
+- If an unrelated window, stale dialog, or JoltIQ's own window obstructs the goal, close or dismiss it safely before
+  requesting another screenshot. Do not repeatedly observe an unchanged screen; either act, ask the customer, or fail.
 - After acting, look at the screen to confirm what happened. Call finish(success=true) only when you have SEEN the
   result on screen. If you cannot complete the goal safely, call finish(success=false) and explain what a human
   technician should do next.
@@ -407,6 +409,25 @@ def _request_local_consent(db: Session, run: ComputerUseRun, user_id) -> None:
 
 
 def record_local_consent(db: Session, run: ComputerUseRun, *, device_id, accepted: bool) -> ComputerUseRun:
+    # A companion restart loses its in-memory run grant. The server re-sends the
+    # same signed grant and the person at the PC approves it again. Treat that
+    # repeated approval as idempotent; a decline still stops the active run.
+    if run.local_consent_state == "approved" and run.state in ACTIVE:
+        if accepted:
+            audit.record(
+                db,
+                org_id=run.org_id,
+                actor_kind="device",
+                actor_id=device_id,
+                action="computer_use.local_consent_reconfirmed",
+                resource_type="computer_use_run",
+                resource_id=run.id,
+                data={"accepted": True, "mode": run.mode},
+            )
+            return run
+        run.local_consent_state = "declined"
+        _end(db, run, "stopped", "The person at the computer declined this JoltIQ request after the companion restarted.", False)
+        return run
     if run.state != "waiting_local_consent" or run.local_consent_state != "pending":
         raise Conflict(f"Run is {run.state}", code="invalid_state")
     run.local_consent_state = "approved" if accepted else "declined"
@@ -703,6 +724,15 @@ def think(db: Session, run: ComputerUseRun) -> None:
             return _continue(db, run)
         run.transcript = [*run.transcript, {"role": "user", "content": run.results}]
         run.results = []
+    if _repeated_screenshot_loop(db, run):
+        _end(
+            db,
+            run,
+            "failed",
+            "Stopped an observation loop after five consecutive screenshots without progress. A technician should review the last screen.",
+            False,
+        )
+        return
     if run.step_count >= run.max_steps:
         _end(db, run, "failed", f"Reached the {run.max_steps}-step limit before finishing. A technician should take over from here.", False)
         return
@@ -797,10 +827,31 @@ def _guide_instruction(name: str, inp: dict) -> str:
     return labels.get(name, "Complete the highlighted step.")
 
 
+def _repeated_screenshot_loop(db: Session, run: ComputerUseRun) -> bool:
+    recent = list(db.execute(
+        select(ComputerUseStep.kind)
+        .where(ComputerUseStep.run_id == run.id)
+        .order_by(ComputerUseStep.idx.desc())
+        .limit(5)
+    ).scalars())
+    return len(recent) == 5 and all(kind == "screenshot" for kind in recent)
+
+
 def _execute(db: Session, run: ComputerUseRun, tu: dict) -> None:
     from .actions.registry import ActionValidationError, validate_params
 
     name, inp, tid, narr = tu["name"], tu.get("input") or {}, tu["id"], tu.get("narration", "")
+    if name == "screenshot" and _repeated_screenshot_loop(db, run):
+        st = _add_step(db, run, name, inp, narr, status="blocked")
+        st.error = "Stopped after five consecutive screenshots without progress."
+        _end(
+            db,
+            run,
+            "failed",
+            "Stopped an observation loop after five consecutive screenshots without progress. A technician should review the last screen.",
+            False,
+        )
+        return
     if tu.get("computer"):
         try:
             action, params = _map(name, inp)

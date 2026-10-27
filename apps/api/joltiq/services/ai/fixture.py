@@ -155,3 +155,27 @@ class LocalFixtureProvider:
             reply = f"I found related guidance ([{top['id']}] {top.get('citation', '')}). {_first_sentence(top.get('text', ''))}"
             return {"reply": reply, "cited_evidence_ids": [top["id"]]}
         return {"reply": f"Thanks — I'm working on this (status: {state.replace('_', ' ').lower() or 'investigating'}).", "cited_evidence_ids": []}
+
+    def _TroubleshootingGuide(self, ctx, messages):  # noqa: N802
+        ev = [e for e in ctx.get("evidence", []) if e.get("text")]
+        done = {st for h in ctx.get("previous_attempts", []) for st in h.get("steps", [])}
+        steps = [{"instruction": _first_sentence(e["text"]), "why": f"from {e.get('citation', e['id'])}"} for e in ev[:4]]
+        steps = [st for st in steps if st["instruction"] not in done]
+        if not steps:
+            steps = [{"instruction": s, "why": "standard first-line check"} for s in (
+                "Restart the affected app, then restart the computer.",
+                "Install pending updates for the app and the operating system.",
+                "Check your network connection by opening a website you use often.") if s not in done]
+        if not steps:
+            return {"answer": "", "steps": [], "cited_evidence_ids": [], "needs_technician": True,
+                    "technician_reason": "Standard steps were already tried."}
+        return {"answer": "Here are some steps you can try yourself.", "steps": steps,
+                "cited_evidence_ids": [e["id"] for e in ev[:4]], "needs_technician": False}
+
+    def _GuidanceFeedback(self, ctx, messages):  # noqa: N802
+        reply = (ctx.get("customer_reply") or "").lower()
+        if any(w in reply for w in ("not fixed", "didn't", "did not", "still", "no luck", "doesn't")):
+            return {"outcome": "not_fixed", "new_information": ctx.get("customer_reply", "")}
+        if any(w in reply for w in ("fixed", "works now", "working now", "resolved", "solved", "that worked")):
+            return {"outcome": "fixed", "new_information": ""}
+        return {"outcome": "unclear", "new_information": ctx.get("customer_reply", "")}

@@ -455,6 +455,34 @@ await TA("runtime sends the durable outbox before polling and never re-executes 
     Assert(!harness.Paths.Any(x => x.EndsWith("/screenshot")), "JSON-only action uploaded screenshot evidence");
 });
 
+await TA("runtime shows an exact native action approval and posts the decision", async () =>
+{
+    using var h = new RuntimeHarness();
+    var ui = new ActionApprovalUi();
+    var runtime = new AgentRuntime(h.Client, new CountingProvider(), ui, new InMemoryCommandJournal());
+
+    h.EnqueuePoll(h.SessionBegin("approval-session"));
+    await runtime.PollOnceAsync(default);
+    h.EnqueuePoll(h.ComputerUseBegin("approval-run", "approval-session", "fix", "Remove Adobe Acrobat only."));
+    await runtime.PollOnceAsync(default);
+    h.EnqueuePoll(h.ComputerUseApproval(
+        "approval-run",
+        "approval-session",
+        "approval-step-1",
+        "Uninstall Adobe Acrobat (64-bit) while leaving Adobe Genuine Service installed."));
+    await runtime.PollOnceAsync(default);
+
+    Assert(ui.Request == new ComputerUseActionApprovalRequest(
+        "approval-run",
+        "approval-session",
+        "approval-step-1",
+        "Uninstall Adobe Acrobat (64-bit) while leaving Adobe Genuine Service installed."),
+        "native approval did not receive the exact signed request");
+    var response = h.Requests.Single(r => r.Path.EndsWith("/computer-use/approval-run/respond"));
+    Assert(response.Method == "POST", "approval decision was not posted");
+    Assert(JsonNode.Parse(response.Body)?["approved"]?.GetValue<bool>() == true, "allow decision changed in transit");
+});
+
 await TA("runtime uploads screenshot before result and restart resumes without repeating native input", async () =>
 {
     var store = new MemoryKeyStore();
@@ -618,6 +646,7 @@ sealed class ProtocolHandler : HttpMessageHandler
     public List<string> Paths { get; } = new();
     public List<JsonObject> AcceptedResults { get; } = new();
     public List<byte[]> AcceptedScreenshots { get; } = new();
+    public List<DirectHelpRequest> Requests { get; } = new();
 
     public void Enqueue(params JsonObject[] envelopes)
     {
@@ -628,6 +657,9 @@ sealed class ProtocolHandler : HttpMessageHandler
     {
         var path = request.RequestUri!.AbsolutePath;
         Paths.Add(path);
+        var requestBody = request.Content is null ? "" : await request.Content.ReadAsStringAsync(cancellationToken);
+        Requests.Add(new DirectHelpRequest(request.Method.Method, path, requestBody,
+            request.Headers.Select(x => x.Key).ToHashSet(StringComparer.OrdinalIgnoreCase)));
         if (path.EndsWith("/poll"))
         {
             JsonArray envelopes;
@@ -741,6 +773,7 @@ sealed class RuntimeHarness : IDisposable
     public List<string> Paths => _handler.Paths;
     public List<JsonObject> AcceptedResults => _handler.AcceptedResults;
     public List<byte[]> AcceptedScreenshots => _handler.AcceptedScreenshots;
+    public List<DirectHelpRequest> Requests => _handler.Requests;
 
     public RuntimeHarness()
     {
@@ -770,6 +803,24 @@ sealed class RuntimeHarness : IDisposable
         if (requestDetails is not null) body["request_details"] = requestDetails;
         return Envelope(body);
     }
+
+    public JsonObject ComputerUseBegin(string runId, string sessionId, string mode, string goal) => Envelope(new JsonObject
+    {
+        ["type"] = "computer_use.begin", ["computer_use_run_id"] = runId, ["session_id"] = sessionId,
+        ["device_id"] = "device-1", ["mode"] = mode, ["goal"] = goal,
+        ["issued_at"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+        ["expires_at"] = DateTimeOffset.UtcNow.AddMinutes(2).ToUnixTimeSeconds(),
+        ["nonce"] = Guid.NewGuid().ToString("N"),
+    });
+
+    public JsonObject ComputerUseApproval(string runId, string sessionId, string interactionId, string text) => Envelope(new JsonObject
+    {
+        ["type"] = "computer_use.approval", ["computer_use_run_id"] = runId, ["session_id"] = sessionId,
+        ["device_id"] = "device-1", ["interaction_id"] = interactionId, ["text"] = text,
+        ["issued_at"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+        ["expires_at"] = DateTimeOffset.UtcNow.AddMinutes(2).ToUnixTimeSeconds(),
+        ["nonce"] = Guid.NewGuid().ToString("N"),
+    });
 
     public JsonObject Action(string commandId, string sessionId, string action, JsonObject parameters) => Envelope(new JsonObject
     {
@@ -825,6 +876,22 @@ sealed class AcceptingUi : IUserInteraction
 {
     public string CurrentUserDisplayName => "Test User";
     public Task<bool> AskConsentAsync(string sessionId, NativeConsentRequest request, TimeSpan timeout, CancellationToken ct) => Task.FromResult(true);
+    public void SessionStarted(string sessionId, string activeMessage, Action stopRequested) { }
+    public void SessionEnded(string sessionId, string reason) { }
+    public void ActionPerformed(string sessionId, string summary) { }
+}
+
+sealed class ActionApprovalUi : IUserInteraction
+{
+    public ComputerUseActionApprovalRequest? Request { get; private set; }
+    public string CurrentUserDisplayName => "Test User";
+    public Task<bool> AskConsentAsync(string sessionId, NativeConsentRequest request, TimeSpan timeout, CancellationToken ct) => Task.FromResult(true);
+    public Task<bool> AskComputerUseConsentAsync(ComputerUseConsentRequest request, TimeSpan timeout, CancellationToken ct) => Task.FromResult(true);
+    public Task<bool> AskComputerUseActionApprovalAsync(ComputerUseActionApprovalRequest request, TimeSpan timeout, CancellationToken ct)
+    {
+        Request = request;
+        return Task.FromResult(true);
+    }
     public void SessionStarted(string sessionId, string activeMessage, Action stopRequested) { }
     public void SessionEnded(string sessionId, string reason) { }
     public void ActionPerformed(string sessionId, string summary) { }

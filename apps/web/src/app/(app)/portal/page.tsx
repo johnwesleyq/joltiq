@@ -10,7 +10,8 @@ import { api, STAFF } from "@/lib/api";
 import { useApi, useMe } from "@/lib/hooks";
 
 type ChatOut = { ticket_id: string; run_id: string; ticket_number: number; reply: { content: string } | null };
-type Bubble = { id: string; who: "ai" | "you"; text: string };
+type Source = { citation?: string; url?: string };
+type Bubble = { id: string; who: "ai" | "you"; text: string; sources?: Source[] };
 
 const SUGGESTIONS = [
   "Outlook keeps crashing when I open attachments",
@@ -60,7 +61,10 @@ function Chat() {
   const session = sess.data?.items.find((s) => ["pending_consent", "active", "awaiting_user_auth", "paused"].includes(s.state));
 
   // Server messages are the source of truth; local bubbles cover the gap until the server has them.
-  const server: Bubble[] = (run?.messages ?? []).map((m) => ({ id: m.id, who: m.role === "assistant" ? "ai" : "you", text: m.content }));
+  const server: Bubble[] = (run?.messages ?? []).map((m) => ({
+    id: m.id, who: m.role === "assistant" ? "ai" : "you", text: m.content,
+    sources: (((m as { data?: { citations?: Source[] } }).data?.citations) ?? []).filter((c) => c.citation),
+  }));
   const serverYou = new Set(server.filter((b) => b.who === "you").map((b) => b.text.trim()));
   const bubbles = [...server, ...local.filter((b) => !(b.who === "you" && serverYou.has(b.text.trim())))];
   const working = !!run && !DONE.includes(run.state) && !run.paused_for;
@@ -122,7 +126,7 @@ function Chat() {
       </div>}
 
       {bubbles.map((b) => b.who === "ai"
-        ? <div key={b.id} className="flex gap-3"><Avatar /><div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-tl-sm bg-surface px-4 py-3 shadow-sm">{b.text}</div></div>
+        ? <div key={b.id} className="flex gap-3"><Avatar /><div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-tl-sm bg-surface px-4 py-3 shadow-sm">{b.text}{b.sources && b.sources.length > 0 && <div className="mt-2 border-t border-black/10 pt-2 text-xs text-slate">Sources: {b.sources.map((c, i) => <span key={i}>{i > 0 && " · "}{c.url ? <a className="underline" href={c.url} target="_blank" rel="noopener noreferrer">{c.citation}</a> : c.citation}</span>)}</div>}</div></div>
         : <div key={b.id} className="flex justify-end"><div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-tr-sm bg-gradient-to-br from-plasma to-[#5b4fd6] px-4 py-3 text-white">{b.text}</div></div>)}
 
       {(working || busy) && <div className="flex gap-3"><Avatar thinking /><div className="rounded-2xl rounded-tl-sm bg-surface px-4 py-3 text-slate shadow-sm">

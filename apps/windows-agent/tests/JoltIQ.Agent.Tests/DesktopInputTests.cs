@@ -12,6 +12,50 @@ public sealed class DesktopInputTests
     private const string Hash = "e188758123212d41a19b15479a1296fea225af3dd3485563170a4e170846c409";
 
     [Fact]
+    public void UnicodeTextBatch_PreservesEveryCharacterAndPairsKeyDownWithKeyUp()
+    {
+        const string text = "JoltIQ acceptance test passed.";
+
+        var strokes = NativeInput.UnicodeTextBatch(text);
+
+        Assert.Equal(text.Length * 2, strokes.Count);
+        for (var i = 0; i < text.Length; i++)
+        {
+            Assert.Equal(text[i], strokes[i * 2].Character);
+            Assert.False(strokes[i * 2].KeyUp);
+            Assert.Equal(text[i], strokes[i * 2 + 1].Character);
+            Assert.True(strokes[i * 2 + 1].KeyUp);
+        }
+    }
+
+    [Fact]
+    public void TextBatch_UsesNormalVirtualKeysForPrintableAsciiIncludingSpaces()
+    {
+        static short Map(char character) => character switch
+        {
+            'a' => 0x41,
+            'A' => 0x0141,
+            ' ' => 0x20,
+            '.' => 0xBE,
+            _ => -1,
+        };
+
+        var strokes = NativeInput.TextBatch("a A.", Map);
+
+        Assert.Collection(strokes,
+            stroke => Assert.Equal(new NativeInput.TextStroke(0x41, '\0', false, false), stroke),
+            stroke => Assert.Equal(new NativeInput.TextStroke(0x41, '\0', true, false), stroke),
+            stroke => Assert.Equal(new NativeInput.TextStroke(0x20, '\0', false, false), stroke),
+            stroke => Assert.Equal(new NativeInput.TextStroke(0x20, '\0', true, false), stroke),
+            stroke => Assert.Equal(new NativeInput.TextStroke(0x10, '\0', false, false), stroke),
+            stroke => Assert.Equal(new NativeInput.TextStroke(0x41, '\0', false, false), stroke),
+            stroke => Assert.Equal(new NativeInput.TextStroke(0x41, '\0', true, false), stroke),
+            stroke => Assert.Equal(new NativeInput.TextStroke(0x10, '\0', true, false), stroke),
+            stroke => Assert.Equal(new NativeInput.TextStroke(0xBE, '\0', false, false), stroke),
+            stroke => Assert.Equal(new NativeInput.TextStroke(0xBE, '\0', true, false), stroke));
+    }
+
+    [Fact]
     public async Task Click_MapsFrameCoordinatesAndBindsTheSameAutomationTargetBeforeInput()
     {
         var native = new FakeNativeInput();
@@ -60,7 +104,7 @@ public sealed class DesktopInputTests
     {
         var native = new FakeNativeInput();
         var unsafeTarget = new InputTargetSnapshot("field-1", password, name, automationId, controlType,
-            new DesktopRectangle(-1920, 0, 200, 40));
+            new DesktopRectangle(-1920, 0, 200, 40), 1001);
         var input = Create(native, new FakeTargets(unsafeTarget, unsafeTarget));
 
         await Assert.ThrowsAsync<DesktopInputRefusedException>(() =>
@@ -83,9 +127,51 @@ public sealed class DesktopInputTests
         Assert.Empty(native.Events);
     }
 
+    [Fact]
+    public async Task Type_RefusesUntilAnApplicationTargetWasClicked()
+    {
+        var native = new FakeNativeInput();
+        var input = Create(native, new FakeTargets(SafeTarget(processId: 1001), SafeTarget(processId: 1001)));
+
+        var error = await Assert.ThrowsAsync<DesktopInputRefusedException>(() =>
+            input.TypeAsync("hello", 9, Hash, FixSession(), default));
+
+        Assert.Contains("click", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(native.Events);
+    }
+
+    [Fact]
+    public async Task Type_AllowsAfterClickWhenFocusRemainsInClickedApplication()
+    {
+        var native = new FakeNativeInput();
+        var clicked = SafeTarget("document", processId: 1001);
+        var focused = SafeTarget("editor", processId: 1001);
+        var input = Create(native, new FakeTargets(clicked, clicked, focused, focused));
+
+        await input.ClickAsync(25, 10, "left", 1, null, 9, Hash, FixSession(), default);
+        await input.TypeAsync("hello", 9, Hash, FixSession(), default);
+
+        Assert.Equal(new[] { "move:-1870,20", "mouse:left:down", "mouse:left:up", "text:hello" }, native.Events);
+    }
+
+    [Fact]
+    public async Task Type_RefusesWhenFocusMovesToDifferentApplicationAfterClick()
+    {
+        var native = new FakeNativeInput();
+        var clicked = SafeTarget("document", processId: 1001);
+        var otherApp = SafeTarget("editor", processId: 2002);
+        var input = Create(native, new FakeTargets(clicked, clicked, otherApp, otherApp));
+
+        await input.ClickAsync(25, 10, "left", 1, null, 9, Hash, FixSession(), default);
+        var error = await Assert.ThrowsAsync<DesktopInputRefusedException>(() =>
+            input.TypeAsync("hello", 9, Hash, FixSession(), default));
+
+        Assert.Contains("clicked application", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("text:hello", native.Events);
+    }
+
     [Theory]
     [InlineData("ctrl+alt+delete")]
-    [InlineData("win+r")]
     [InlineData("win+l")]
     [InlineData("ctrl+shift+esc")]
     public async Task Key_RefusesDangerousSystemChords(string combo)
@@ -96,6 +182,31 @@ public sealed class DesktopInputTests
         await Assert.ThrowsAsync<DesktopInputRefusedException>(() =>
             input.KeyAsync(combo, 1, TimeSpan.Zero, 9, Hash, FixSession(), default));
         Assert.Empty(native.Events);
+    }
+
+    [Fact]
+    public async Task Key_AllowsRunDialogShortcutForApprovedDesktopRepair()
+    {
+        var native = new FakeNativeInput();
+        var input = Create(native, new FakeTargets(SafeTarget(), SafeTarget()));
+
+        await input.KeyAsync("WIN+r", 1, TimeSpan.Zero, 9, Hash, FixSession(), default);
+
+        Assert.Equal(new[] { "key:win:down", "key:r:down", "key:r:up", "key:win:up" }, native.Events);
+    }
+
+    [Theory]
+    [InlineData("WIN", "key:win:down", "key:win:up")]
+    [InlineData("ESC", "key:esc:down", "key:esc:up")]
+    public async Task Key_AllowsSafeSystemNavigationWithoutAnApplicationClick(
+        string combo, string downEvent, string upEvent)
+    {
+        var native = new FakeNativeInput();
+        var input = Create(native, new FakeTargets(SafeTarget(), SafeTarget()));
+
+        await input.KeyAsync(combo, 1, TimeSpan.Zero, 9, Hash, FixSession(), default);
+
+        Assert.Equal(new[] { downEvent, upEvent }, native.Events);
     }
 
     [Fact]
@@ -112,7 +223,9 @@ public sealed class DesktopInputTests
 
         using var keyStop = new CancellationTokenSource();
         native = new FakeNativeInput { Cancel = keyStop, CancelOn = "key:ctrl:down" };
-        input = Create(native, new FakeTargets(SafeTarget(), SafeTarget()));
+        input = Create(native, new FakeTargets(SafeTarget(), SafeTarget(), SafeTarget(), SafeTarget()));
+        await input.ClickAsync(1, 1, "left", 1, null, 9, Hash, session, default);
+        native.Events.Clear();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
             input.KeyAsync("ctrl+s", 1, TimeSpan.FromSeconds(1), 9, Hash, session, keyStop.Token));
         Assert.Equal(new[] { "key:ctrl:down", "key:ctrl:up" }, native.Events);
@@ -146,8 +259,8 @@ public sealed class DesktopInputTests
         new DesktopRectangle(-1920, 0, 200, 100),
         [new DesktopDisplay("primary", -1920, 0, 200, 100, 96, 96, true)]);
 
-    private static InputTargetSnapshot SafeTarget(string id = "field") =>
-        new(id, false, "Notes", "notes", "Edit", new DesktopRectangle(-1920, 0, 200, 100));
+    private static InputTargetSnapshot SafeTarget(string id = "field", int processId = 1001) =>
+        new(id, false, "Notes", "notes", "Edit", new DesktopRectangle(-1920, 0, 200, 100), processId);
 
     private static LocalSession FixSession(string mode = "fix") => new()
     {

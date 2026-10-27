@@ -99,6 +99,25 @@ class ChatReply(BaseModel):
     cited_evidence_ids: list[str] = Field(default_factory=list)
 
 
+class GuideStep(BaseModel):
+    instruction: str
+    why: str = ""
+
+
+class TroubleshootingGuide(BaseModel):
+    """Step-by-step guidance the PERSON performs themselves. Never executed by JoltIQ."""
+    answer: str
+    steps: list[GuideStep] = Field(default_factory=list, max_length=10)
+    cited_evidence_ids: list[str] = Field(default_factory=list)
+    needs_technician: bool = False
+    technician_reason: str | None = None
+
+
+class GuidanceFeedback(BaseModel):
+    outcome: str = Field(description="One of: fixed, not_fixed, unclear")
+    new_information: str = ""
+
+
 def json_schema(model: type[BaseModel]) -> dict:
     s = model.model_json_schema()
     return _inline_refs(s)

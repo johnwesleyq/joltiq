@@ -33,6 +33,8 @@ x-api-env: &api-env
   JOLTIQ_STRIPE_SECRET_KEY: ${JOLTIQ_STRIPE_SECRET_KEY:-}
   JOLTIQ_STRIPE_WEBHOOK_SECRET: ${JOLTIQ_STRIPE_WEBHOOK_SECRET:-}
   JOLTIQ_OTEL_EXPORTER_ENDPOINT: ${JOLTIQ_OTEL_EXPORTER_ENDPOINT:-}
+  # Optional technician remote desktop. URL is deployment-owned; tenants cannot override it.
+  JOLTIQ_MESHCENTRAL_URL: ${JOLTIQ_MESHCENTRAL_URL:-}
 
 services:
   postgres:
@@ -87,8 +89,25 @@ services:
       JOLTIQ_BROWSER_WORKER_TOKEN: ${JOLTIQ_BROWSER_WORKER_TOKEN:-dev-browser-worker-token-change-me}
     shm_size: "1gb"
     # No published port: reachable only from the API on the internal network.
+  meshcentral:
+    profiles: [remote-access]
+    build: { context: ., dockerfile: infrastructure/meshcentral/Dockerfile }
+    volumes:
+      - meshcentral-data:/opt/meshcentral/meshcentral-data
+      - meshcentral-files:/opt/meshcentral/meshcentral-files
+    ports: ["8444:443"]
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "--spider", "https://127.0.0.1/"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
   web:
-    build: { context: ., dockerfile: infrastructure/docker/web.Dockerfile, args: { JOLTIQ_API_URL: "http://api:8000" } }
+    build:
+      context: .
+      dockerfile: infrastructure/docker/web.Dockerfile
+      args:
+        JOLTIQ_API_URL: "http://api:8000"
+        JOLTIQ_REMOTE_ACCESS_FRAME_ORIGIN: ${JOLTIQ_MESHCENTRAL_URL:-}
     ports: ["3000:3000"]
     depends_on: [api]
   temporal:
@@ -106,4 +125,4 @@ services:
     volumes: ["./tests/e2e/testapp:/testapp:ro"]
     command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8300"]
 
-volumes: { pgdata: {}, miniodata: {}, appdata: {} }
+volumes: { pgdata: {}, miniodata: {}, appdata: {}, meshcentral-data: {}, meshcentral-files: {} }

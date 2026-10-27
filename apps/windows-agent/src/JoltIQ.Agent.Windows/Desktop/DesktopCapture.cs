@@ -30,7 +30,9 @@ public sealed class DesktopCapture(
 
         var layout = source.ReadLayout();
         ValidateLayout(layout);
-        using var original = source.Capture(layout.VirtualBounds);
+        var primary = layout.Displays.Single(x => x.Primary);
+        var captureBounds = new DesktopRectangle(primary.Left, primary.Top, primary.Width, primary.Height);
+        using var original = source.Capture(captureBounds);
         ct.ThrowIfCancellationRequested();
         sessionGuard.DemandSafeInteractiveSession();
         var confirmedLayout = source.ReadLayout();
@@ -54,9 +56,9 @@ public sealed class DesktopCapture(
             stream.ToArray(),
             width,
             height,
-            layout.VirtualBounds,
-            layout.VirtualBounds.Width / (double)width,
-            layout.VirtualBounds.Height / (double)height,
+            captureBounds,
+            captureBounds.Width / (double)width,
+            captureBounds.Height / (double)height,
             HashLayout(layout),
             Interlocked.Increment(ref _generation),
             layout.Displays.ToArray()));
@@ -81,6 +83,8 @@ public sealed class DesktopCapture(
             throw new InvalidOperationException("Windows returned an empty desktop layout");
         if (layout.Displays.Any(x => x.Width <= 0 || x.Height <= 0 || x.DpiX == 0 || x.DpiY == 0))
             throw new InvalidOperationException("Windows returned invalid display geometry");
+        if (layout.Displays.Count(x => x.Primary) != 1)
+            throw new InvalidOperationException("Windows returned an invalid primary display layout");
     }
 
     internal static string HashLayout(DesktopLayout layout)

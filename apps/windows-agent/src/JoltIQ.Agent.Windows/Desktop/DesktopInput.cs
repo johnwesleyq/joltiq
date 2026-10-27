@@ -24,7 +24,7 @@ public sealed class DesktopInput(
 {
     private static readonly IReadOnlySet<string> DangerousChords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
-        "ctrl+alt+delete", "control+alt+delete", "win+r", "windows+r", "win+l", "windows+l",
+        "ctrl+alt+delete", "control+alt+delete", "win+l", "windows+l",
         "ctrl+shift+esc", "control+shift+escape", "alt+f4", "win+x", "windows+x",
     };
 
@@ -32,6 +32,8 @@ public sealed class DesktopInput(
     private readonly object _heldMouseGate = new();
     private CancellationTokenRegistration _heldMouseStopRegistration;
     private bool _leftMouseHeld;
+    private string? _approvedKeyboardSessionId;
+    private int? _approvedKeyboardProcessId;
 
     public async Task ClickAsync(int x, int y, string button, int count, string? modifiers, long frameGeneration,
         string layoutHash, LocalSession session, CancellationToken ct)
@@ -62,6 +64,11 @@ public sealed class DesktopInput(
                 ct.ThrowIfCancellationRequested();
                 await native.MouseButtonAsync(button, false, ct);
                 mouseDown = false;
+            }
+            if (button == "left" && approved.ProcessId > 0)
+            {
+                _approvedKeyboardSessionId = session.SessionId;
+                _approvedKeyboardProcessId = approved.ProcessId;
             }
         }
         finally
@@ -141,7 +148,7 @@ public sealed class DesktopInput(
     {
         if (text.Length > 2000) throw new DesktopInputRefusedException("typed text is too long");
         Recheck(frameGeneration, layoutHash, session, ct);
-        var approved = _targets.DemandFocusedTarget();
+        var approved = DemandFocusedInClickedApplication(session);
         Recheck(frameGeneration, layoutHash, session, ct);
         _targets.DemandUnchangedFocusedTarget(approved);
         await native.TextAsync(text, ct);
@@ -155,7 +162,9 @@ public sealed class DesktopInput(
         if (repeat is < 1 or > 50 || hold < TimeSpan.Zero || hold > TimeSpan.FromSeconds(10))
             throw new DesktopInputRefusedException("key repeat or hold is out of range");
         Recheck(frameGeneration, layoutHash, session, ct);
-        var approved = _targets.DemandFocusedTarget();
+        var approved = IsGlobalShortcut(normalized)
+            ? _targets.DemandFocusedTarget()
+            : DemandFocusedInClickedApplication(session);
         Recheck(frameGeneration, layoutHash, session, ct);
         _targets.DemandUnchangedFocusedTarget(approved);
         var keys = ParseCombo(normalized);
@@ -192,6 +201,20 @@ public sealed class DesktopInput(
     }
 
     public DesktopPoint Cursor() => native.Cursor();
+
+    private InputTargetSnapshot DemandFocusedInClickedApplication(LocalSession session)
+    {
+        if (!string.Equals(_approvedKeyboardSessionId, session.SessionId, StringComparison.Ordinal) ||
+            _approvedKeyboardProcessId is null)
+            throw new DesktopInputRefusedException("click the intended application before sending keyboard input");
+        var focused = _targets.DemandFocusedTarget();
+        if (focused.ProcessId != _approvedKeyboardProcessId.Value)
+            throw new DesktopInputRefusedException("keyboard focus is no longer in the clicked application");
+        return focused;
+    }
+
+    private static bool IsGlobalShortcut(string normalized) =>
+        normalized is "win" or "windows" or "win+r" or "windows+r" or "esc" or "escape";
 
     private DesktopPoint PreparePoint(int x, int y, long frameGeneration, string layoutHash, LocalSession session, CancellationToken ct)
     {

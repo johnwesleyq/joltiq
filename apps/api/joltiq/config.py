@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     browser_worker_url: str = "http://localhost:8100"
     browser_worker_token: str = "dev-browser-worker-token-change-me"  # noqa: S105 - dev default
 
+    # Optional deployment-owned MeshCentral endpoint for technician remote desktop.
+    # This is never accepted from tenant input, preventing remote-access URL/SSRF injection.
+    meshcentral_url: str | None = None
+
     # Email
     smtp_host: str = "localhost"
     smtp_port: int = 1025
@@ -87,6 +91,14 @@ class Settings(BaseSettings):
             "techcommunity.microsoft.com", "quickbooks.intuit.com", "helpx.adobe.com",
             "community.adobe.com", "github.com", "stackoverflow.com", "superuser.com",
             "serverfault.com", "support.google.com", "docs.aws.amazon.com",
+            # Broad IT coverage: cloud, networking, OS, dev tooling
+            "aws.amazon.com", "repost.aws", "cloud.google.com", "azure.microsoft.com", "support.apple.com",
+            "developer.apple.com", "cisco.com", "community.cisco.com", "docs.fortinet.com", "kb.netgear.com",
+            "ubiquiti.com", "help.ui.com", "docs.docker.com", "kubernetes.io", "docs.python.org",
+            "developer.mozilla.org", "nodejs.org", "git-scm.com", "docs.github.com", "ubuntu.com", "help.ubuntu.com",
+            "askubuntu.com", "access.redhat.com", "wiki.archlinux.org", "unix.stackexchange.com",
+            "support.zoom.com", "help.dropbox.com", "support.hp.com", "dell.com", "support.lenovo.com",
+            "cloudflare.com", "developers.cloudflare.com", "nist.gov", "cisa.gov",
         ]
     )
 

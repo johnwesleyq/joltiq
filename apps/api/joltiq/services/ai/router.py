@@ -22,9 +22,9 @@ log = logging.getLogger("joltiq.ai")
 T = TypeVar("T", bound=BaseModel)
 
 TASKS = ["intent", "clarify", "retrieval", "diagnosis", "candidate_selection", "research", "planning", "vision", "tool_selection",
-         "verification_analysis", "article_drafting", "summary", "chat", "computer_use"]
+         "verification_analysis", "article_drafting", "summary", "chat", "guidance", "guidance_feedback", "computer_use"]
 DEFAULT_ORDER = ["ollama", "anthropic", "openai", "gemini"]
-TASK_TIER = {"planning": "planning", "diagnosis": "planning", "vision": "vision", "computer_use": "computer_use"}
+TASK_TIER = {"planning": "planning", "diagnosis": "planning", "guidance": "planning", "vision": "vision", "computer_use": "computer_use"}
 
 
 def available_providers(db: Session, org_id: uuid.UUID, task: str) -> list[tuple[str, str, ModelProviderConfig | None, str | None]]:

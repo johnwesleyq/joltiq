@@ -16,6 +16,9 @@ public interface INativeInput
 
 public sealed class NativeInput : INativeInput
 {
+    internal readonly record struct UnicodeTextStroke(char Character, bool KeyUp);
+    internal readonly record struct TextStroke(ushort VirtualKey, char Character, bool KeyUp, bool Unicode);
+
     public Task MoveAsync(DesktopPoint point, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
@@ -54,13 +57,56 @@ public sealed class NativeInput : INativeInput
 
     public Task TextAsync(string text, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
+        var inputs = TextBatch(text, VkKeyScan)
+            .Select(stroke => Keyboard(
+                stroke.VirtualKey,
+                stroke.Character,
+                (stroke.Unicode ? KeyUnicode : 0) | (stroke.KeyUp ? KeyUp : 0)))
+            .ToArray();
+        Send(inputs);
+        ct.ThrowIfCancellationRequested();
+        return Task.CompletedTask;
+    }
+
+    internal static IReadOnlyList<TextStroke> TextBatch(string text, Func<char, short> map)
+    {
+        var strokes = new List<TextStroke>(text.Length * 4);
         foreach (var character in text)
         {
-            ct.ThrowIfCancellationRequested();
-            Send(Keyboard(0, character, KeyUnicode));
-            Send(Keyboard(0, character, KeyUnicode | KeyUp));
+            var mapped = map(character);
+            if (mapped == -1)
+            {
+                strokes.Add(new TextStroke(0, character, false, true));
+                strokes.Add(new TextStroke(0, character, true, true));
+                continue;
+            }
+
+            var virtualKey = (ushort)(mapped & 0xff);
+            var modifierBits = (mapped >> 8) & 0xff;
+            var modifiers = new List<ushort>(3);
+            if ((modifierBits & 2) != 0) modifiers.Add(0x11); // CTRL
+            if ((modifierBits & 1) != 0) modifiers.Add(0x10); // SHIFT
+            if ((modifierBits & 4) != 0) modifiers.Add(0x12); // ALT
+            foreach (var modifier in modifiers)
+                strokes.Add(new TextStroke(modifier, '\0', false, false));
+            strokes.Add(new TextStroke(virtualKey, '\0', false, false));
+            strokes.Add(new TextStroke(virtualKey, '\0', true, false));
+            for (var i = modifiers.Count - 1; i >= 0; i--)
+                strokes.Add(new TextStroke(modifiers[i], '\0', true, false));
         }
-        return Task.CompletedTask;
+        return strokes;
+    }
+
+    internal static IReadOnlyList<UnicodeTextStroke> UnicodeTextBatch(string text)
+    {
+        var strokes = new UnicodeTextStroke[text.Length * 2];
+        for (var i = 0; i < text.Length; i++)
+        {
+            strokes[i * 2] = new UnicodeTextStroke(text[i], false);
+            strokes[i * 2 + 1] = new UnicodeTextStroke(text[i], true);
+        }
+        return strokes;
     }
 
     public async Task ScrollAsync(DesktopPoint point, string direction, int amount, CancellationToken ct)
@@ -115,6 +161,13 @@ public sealed class NativeInput : INativeInput
     private static void Send(Input input)
     {
         if (SendInput(1, [input], Marshal.SizeOf<Input>()) != 1)
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+    }
+
+    private static void Send(Input[] inputs)
+    {
+        if (inputs.Length == 0) return;
+        if (SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<Input>()) != inputs.Length)
             throw new Win32Exception(Marshal.GetLastWin32Error());
     }
 

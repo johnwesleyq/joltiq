@@ -10,7 +10,7 @@ public sealed class DesktopCaptureTests
     private const string Sid = "S-1-5-21-1000";
 
     [Fact]
-    public async Task Capture_PreservesVirtualCoordinatesAndResizesToMaximumLongEdge()
+    public async Task Capture_UsesPrimaryDisplayAtReadableSizeAndPreservesItsVirtualCoordinates()
     {
         var displays = new[]
         {
@@ -23,13 +23,15 @@ public sealed class DesktopCaptureTests
         var frame = await capture.CaptureAsync(1120, default);
 
         Assert.Equal(1120, frame.Width);
-        Assert.Equal(360, frame.Height);
-        Assert.Equal(new DesktopRectangle(-1920, 0, 4480, 1440), frame.VirtualBounds);
-        Assert.Equal(4, frame.ScaleX, 6);
-        Assert.Equal(4, frame.ScaleY, 6);
-        Assert.Equal(new DesktopPoint(-1920, 0), frame.ToVirtualPoint(0, 0));
-        Assert.Equal(new DesktopPoint(2556, 1436), frame.ToVirtualPoint(1119, 359));
-        Assert.Equal(new DesktopPoint(480, 720), frame.ToVirtualPoint(600, 180));
+        Assert.Equal(630, frame.Height);
+        Assert.Equal(new DesktopRectangle(0, 0, 2560, 1440), frame.VirtualBounds);
+        Assert.Equal(16d / 7d, frame.ScaleX, 6);
+        Assert.Equal(16d / 7d, frame.ScaleY, 6);
+        Assert.Equal(new DesktopPoint(0, 0), frame.ToVirtualPoint(0, 0));
+        Assert.Equal(new DesktopPoint(2557, 1437), frame.ToVirtualPoint(1119, 629));
+        Assert.Equal(new DesktopPoint(1280, 720), frame.ToVirtualPoint(560, 315));
+        Assert.Equal(new DesktopRectangle(0, 0, 2560, 1440), source.LastCaptureBounds);
+        Assert.Equal(2, frame.Displays.Count);
         Assert.True(frame.Png.Length > 8);
         Assert.Equal(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }, frame.Png[..8]);
     }
@@ -153,6 +155,7 @@ public sealed class DesktopCaptureTests
         private IReadOnlyList<DesktopDisplay> _displays = displays;
         private DesktopRectangle _bounds = new(left, top, width, height);
         public int CaptureCount { get; private set; }
+        public DesktopRectangle? LastCaptureBounds { get; private set; }
 
         public void SetLayout(IReadOnlyList<DesktopDisplay> nextDisplays, int nextLeft, int nextTop, int nextWidth, int nextHeight)
         {
@@ -165,7 +168,7 @@ public sealed class DesktopCaptureTests
         public Bitmap Capture(DesktopRectangle bounds)
         {
             CaptureCount++;
-            Assert.Equal(_bounds, bounds);
+            LastCaptureBounds = bounds;
             return new Bitmap(bounds.Width, bounds.Height);
         }
     }

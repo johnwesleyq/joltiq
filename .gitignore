@@ -15,7 +15,15 @@ coverage/
 test-results/
 playwright-report/
 *.log
+*.tsbuildinfo
+.DS_Store
 .superpowers/
+
+# Local build packages and physical-device test captures. Keep source and
+# sanitized evidence under docs/, but never publish generated binaries/screens.
+artifacts/
+apps/windows-agent/publish-*/
+joltiq-windows-src*.zip
 
 # Generated Windows acceptance evidence (may contain device/customer metadata)
 apps/windows-agent/artifacts/

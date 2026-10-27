@@ -391,7 +391,7 @@ def test_unfamiliar_issue_uses_research_and_never_executes_forum_commands(servic
     r = customer.post("/api/v1/agents/chat", json={"message": "Outlook crashes every time I open a PDF attachment since this week. "
                                                               "Version 2408, Microsoft 365. My name is Jane Contoso, jane@acmeplumbing.test"})
     run_id = r.json()["run_id"]
-    run = wait_state(tech, run_id, lambda r: r["state"] in ("ESCALATED", "AWAITING_APPROVAL", "RESOLVED"))
+    run = wait_state(tech, run_id, lambda r: r["state"] in ("ESCALATED", "AWAITING_APPROVAL", "RESOLVED") or _awaiting_guidance(r))
     ext = [e for e in run["evidence"] if e["kind"] == "external"]
     assert ext, "expected external research evidence"
     assert all(e["live"] is False for e in ext)  # honestly labelled as test fixture search
@@ -402,8 +402,54 @@ def test_unfamiliar_issue_uses_research_and_never_executes_forum_commands(servic
     assert "Ignore previous instructions" not in forum["excerpt"]
     official = [s for s in rq["sources"] if "attachment-crash" in s["url"]][0]
     assert official["source_kind"] == "test_fixture" and official["retrieved_at"]
-    # Only unverified external fixes → no automatic execution, escalated to a technician with citations.
-    assert run["state"] == "ESCALATED"
+    # Only unverified external fixes → no automatic execution. The customer gets self-service steps (never executed by
+    # JoltIQ), and a technician takes over on request.
+    assert _awaiting_guidance(run)
+    assert not run["approvals"] and not run["plans"]
+    guidance = [m for m in run["messages"] if (m.get("data") or {}).get("kind") == "guidance"]
+    assert guidance and "Ignore previous instructions" not in guidance[-1]["content"]
+    customer.post("/api/v1/agents/chat", json={"ticket_id": run["ticket_id"], "message": "Please get me a technician"})
+    run = wait_state(tech, run_id, lambda r: r["state"] == "ESCALATED")
+    assert not run["approvals"]
+
+
+def _awaiting_guidance(run):
+    return run["state"] == "PLANNING" and run["paused_for"] == "customer" and any(
+        (m.get("data") or {}).get("kind") == "guidance" for m in run.get("messages", []))
+
+
+def test_general_it_question_gets_guidance_and_customer_confirms_fix(services, app, team):
+    owner, tech, customer = team
+    r = customer.post("/api/v1/agents/chat", json={"message": "My laptop can't connect to the office Wi-Fi since this morning, "
+                                                              "other people are connected fine and my phone works on it."})
+    assert r.status_code == 201, r.text
+    run_id, ticket_id = r.json()["run_id"], r.json()["ticket_id"]
+    run = wait_state(customer, run_id, _awaiting_guidance)
+    guide = [m for m in run["messages"] if (m.get("data") or {}).get("kind") == "guidance"][-1]
+    assert "1." in guide["content"] and "fixed" in guide["content"].lower()
+    assert customer.get(f"/api/v1/tickets/{ticket_id}").json()["status"] == "AWAITING_CUSTOMER"
+
+    customer.post("/api/v1/agents/chat", json={"ticket_id": ticket_id, "message": "That worked, it's fixed now"})
+    run = wait_state(customer, run_id, lambda r: r["state"] in ("RESOLVED", "ESCALATED"))
+    assert run["state"] == "RESOLVED"
+    t = customer.get(f"/api/v1/tickets/{ticket_id}").json()
+    # Resolved by the customer's confirmation, honestly recorded as NOT independently verified.
+    assert t["status"] in ("RESOLVED", "OPEN") and t["resolution_verified"] is False
+
+
+def test_guidance_that_does_not_work_retries_then_escalates(services, app, team):
+    owner, tech, customer = team
+    r = customer.post("/api/v1/agents/chat", json={"message": "Excel freezes for about a minute every time I save a large "
+                                                              "workbook to the shared drive, started after last week's update."})
+    run_id, ticket_id = r.json()["run_id"], r.json()["ticket_id"]
+    wait_state(customer, run_id, _awaiting_guidance)
+    customer.post("/api/v1/agents/chat", json={"ticket_id": ticket_id, "message": "No luck, it still freezes after a restart"})
+    run = wait_state(customer, run_id, lambda r: _awaiting_guidance(r) and len(
+        [m for m in r["messages"] if (m.get("data") or {}).get("kind") == "guidance"]) == 2)
+    customer.post("/api/v1/agents/chat", json={"ticket_id": ticket_id, "message": "Still broken, didn't help"})
+    run = wait_state(customer, run_id, lambda r: r["state"] == "ESCALATED")
+    t = tech.get(f"/api/v1/tickets/{ticket_id}").json()
+    assert t["status"] == "ESCALATED" and t["resolution_verified"] is False
     assert not run["approvals"]
 
 
