@@ -322,11 +322,18 @@ def h_intake(db, run):
 
 def h_collect(db, run):
     ctx = run.context
-    clar = _model(db, run, "clarify", S.Clarification, {"text": _customer_text(db, run), "rounds": ctx.get("clarify_rounds", 0)})
     # Ask first only when the request is too vague to act on. Ordinary "guide me" requests go straight to steps; the
-    # open questions are passed to guidance so it can branch ("if X, try Y") instead of interrogating the customer.
+    # clarification model is not called at all, so an unnecessary or malformed question list cannot block guidance.
     said = " ".join(m["content"] for m in _transcript(db, run) if m["role"] == "user") or _customer_text(db, run)
     too_vague = len(said.split()) < MIN_WORDS_TO_SKIP_CLARIFY
+    if not too_vague:
+        _ctx_update(run, known_facts={}, open_questions=[])
+        if _maybe_collect_diagnostics(db, run):
+            return
+        transition(db, run, R.SEARCHING_INTERNAL, "context sufficient")
+        return
+
+    clar = _model(db, run, "clarify", S.Clarification, {"text": _customer_text(db, run), "rounds": ctx.get("clarify_rounds", 0)})
     if not clar.sufficient and clar.questions and ctx.get("clarify_rounds", 0) < 1 and too_vague:
         _ctx_update(run, clarify_rounds=ctx.get("clarify_rounds", 0) + 1)
         _say(db, run, "To diagnose this I need a bit more detail:\n" + "\n".join(f"• {q}" for q in clar.questions[:5]))

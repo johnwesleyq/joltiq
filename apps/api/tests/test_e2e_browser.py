@@ -493,9 +493,11 @@ _ = select
 
 
 def _questions_always(self, ctx, messages):
-    # Mimic the live model in demo ticket #1008: it judged an ordinary Wi-Fi request "insufficient" and asked questions.
+    # Mimic the live model in ticket #1011: it judged an ordinary Wi-Fi request "insufficient" and returned six
+    # questions even though JoltIQ only displays five.
     return {"sufficient": False, "questions": ["Which Wi-Fi network?", "Windows or Mac?", "Any error message?",
-                                               "Did anything change?", "Do other devices connect?"], "known_facts": {}}
+                                               "Did anything change?", "Do other devices connect?", "Has it worked before?"],
+            "known_facts": {}}
 
 
 def test_ordinary_request_gets_steps_even_when_model_wants_to_ask_questions(services, app, team, monkeypatch):
