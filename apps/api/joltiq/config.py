@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     cookie_domain: str | None = None
     web_origin: str = "http://localhost:3000"
     api_public_url: str = "http://localhost:8000"
+    oidc_allowed_issuer_hosts: list[str] = Field(default_factory=lambda: ["login.microsoftonline.com"])
+    oidc_http_timeout_seconds: float = 10.0
 
     # Workers
     browser_worker_url: str = "http://localhost:8100"
