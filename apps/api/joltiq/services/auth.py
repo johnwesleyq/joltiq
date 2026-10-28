@@ -48,25 +48,28 @@ def slugify(name: str) -> str:
 
 
 def create_session(db: Session, user: User, response: Response | None, *, org_id: uuid.UUID | None,
-                   ip: str | None = None, ua: str | None = None, mfa_passed: bool = False) -> tuple[str, AuthSession]:
+                   ip: str | None = None, ua: str | None = None, mfa_passed: bool = False,
+                   auth_method: str = "password", oidc_provider_id: uuid.UUID | None = None,
+                   ttl_seconds: int | None = None) -> tuple[str, AuthSession]:
     s = get_settings()
     token = new_token()
     now = utcnow()
     sess = AuthSession(
         user_id=user.id, token_hash=sha256_hex(token), csrf_token=new_token(24), active_org_id=org_id,
-        expires_at=now + timedelta(minutes=s.session_ttl_minutes), last_seen_at=now, ip=ip, user_agent=(ua or "")[:400],
-        mfa_passed=mfa_passed,
+        expires_at=now + (timedelta(seconds=ttl_seconds) if ttl_seconds else timedelta(minutes=s.session_ttl_minutes)),
+        last_seen_at=now, ip=ip, user_agent=(ua or "")[:400], mfa_passed=mfa_passed,
+        auth_method=auth_method, oidc_provider_id=oidc_provider_id,
     )
     db.add(sess)
     db.flush()
     if response is not None:
-        set_session_cookies(response, token, sess.csrf_token)
+        set_session_cookies(response, token, sess.csrf_token, max_age_seconds=ttl_seconds)
     return token, sess
 
 
-def set_session_cookies(response: Response, token: str, csrf: str) -> None:
+def set_session_cookies(response: Response, token: str, csrf: str, *, max_age_seconds: int | None = None) -> None:
     s = get_settings()
-    max_age = s.session_ttl_minutes * 60
+    max_age = max_age_seconds or s.session_ttl_minutes * 60
     response.set_cookie(SESSION_COOKIE, token, max_age=max_age, httponly=True, secure=s.cookie_secure,
                         samesite="lax", domain=s.cookie_domain, path="/")
     # CSRF cookie is readable by JS so the SPA can echo it in X-CSRF-Token.

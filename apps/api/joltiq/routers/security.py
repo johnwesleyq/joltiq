@@ -6,17 +6,18 @@ import json
 from datetime import timedelta
 
 import httpx
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..core.errors import Conflict, Forbidden
+from ..core.errors import Conflict, Forbidden, Unauthorized
 from ..db import get_raw_session, set_tenant
 from ..deps import Ctx, perm
-from ..models import OidcLoginState, OidcProvider, OidcProviderDomain, utcnow
+from ..models import OidcLoginState, OidcProvider, OidcProviderDomain, SsoMfaChallenge, utcnow
 from ..security.crypto import (
     canonical_json,
     decrypt_secret,
@@ -32,6 +33,8 @@ from ..services import audit, oidc
 router = APIRouter(tags=["security"])
 PROOF_TTL_SECONDS = 300
 LOOKUP_MESSAGE = "If your organization uses work sign-in, continue with the available option."
+OIDC_STATE_COOKIE = "jq_oidc_state"
+SSO_MFA_COOKIE = "jq_sso_mfa"
 
 
 class OidcConfigIn(BaseModel):
@@ -65,6 +68,10 @@ class OidcConfigIn(BaseModel):
 
 class LookupIn(BaseModel):
     email: str = Field(min_length=3, max_length=320)
+
+
+class SsoMfaIn(BaseModel):
+    code: str = Field(min_length=6, max_length=10)
 
 
 def _require_mfa(ctx: Ctx) -> None:
@@ -264,3 +271,193 @@ def sso_lookup(body: LookupIn, request: Request, db: Session = Depends(get_raw_s
         )
     )
     return {"available": True, "continuation": raw, "message": LOOKUP_MESSAGE}
+
+
+def _redirect_uri() -> str:
+    return get_settings().api_public_url.rstrip("/") + "/api/v1/auth/sso/callback"
+
+
+def _clear_flow_cookie(response: Response, name: str) -> None:
+    settings = get_settings()
+    response.delete_cookie(name, domain=settings.cookie_domain, path="/")
+
+
+def _failure(code: str = "sign_in_failed") -> RedirectResponse:
+    response = RedirectResponse(f"/login?sso_error={code}", status_code=302)
+    _clear_flow_cookie(response, OIDC_STATE_COOKIE)
+    return response
+
+
+@router.get("/auth/sso/start")
+def sso_start(continuation: str = Query(min_length=32, max_length=200), db: Session = Depends(get_raw_session)):
+    set_tenant(db, None, platform=True)
+    login = db.execute(
+        select(OidcLoginState).where(OidcLoginState.state_hash == sha256_hex(continuation)).with_for_update()
+    ).scalar_one_or_none()
+    now = utcnow()
+    if not login or login.used_at or login.expires_at <= now:
+        return _failure()
+    provider = db.get(OidcProvider, login.provider_id)
+    if not provider or not provider.enabled:
+        return _failure()
+    settings = get_settings()
+    try:
+        with httpx.Client(timeout=settings.oidc_http_timeout_seconds, follow_redirects=False, trust_env=False) as client:
+            metadata = oidc.discover_provider(client, provider.issuer, set(settings.oidc_allowed_issuer_hosts))
+        raw_state = new_token(32)
+        login.state_hash = sha256_hex(raw_state)
+        url = oidc.authorization_url(
+            metadata,
+            provider.client_id,
+            _redirect_uri(),
+            provider.scopes,
+            raw_state,
+            login.nonce,
+            decrypt_secret(login.code_verifier_enc),
+        )
+    except oidc.OidcProtocolError:
+        return _failure("provider_unavailable")
+    response = RedirectResponse(url, status_code=302)
+    response.set_cookie(
+        OIDC_STATE_COOKIE,
+        raw_state,
+        max_age=600,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite="lax",
+        domain=settings.cookie_domain,
+        path="/",
+    )
+    return response
+
+
+@router.get("/auth/sso/callback")
+def sso_callback(
+    request: Request,
+    state: str = Query(min_length=20, max_length=200),
+    code: str = Query(min_length=1, max_length=4000),
+    db: Session = Depends(get_raw_session),
+):
+    if request.cookies.get(OIDC_STATE_COOKIE) != state:
+        return _failure()
+    set_tenant(db, None, platform=True)
+    login = db.execute(
+        select(OidcLoginState).where(OidcLoginState.state_hash == sha256_hex(state)).with_for_update()
+    ).scalar_one_or_none()
+    now = utcnow()
+    if not login or login.used_at or login.expires_at <= now:
+        return _failure()
+    provider = db.get(OidcProvider, login.provider_id)
+    if not provider or not provider.enabled:
+        return _failure()
+    login.used_at = now
+    db.commit()  # consume before contacting the IdP; a callback is never replayable
+    set_tenant(db, None, platform=True)
+    settings = get_settings()
+    try:
+        with httpx.Client(timeout=settings.oidc_http_timeout_seconds, follow_redirects=False, trust_env=False) as client:
+            metadata = oidc.discover_provider(client, provider.issuer, set(settings.oidc_allowed_issuer_hosts))
+            token = oidc.exchange_code(
+                client,
+                metadata,
+                provider.client_id,
+                decrypt_secret(provider.client_secret_enc) if provider.client_secret_enc else None,
+                _redirect_uri(),
+                code,
+                decrypt_secret(login.code_verifier_enc),
+            )
+            identity, _ = oidc.fetch_and_validate_id_token(
+                client, provider, metadata, token["id_token"], login.nonce, now
+            )
+        resolution = oidc.resolve_identity(db, provider, identity, now=now)
+    except oidc.OidcProtocolError:
+        return _failure()
+    audit.record(
+        db,
+        org_id=provider.org_id,
+        actor_kind="user",
+        actor_id=resolution.user.id,
+        action="auth.oidc",
+        resource_type="user",
+        resource_id=resolution.user.id,
+        data={"provider_id": str(provider.id), "linked_via": resolution.linked_via},
+    )
+    if resolution.user.mfa_enabled:
+        raw_challenge = new_token(32)
+        db.add(
+            SsoMfaChallenge(
+                org_id=provider.org_id,
+                user_id=resolution.user.id,
+                provider_id=provider.id,
+                token_hash=sha256_hex(raw_challenge),
+                expires_at=now + timedelta(minutes=5),
+            )
+        )
+        response = RedirectResponse("/login?sso_mfa=1", status_code=302)
+        response.set_cookie(
+            SSO_MFA_COOKIE,
+            raw_challenge,
+            max_age=300,
+            httponly=True,
+            secure=settings.cookie_secure,
+            samesite="lax",
+            domain=settings.cookie_domain,
+            path="/",
+        )
+    else:
+        response = RedirectResponse(login.return_to, status_code=302)
+        from ..services import auth as auth_service
+
+        auth_service.create_session(
+            db,
+            resolution.user,
+            response,
+            org_id=provider.org_id,
+            ip=request.client.host if request.client else None,
+            ua=request.headers.get("user-agent"),
+            mfa_passed=True,
+            auth_method="oidc",
+            oidc_provider_id=provider.id,
+        )
+    _clear_flow_cookie(response, OIDC_STATE_COOKIE)
+    return response
+
+
+@router.post("/auth/sso/mfa")
+def sso_mfa(
+    body: SsoMfaIn,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_raw_session),
+):
+    raw = request.cookies.get(SSO_MFA_COOKIE) or ""
+    set_tenant(db, None, platform=True)
+    challenge = db.execute(
+        select(SsoMfaChallenge).where(SsoMfaChallenge.token_hash == sha256_hex(raw)).with_for_update()
+    ).scalar_one_or_none()
+    now = utcnow()
+    if not challenge or challenge.used_at or challenge.expires_at <= now or challenge.attempts >= 5:
+        raise Unauthorized("The sign-in challenge expired.", code="sso_mfa_expired")
+    from ..models import User
+    from ..services import auth as auth_service
+
+    user = db.get(User, challenge.user_id)
+    challenge.attempts += 1
+    if not user or user.disabled or not auth_service.verify_totp(user, body.code):
+        raise Unauthorized("The verification code is invalid.", code="invalid_mfa")
+    challenge.used_at = now
+    _, session = auth_service.create_session(
+        db,
+        user,
+        response,
+        org_id=challenge.org_id,
+        ip=request.client.host if request.client else None,
+        ua=request.headers.get("user-agent"),
+        mfa_passed=True,
+        auth_method="oidc",
+        oidc_provider_id=challenge.provider_id,
+    )
+    _clear_flow_cookie(response, SSO_MFA_COOKIE)
+    from .auth import me_payload
+
+    return me_payload(db, user, session)

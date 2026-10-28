@@ -10,6 +10,8 @@ from urllib.parse import urlencode, urlsplit
 
 import httpx
 import jwt
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 ALLOWED_ALGORITHMS = frozenset({"RS256", "ES256"})
 LEEWAY_SECONDS = 60
@@ -35,6 +37,13 @@ class ValidatedIdentity:
     email: str
     email_verified: bool
     claims: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class IdentityResolution:
+    user: Any
+    linked_via: str
+    created: bool
 
 
 def _validated_https_url(value: str, allowed_hosts: set[str], *, label: str) -> str:
@@ -251,3 +260,83 @@ def fetch_and_validate_id_token(
             raise
     refreshed = fetch_jwks(http, metadata)
     return validate_id_token(provider, metadata, refreshed, token, nonce, now), refreshed
+
+
+def resolve_identity(
+    db: Session, provider: Any, identity: ValidatedIdentity, *, now: datetime
+) -> IdentityResolution:
+    """Resolve a verified external identity without trusting role claims from the token."""
+
+    from ..models import Customer, Membership, User, UserIdentity
+
+    linked = db.execute(
+        select(UserIdentity).where(
+            UserIdentity.provider_id == provider.id,
+            UserIdentity.subject == identity.subject,
+        )
+    ).scalar_one_or_none()
+    if linked:
+        user = db.get(User, linked.user_id)
+        if not user or user.disabled:
+            raise OidcProtocolError("external identity is not available")
+        linked.last_login_at = now
+        return IdentityResolution(user=user, linked_via=linked.linked_via, created=False)
+
+    user = db.execute(select(User).where(User.email == identity.email)).scalar_one_or_none()
+    if user and not user.email_verified_at:
+        raise OidcProtocolError("existing account email is not verified")
+    membership = None
+    if user:
+        membership = db.execute(
+            select(Membership).where(Membership.user_id == user.id, Membership.org_id == provider.org_id)
+        ).scalar_one_or_none()
+    linked_via = "verified-email"
+    created = False
+    if user is None or membership is None:
+        if not provider.jit_provisioning:
+            raise OidcProtocolError("external identity is not assigned to this organization")
+        if provider.default_role not in {"customer", "technician", "auditor"}:
+            raise OidcProtocolError("external identity role is not allowed for JIT")
+        customer_id = None
+        if provider.default_role == "customer":
+            email_domain = identity.email.rsplit("@", 1)[-1]
+            customer = db.execute(
+                select(Customer).where(Customer.org_id == provider.org_id, Customer.domain == email_domain)
+            ).scalar_one_or_none()
+            if customer is None:
+                raise OidcProtocolError("customer identity has no existing customer mapping")
+            customer_id = customer.id
+        if user is None:
+            user = User(
+                email=identity.email,
+                name=str(identity.claims.get("name") or identity.email.split("@", 1)[0])[:200],
+                password_hash=None,
+                email_verified_at=now,
+            )
+            db.add(user)
+            db.flush()
+            created = True
+        if membership is None:
+            db.add(
+                Membership(
+                    user_id=user.id,
+                    org_id=provider.org_id,
+                    role=provider.default_role,
+                    customer_id=customer_id,
+                )
+            )
+        linked_via = "jit"
+    db.add(
+        UserIdentity(
+            org_id=provider.org_id,
+            user_id=user.id,
+            provider_id=provider.id,
+            issuer=identity.issuer,
+            subject=identity.subject,
+            email_at_link=identity.email,
+            linked_via=linked_via,
+            last_login_at=now,
+        )
+    )
+    db.flush()
+    return IdentityResolution(user=user, linked_via=linked_via, created=created)
