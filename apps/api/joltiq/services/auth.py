@@ -21,6 +21,7 @@ from ..models import (
     Organization,
     PolicyRule,
     SlaPolicy,
+    SsoRecoveryGrant,
     Subscription,
     TicketCounter,
     User,
@@ -200,3 +201,42 @@ def mfa_begin(user: User) -> tuple[str, str]:
 def default_org_for(db: Session, user: User) -> uuid.UUID | None:
     m = db.execute(select(Membership).where(Membership.user_id == user.id).order_by(Membership.created_at)).scalars().first()
     return m.org_id if m else None
+
+
+def issue_sso_recovery_grant(
+    db: Session, org_id: uuid.UUID, email: str, *, ttl_minutes: int = 15
+) -> str:
+    """Issue a single-use recovery token from a trusted host/CLI context."""
+
+    if ttl_minutes < 1 or ttl_minutes > 60:
+        raise ValueError("recovery TTL must be between 1 and 60 minutes")
+    user = db.execute(select(User).where(User.email == email.strip().lower())).scalar_one_or_none()
+    if not user or not user.email_verified_at:
+        raise ValueError("recovery requires an existing verified organization owner")
+    membership = db.execute(
+        select(Membership).where(Membership.org_id == org_id, Membership.user_id == user.id)
+    ).scalar_one_or_none()
+    if not membership or membership.role != Role.ORG_OWNER:
+        raise ValueError("recovery requires an existing verified organization owner")
+    if not user.mfa_enabled or not user.mfa_secret_enc:
+        raise ValueError("recovery requires MFA to be enabled for the organization owner")
+    raw = new_token(32)
+    grant = SsoRecoveryGrant(
+        org_id=org_id,
+        user_id=user.id,
+        token_hash=sha256_hex(raw),
+        expires_at=utcnow() + timedelta(minutes=ttl_minutes),
+    )
+    db.add(grant)
+    db.flush()
+    audit.record(
+        db,
+        org_id=org_id,
+        actor_kind="system",
+        actor_id=None,
+        action="oidc.recovery_issued",
+        resource_type="user",
+        resource_id=user.id,
+        data={"expires_at": grant.expires_at.isoformat()},
+    )
+    return raw

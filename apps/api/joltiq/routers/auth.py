@@ -8,10 +8,10 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..core.errors import AppError, Forbidden, NotFound
+from ..core.errors import AppError, Forbidden, NotFound, Unauthorized
 from ..db import get_raw_session, set_tenant
 from ..deps import Ctx, get_principal_optional, get_user_ctx
-from ..models import AuthSession, Invitation, Membership, Organization, User, utcnow
+from ..models import AuthSession, Invitation, Membership, OidcProvider, Organization, SsoRecoveryGrant, User, utcnow
 from ..security.crypto import hash_password, sha256_hex
 from ..security.ratelimit import hit
 from ..services import audit
@@ -74,7 +74,19 @@ def login(body: LoginIn, request: Request, response: Response, db: Session = Dep
     hit(db, f"login-ip:{_ip(request)}", get_settings().rate_limit_login_per_minute * 3, 60)
     hit(db, f"login-email:{sha256_hex(body.email.lower())}", get_settings().rate_limit_login_per_minute, 60)
     user = svc.authenticate(db, body.email, body.password, body.totp, _ip(request))
-    token, sess = svc.create_session(db, user, response, org_id=svc.default_org_for(db, user), ip=_ip(request),
+    org_id = svc.default_org_for(db, user)
+    if org_id:
+        set_tenant(db, org_id)
+        enforced = db.execute(
+            select(OidcProvider).where(
+                OidcProvider.org_id == org_id,
+                OidcProvider.enabled.is_(True),
+                OidcProvider.enforce_sso.is_(True),
+            )
+        ).scalar_one_or_none()
+        if enforced:
+            raise Forbidden("Use your organization's work sign-in.", code="sso_required")
+    token, sess = svc.create_session(db, user, response, org_id=org_id, ip=_ip(request),
                                      ua=request.headers.get("user-agent"), mfa_passed=True)
     if sess.active_org_id:
         set_tenant(db, sess.active_org_id)
@@ -126,12 +138,63 @@ def switch_org(body: SwitchIn, ctx: Ctx = Depends(get_user_ctx)):
         raise Forbidden("You are not a member of that organization")
     if not ctx.db.get(Organization, body.organization_id):
         raise NotFound("Organization not found")
+    set_tenant(ctx.db, body.organization_id)
+    enforced = ctx.db.execute(
+        select(OidcProvider).where(
+            OidcProvider.org_id == body.organization_id,
+            OidcProvider.enabled.is_(True),
+            OidcProvider.enforce_sso.is_(True),
+        )
+    ).scalar_one_or_none()
+    if enforced and (ctx.p.session.auth_method != "oidc" or ctx.p.session.oidc_provider_id != enforced.id):
+        raise Forbidden("Use this organization's work sign-in.", code="sso_required")
     ctx.p.session.active_org_id = body.organization_id
     return me_payload(ctx.db, ctx.p.user, ctx.p.session)
 
 
 class TokenIn(BaseModel):
     token: str = Field(min_length=10, max_length=200)
+
+
+class RecoveryIn(BaseModel):
+    token: str = Field(min_length=32, max_length=200)
+    code: str = Field(min_length=6, max_length=10)
+
+
+@router.post("/sso/recovery")
+def sso_recovery(body: RecoveryIn, request: Request, response: Response, db: Session = Depends(get_raw_session)):
+    set_tenant(db, None, platform=True)
+    grant = db.execute(
+        select(SsoRecoveryGrant).where(SsoRecoveryGrant.token_hash == sha256_hex(body.token)).with_for_update()
+    ).scalar_one_or_none()
+    now = utcnow()
+    if not grant or grant.used_at or grant.expires_at <= now:
+        raise Unauthorized("The recovery grant is invalid or expired.", code="invalid_recovery")
+    user = db.get(User, grant.user_id)
+    if not user or user.disabled or not svc.verify_totp(user, body.code):
+        raise Unauthorized("The recovery grant is invalid or expired.", code="invalid_recovery")
+    grant.used_at = now
+    _, session = svc.create_session(
+        db,
+        user,
+        response,
+        org_id=grant.org_id,
+        ip=_ip(request),
+        ua=request.headers.get("user-agent"),
+        mfa_passed=True,
+        auth_method="recovery",
+        ttl_seconds=15 * 60,
+    )
+    audit.record(
+        db,
+        org_id=grant.org_id,
+        actor_kind="user",
+        actor_id=user.id,
+        action="oidc.recovery_used",
+        resource_type="user",
+        resource_id=user.id,
+    )
+    return me_payload(db, user, session)
 
 
 @router.post("/verify-email")
