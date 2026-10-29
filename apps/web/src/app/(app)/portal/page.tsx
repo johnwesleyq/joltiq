@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { ApprovalCard } from "@/components/RunPanel";
+import { ApprovalCard } from "@/components/ApprovalCard";
 import type { Run, Session } from "@/components/types";
 import Core from "@/components/Core";
 import { ErrorNote } from "@/components/ui";

@@ -1,6 +1,6 @@
 "use client";
 import Link from "next/link";
-import { ApprovalCard } from "@/components/RunPanel";
+import { ApprovalCard } from "@/components/ApprovalCard";
 import type { Approval } from "@/components/types";
 import { Empty, Loading, PageHead } from "@/components/ui";
 import { STAFF, type Page } from "@/lib/api";
