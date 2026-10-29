@@ -28,7 +28,6 @@ from ..models import (
     Ticket,
     User,
 )
-from ..models.enums import TERMINAL_RUN_STATES
 from ..services import agent as agent_svc
 from ..services import audit
 from ..services import devices as svc
@@ -603,7 +602,21 @@ def start_direct_computer_use(run_id: uuid.UUID, body: DirectComputerUseIn, dd=D
     for existing in active:
         details = existing.request_details or {}
         if details.get("direct_device_request"):
-            return JSONResponse(_direct_computer_use_response(db, existing, body.mode), status_code=200)
+            latest_run = db.execute(
+                select(ComputerUseRun)
+                .where(ComputerUseRun.session_id == existing.id)
+                .order_by(ComputerUseRun.created_at.desc())
+            ).scalars().first()
+            if latest_run is None or latest_run.state in (
+                "pending_approval", "waiting_local_consent", "running", "waiting_device", "waiting_customer"
+            ):
+                return JSONResponse(_direct_computer_use_response(db, existing, body.mode), status_code=200)
+            session_svc.terminate(
+                db,
+                existing,
+                by_kind="system",
+                reason="previous direct computer-use run finished",
+            )
 
     from ..services.ai.computer import SUPPORTED_PROVIDERS
     from ..services.ai.router import available_providers

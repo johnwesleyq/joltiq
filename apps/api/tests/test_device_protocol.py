@@ -251,6 +251,42 @@ def test_device_support_request_can_start_fix_with_two_local_consent_gates(app, 
     assert conflicting.json()["mode"] == "fix"
 
 
+def test_completed_direct_computer_use_does_not_block_a_fresh_fix_request(app, owner):
+    from joltiq.db import session_scope
+    from joltiq.models import ComputerUseRun
+
+    capabilities = [
+        "system.info", "screen.capture", "input.click", "input.type", "input.key", "input.scroll", "input.move",
+        "url.open", "guide.highlight", "guide.clear",
+    ]
+    device = FakeDevice(app)
+    assert device.enroll(_code(owner), caps=capabilities).status_code == 200
+    created = device.post(
+        "/support-requests",
+        {"client_request_id": str(uuid.uuid4()), "message": "My Windows laptop cannot connect to office Wi-Fi."},
+    ).json()
+
+    first = device.post(f"/support-requests/{created['run_id']}/computer-use", {"mode": "fix"})
+    assert first.status_code == 201, first.text
+    first_body = first.json()
+    assert device.post(
+        f"/sessions/{first_body['session_id']}/local-consent",
+        {"accepted": True, "user_display_name": "John"},
+    ).status_code == 200
+
+    with session_scope(uuid.UUID(owner.org_id)) as db:
+        prior = db.query(ComputerUseRun).filter(ComputerUseRun.session_id == uuid.UUID(first_body["session_id"])).one()
+        prior.state = "completed"
+        prior.success = True
+        prior.summary = "Previous test completed."
+
+    restarted = device.post(f"/support-requests/{created['run_id']}/computer-use", {"mode": "fix"})
+    assert restarted.status_code == 201, restarted.text
+    assert restarted.json()["state"] == "waiting_session_consent"
+    assert restarted.json()["computer_use_run_id"] is None
+    assert restarted.json()["session_id"] != first_body["session_id"]
+
+
 def test_fix_it_for_me_runs_an_existing_read_only_device_plan_instead_of_fixture_computer_use(app, owner):
     """A typed read-only plan must stay on the signed action path, not become a generic screen-driving run."""
     from sqlalchemy import func, select
