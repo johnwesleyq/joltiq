@@ -51,7 +51,7 @@ from ..models.enums import TERMINAL_RUN_STATES, ApprovalStatus, OutcomeStage
 from ..models.enums import RunState as R
 from ..models.enums import TicketStatus as TS
 from ..security.crypto import canonical_json, sha256_hex
-from . import approvals, audit, devices, policy, research, sessions, verification
+from . import approvals, audit, devices, policy, research, rollback, sessions, verification
 from . import tickets as ticket_svc
 from .actions.registry import (
     ACTIONS,
@@ -805,10 +805,7 @@ def h_plan(db, run):
     if not any(s["postconditions"] for s in steps):
         _escalate(db, run, "Plan has no independently verifiable outcome; refusing to run unverifiable changes")
         return
-    phash = sha256_hex(canonical_json([{"a": s["action"], "p": s["params"]} for s in steps]))
-    if phash in ctx.get("failed_plan_hashes", []):
-        _escalate(db, run, "Loop detected: the same plan already failed verification")
-        return
+    base_hash = sha256_hex(canonical_json([{"a": s["action"], "p": s["params"]} for s in steps]))
     # Ensure the needed live session exists and is consented.
     needs_browser = any(ACTIONS[s["action"]].channel == "browser" for s in steps)
     needs_desktop = any(ACTIONS[s["action"]].channel == "desktop" for s in steps)
@@ -833,16 +830,24 @@ def h_plan(db, run):
                                      device_id=dev_id, run_id=run.id)
         session.run_id = run.id
         device = db.get(Device, session.device_id)
+    channel = "browser" if needs_browser else "desktop" if needs_desktop else "internal"
+    rollback_steps, rollback_availability = rollback.derive(steps, channel)
+    phash = rollback.plan_hash(base_hash, rollback_steps, rollback_availability)
+    if phash in ctx.get("failed_plan_hashes", []):
+        _escalate(db, run, "Loop detected: the same plan already failed verification")
+        return
     # Persist plan (supersede previous one & its approvals).
     for old in db.execute(select(AgentPlan).where(AgentPlan.run_id == run.id, AgentPlan.status.in_(["proposed", "approved"]))).scalars():
         old.status = "superseded"
         approvals.supersede_for_plan(db, old.id)
     rev = len(db.execute(select(AgentPlan.id).where(AgentPlan.run_id == run.id)).all()) + 1
     ap = AgentPlan(org_id=run.org_id, run_id=run.id, revision=rev, summary=plan.summary, hypothesis=plan.hypothesis, risks=plan.risks,
-                   plan_hash=phash, status="proposed",
+                   plan_hash=phash, status="proposed", rollback_steps=rollback_steps,
+                   rollback_availability=rollback_availability,
                    citations=[e for e in ctx.get("evidence", []) if e["id"] in plan.evidence_ids])
     db.add(ap)
     db.flush()
+    rollback.remember(run, ap, base_hash)
     target = {"session_id": str(session.id) if session else None, "device_id": str(device.id) if device else None}
     decisions = []
     for i, st in enumerate(steps):
@@ -1014,18 +1019,25 @@ def build_canonical_plan(db, run, article: KnowledgeArticle, procedure, session:
         raise ValueError("canonical procedure is missing its publication fingerprint")
     steps = [step.model_dump(mode="json") for step in procedure.procedure]
     approval_copy = outlook_session_details(procedure, article.procedure_hash)["step_messages"]
-    phash = sha256_hex(canonical_json(steps))
+    base_hash = sha256_hex(canonical_json(steps))
+    rollback_steps, rollback_availability = rollback.derive(
+        steps,
+        "browser" if session.kind == "browser" else "desktop",
+    )
+    phash = rollback.plan_hash(base_hash, rollback_steps, rollback_availability)
     rev = len(db.execute(select(AgentPlan.id).where(AgentPlan.run_id == run.id)).all()) + 1
     candidate = run.context["candidate_procedure"]
     plan = AgentPlan(
         org_id=run.org_id, run_id=run.id, revision=rev,
         summary=f"Apply approved procedure: {article.title}", hypothesis=run.context.get("candidate_hypothesis") or article.title,
         risks=candidate.get("risks", []), plan_hash=phash, status="proposed",
+        rollback_steps=rollback_steps, rollback_availability=rollback_availability,
         citations=[e for e in run.context.get("evidence", []) if e["id"] == candidate.get("evidence_id")],
         procedure_article_id=article.id, procedure_version=article.version, procedure_hash=article.procedure_hash,
     )
     db.add(plan)
     db.flush()
+    rollback.remember(run, plan, base_hash)
     device = db.get(Device, session.device_id)
     target = {"session_id": str(session.id), "device_id": str(device.id)}
     for ordinal, step in enumerate(steps):
@@ -1062,7 +1074,9 @@ def build_canonical_browser_plan(
     """Persist a published browser template after its customer-owned binding is resolved."""
     if article.procedure_hash is None:
         raise ValueError("canonical procedure is missing its publication fingerprint")
-    phash = sha256_hex(canonical_json(steps))
+    base_hash = sha256_hex(canonical_json(steps))
+    rollback_steps, rollback_availability = rollback.derive(steps, "browser")
+    phash = rollback.plan_hash(base_hash, rollback_steps, rollback_availability)
     rev = len(db.execute(select(AgentPlan.id).where(AgentPlan.run_id == run.id)).all()) + 1
     candidate = run.context["candidate_procedure"]
     plan = AgentPlan(
@@ -1078,9 +1092,12 @@ def build_canonical_browser_plan(
         procedure_article_id=article.id,
         procedure_version=article.version,
         procedure_hash=article.procedure_hash,
+        rollback_steps=rollback_steps,
+        rollback_availability=rollback_availability,
     )
     db.add(plan)
     db.flush()
+    rollback.remember(run, plan, base_hash)
     target = {"session_id": str(session.id), "device_id": None}
     selected = run.context["selected_attachment"]
     for ordinal, step in enumerate(steps):
@@ -1598,6 +1615,45 @@ def h_verify(db, run):
         steps = db.execute(select(PlanStep).where(PlanStep.plan_id == plan.id).order_by(PlanStep.ordinal)).scalars().all()
         marker = steps[-1]
         mark_partial_application(db, run, marker, changed, f"independent verification {status}")
+        return
+    if status in ("FAILED", "PARTIAL") and plan.rollback_steps:
+        steps = db.execute(
+            select(PlanStep).where(PlanStep.plan_id == plan.id).order_by(PlanStep.ordinal)
+        ).scalars().all()
+        session_id = steps[0].target.get("session_id") if steps else None
+        session = db.get(SupportSession, uuid.UUID(session_id)) if session_id else None
+        if session and session.kind == "browser":
+            rollback_result = rollback.execute_browser(db, run, plan, session)
+            _escalate(
+                db,
+                run,
+                f"Verification {status}; automatic rollback ended {rollback_result['status']}: "
+                f"{rollback_result['reason']}",
+            )
+            return
+    if (
+        status in ("FAILED", "PARTIAL")
+        and (plan.rollback_availability or {}).get("status") == rollback.NO_ROLLBACK_AVAILABLE
+    ):
+        rollback_result = {
+            "status": rollback.NO_ROLLBACK_AVAILABLE,
+            "reason": (plan.rollback_availability or {}).get("reason", "No safe inverse was approved"),
+            "changed": [str(execution.id) for execution in changed],
+            "restored": [],
+            "unresolved": [str(execution.id) for execution in changed],
+        }
+        _ctx_update(run, rollback=rollback_result)
+        audit.record(
+            db,
+            org_id=run.org_id,
+            actor_kind="system",
+            actor_id=None,
+            action="rollback.result",
+            resource_type="agent_plan",
+            resource_id=plan.id,
+            data=rollback_result,
+        )
+        _escalate(db, run, f"Verification {status}; no approved safe rollback is available")
         return
     analysis = _model(db, run, "verification_analysis", S.VerificationAnalysis, {"status": vr.status, "details": vr.details})
     if status == "FAILED" and run.retries < run.max_retries:

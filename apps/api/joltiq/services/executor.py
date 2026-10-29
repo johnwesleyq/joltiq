@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from ..core.errors import Conflict, Unavailable
 from ..models import ActionExecution, AgentPlan, AgentRun, Approval, Device, PlanStep, SupportSession, Ticket, utcnow
 from ..models.enums import ApprovalStatus
-from . import approvals, audit, browser_client, browser_uploads, policy, sessions
+from . import approvals, audit, browser_client, browser_uploads, policy, rollback, sessions
 from . import tickets as ticket_svc
 from .actions.registry import ACTIONS
 from .devices import queue_command
@@ -73,6 +73,9 @@ def execute_step(db: Session, run: AgentRun, plan: AgentPlan, step: PlanStep) ->
             sessions.acquire_lease(db, s, "ai", reason=f"executing {step.action}")
         except Conflict as e:
             return Outcome("human_control", str(e.message))
+    # Capture persisted browser state before the first mutation. The rollback plan contains only references to
+    # these values, so neither the model nor a later server command can invent the state to restore.
+    rollback.capture_pre_value(db, run, plan, step.ordinal, s)
     key = f"{run.id}:{step.id}:{run.retries}"
     ex = db.execute(select(ActionExecution).where(ActionExecution.idempotency_key == key)).scalar_one_or_none()
     if ex and ex.status in ("succeeded", "running"):
