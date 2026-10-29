@@ -1,0 +1,17 @@
+# DEV/TEST ONLY: Linux headless host of the JoltIQ companion (real C# core, SIMULATED Windows state).
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /src
+COPY src/JoltIQ.Agent.Core/ src/JoltIQ.Agent.Core/
+COPY src/JoltIQ.Agent.Headless/ src/JoltIQ.Agent.Headless/
+RUN rm -rf src/*/bin src/*/obj && dotnet publish src/JoltIQ.Agent.Headless -c Release -o /out --nologo
+
+FROM mcr.microsoft.com/dotnet/aspnet:8.0
+LABEL org.joltiq.dev-only="true" org.joltiq.component="companion-headless"
+RUN useradd --system --uid 10010 companion && mkdir -p /var/lib/joltiq-companion && chown companion /var/lib/joltiq-companion
+COPY --from=build /out /app
+USER companion
+ENV AGENT_CONTROL_PORT=8400
+EXPOSE 8400
+HEALTHCHECK --interval=10s --timeout=3s CMD ["dotnet", "/app/JoltIQ.Agent.Headless.dll", "--healthcheck"]
+ENTRYPOINT ["dotnet", "/app/JoltIQ.Agent.Headless.dll"]
+
