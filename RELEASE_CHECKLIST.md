@@ -21,7 +21,7 @@
 - [ ] Windows evidence is reviewed for secret/PII leakage, source commit, harness commit, procedure hash, device/session identity, STOP timing, final ticket state, and actual desktop/registry/event-log state.
 - [ ] Rollback plan: previous image tags pinned. Migrations reviewed for backward compatibility.
 - [ ] Live acceptance: full release scenario (ticket → chat → knowledge → research → consent → plan → approval → execution → VERIFIED → ticket updated → draft article) on the production-like environment.
-- [x] V7 local non-live gates at source `68da9a5`: API **289 passed / 3 live-service skips**, Ruff green, MyPy green across 88 modules, browser-worker **16 passed**, web production build green, Playwright **9 passed / 7 seeded-stack skips**, npm production audit 0 high vulnerabilities, Compose config valid.
+- [x] V7 local non-live gates at source `8fc3b9b`: API **289 passed / 3 live-service skips**, Ruff green, MyPy green across 88 modules, browser-worker **16 passed**, web production build green, Playwright **9 passed / 7 seeded-stack skips**, npm production audit 0 high vulnerabilities, Compose config valid.
 - [x] Optional Slack, Teams, Freshdesk mock, and headless/browser-worker egress remains zero when unset (`test_v7_disabled_egress.py`).
 - [ ] Seeded production-mode local acceptance with Mailpit, MOCK Slack, MOCK Teams, and headless companion. Current Docker Desktop services are unhealthy and the data volume is 98% full; do not mark complete until the saved Playwright scenarios run against a healthy rebuilt stack.
 - [ ] Real Slack and Teams tenant acceptance. MOCK viewers do not count.

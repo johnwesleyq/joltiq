@@ -4,7 +4,7 @@
 
 **Canonical branch:** `feat/direct-device-help`
 
-**Integrated source commit:** `68da9a5` (UI checkpoint `3fb6ddc`)
+**Integrated source commit:** `8fc3b9b` (UI checkpoint `3fb6ddc`)
 
 **Reference archive:** `/Users/johnw/Downloads/joltiq-git-v7.zip` was treated as untrusted reference material; current JoltIQ remained canonical.
 
