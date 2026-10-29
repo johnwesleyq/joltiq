@@ -63,6 +63,27 @@ def channel_matrix(db: Session, org_id) -> dict[str, dict[str, bool]]:
     }
 
 
+def channel_enabled(db: Session, org_id, kind: str, channel: str) -> bool:
+    return channel_matrix(db, org_id)[kind][channel]
+
+
+def _connector_fanout(db: Session, approval: Approval, kind: str) -> None:
+    """Queue explicitly enabled connector alerts without blocking approval processing."""
+    for channel, module_name in (("slack", "slack"), ("teams", "teams")):
+        if not channel_enabled(db, approval.org_id, kind, channel):
+            continue
+        try:
+            if module_name == "slack":
+                from .slack import fanout
+            else:
+                from .teams import fanout
+            fanout(db, approval, kind)
+        except Exception as exc:  # noqa: BLE001 - connector delivery is intentionally best effort
+            audit.record(db, org_id=approval.org_id, actor_kind="system", actor_id=None,
+                         action=f"notification.{channel}.{kind}.failed", resource_type="approval",
+                         resource_id=approval.id, data={"error": type(exc).__name__})
+
+
 def requester_id(db: Session, approval: Approval) -> uuid.UUID | None:
     if approval.run_id:
         run = db.get(AgentRun, approval.run_id)
@@ -220,6 +241,7 @@ def on_requested(db: Session, approval: Approval) -> list[uuid.UUID]:
             f"Approval needed: {approval.action} ({approval.risk}) — expires {_expiry(approval)}",
             _summary(approval),
         )
+    _connector_fanout(db, approval, "approval_requested")
     return targets
 
 
@@ -241,6 +263,7 @@ def send_reminders(db: Session, now=None) -> int:
         if approval.expires_at - now > lead or approval.expires_at - approval.created_at <= lead:
             continue
         minutes = max(1, int((approval.expires_at - now).total_seconds() // 60))
+        _connector_fanout(db, approval, "approval_reminder")
         for user_id in eligible_approvers(db, approval):
             if _dispatch(
                 db,
@@ -271,6 +294,7 @@ def on_outcome(db: Session, approval: Approval) -> None:
             f"{approval.action} ({approval.risk}) was {verb}."
             + (f"\nComment: {approval.decision_comment}" if approval.decision_comment else ""),
         )
+    _connector_fanout(db, approval, "approval_outcome")
     if approval.ticket_id:
         from .tickets import add_event
 

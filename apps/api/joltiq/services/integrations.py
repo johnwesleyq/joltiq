@@ -7,7 +7,9 @@ Implemented adapters
   * generic_rest     — inbound ticket creation via API key (`POST /api/v1/integrations/inbound/{id}/tickets`).
   * email_intake     — inbound email (RFC 5322) → ticket / comment via `POST /api/v1/integrations/email/inbound`.
 Extension points (documented, NOT implemented — never shown as working): zendesk, servicenow, jira_sm, halopsa,
-connectwise, intune, ninjaone, datto, m365, google_workspace, slack, teams. See docs/api/integrations.md.
+connectwise, intune, ninjaone, datto, m365, google_workspace. See docs/api/integrations.md.
+  * slack            — approval alerts through an encrypted incoming webhook or bot token.
+  * teams            — approval alerts through an encrypted Teams/Power Automate webhook.
 """
 from __future__ import annotations
 
@@ -34,9 +36,9 @@ from . import audit
 from . import tickets as ticket_svc
 from .jobs import enqueue, handler
 
-IMPLEMENTED = {"freshdesk", "generic_webhook", "generic_rest", "email_intake"}
+IMPLEMENTED = {"freshdesk", "generic_webhook", "generic_rest", "email_intake", "slack", "teams"}
 EXTENSION_POINTS = {"zendesk", "servicenow", "jira_service_management", "halopsa", "connectwise", "intune", "ninjaone", "datto",
-                    "microsoft_365", "google_workspace", "slack", "teams"}
+                    "microsoft_365", "google_workspace"}
 FRESHDESK_STATUS_TO_JQ = {2: TS.OPEN, 3: TS.AWAITING_CUSTOMER, 4: TS.RESOLVED, 5: TS.CLOSED}
 JQ_TO_FRESHDESK = {TS.RESOLVED: 4, TS.CLOSED: 5, TS.AWAITING_CUSTOMER: 3, TS.OPEN: 2, TS.IN_PROGRESS: 2, TS.ESCALATED: 2}
 
@@ -126,7 +128,23 @@ def connect(db: Session, org_id, *, kind: str, name: str, config: dict, secret: 
         from ..core.errors import EntitlementExceeded
 
         raise EntitlementExceeded("Your plan's integration limit is reached")
-    integ = Integration(org_id=org_id, kind=kind, name=name, config=_clean_config(kind, config), scopes=scopes, status="disconnected")
+    if kind == "slack":
+        from . import slack
+
+        clean, packed_secret = slack.clean_config(config)
+        if not packed_secret:
+            raise AppError("Provide a Slack incoming-webhook URL and/or a bot token", code="validation_error")
+        secret = packed_secret
+    elif kind == "teams":
+        from . import teams
+
+        clean, packed_secret = teams.clean_config(config)
+        if not packed_secret:
+            raise AppError("Provide a Teams incoming-webhook or Power Automate workflow URL", code="validation_error")
+        secret = packed_secret
+    else:
+        clean = _clean_config(kind, config)
+    integ = Integration(org_id=org_id, kind=kind, name=name, config=clean, scopes=scopes, status="disconnected")
     db.add(integ)
     db.flush()
     if kind in ("generic_rest", "generic_webhook") and not secret:
@@ -163,6 +181,20 @@ def test(db: Session, integ: Integration) -> dict:
             from .notifications import _deliver_webhook  # noqa: F401 - ensures handler registered
             r = httpx.post(integ.config["url"], json={"type": "joltiq.test", "id": uuid.uuid4().hex}, timeout=10)
             res = {"ok": r.status_code < 300, "detail": f"HTTP {r.status_code}"}
+        elif integ.kind == "slack":
+            from . import slack
+
+            res = slack.post(db, integ, *slack.test_message())
+            audit.record(db, org_id=integ.org_id, actor_kind="system", actor_id=None, action="slack.test",
+                         resource_type="integration", resource_id=integ.id,
+                         data={"ok": res["ok"], "detail": res["detail"]})
+        elif integ.kind == "teams":
+            from . import teams
+
+            res = teams.post(db, integ, teams.test_message())
+            audit.record(db, org_id=integ.org_id, actor_kind="system", actor_id=None, action="teams.test",
+                         resource_type="integration", resource_id=integ.id,
+                         data={"ok": res["ok"], "detail": res["detail"]})
         else:
             res = {"ok": True, "detail": "inbound integration — ready to receive"}
     except (AppError, httpx.HTTPError) as e:

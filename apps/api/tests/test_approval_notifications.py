@@ -72,6 +72,28 @@ def _notifications(org_id, user_id, approval_id=None):
         return db.execute(query).scalars().all()
 
 
+def _notes(org_id, user_id, approval_id=None):
+    return [(note.category, note.title, note.body) for note in _notifications(org_id, user_id, approval_id)]
+
+
+def _emails(org_id, target):
+    from joltiq.db import session_scope
+    from joltiq.models import Delivery
+
+    with session_scope(uuid.UUID(org_id)) as db:
+        rows = db.execute(select(Delivery).where(Delivery.channel == "email", Delivery.target == target)).scalars()
+        return [(row.subject, row.payload["body"]) for row in rows]
+
+
+def _audit(org_id, action):
+    from joltiq.db import session_scope
+    from joltiq.models import AuditEvent
+
+    with session_scope(uuid.UUID(org_id)) as db:
+        rows = db.execute(select(AuditEvent).where(AuditEvent.action == action)).scalars()
+        return [row.data for row in rows]
+
+
 def test_eligible_roles_exclude_requester_disabled_user_and_other_tenant(app, owner, new_client):
     from joltiq.db import session_scope
     from joltiq.models import User

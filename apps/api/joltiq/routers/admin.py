@@ -21,6 +21,7 @@ from ..models import (
     AIBudget,
     AuditEvent,
     Credential,
+    Integration,
     Job,
     ModelCall,
     ModelProviderConfig,
@@ -327,7 +328,7 @@ class ApprovalNotificationsIn(BaseModel):
     reminder_minutes: int = Field(ge=1, le=240)
     email_rate_per_hour: int = Field(ge=1, le=500)
     slack_rate_per_hour: int = Field(ge=1, le=1000)
-    teams_rate_per_hour: int = Field(ge=1, le=1000)
+    teams_rate_per_hour: int | None = Field(default=None, ge=1, le=1000)
     channels: dict[str, ApprovalChannelsIn]
 
 
@@ -348,6 +349,12 @@ def _approval_notification_view(db: Session, org: Organization) -> dict:
             db, org.id, "teams_rate_per_hour", SETTINGS_DEFAULTS["teams_rate_per_hour"]
         ),
         "channels": channel_matrix(db, org.id),
+        "slack_connected": bool(db.execute(select(Integration.id).where(
+            Integration.org_id == org.id, Integration.kind == "slack", Integration.status == "connected"
+        )).first()),
+        "teams_connected": bool(db.execute(select(Integration.id).where(
+            Integration.org_id == org.id, Integration.kind == "teams", Integration.status == "connected"
+        )).first()),
     }
 
 
@@ -381,7 +388,7 @@ def put_approval_notifications(
         "approval_reminder_minutes": body.reminder_minutes,
         "approval_email_rate_per_hour": body.email_rate_per_hour,
         "slack_rate_per_hour": body.slack_rate_per_hour,
-        "teams_rate_per_hour": body.teams_rate_per_hour,
+        "teams_rate_per_hour": body.teams_rate_per_hour or before["teams_rate_per_hour"],
         "approval_channels": {
             kind: channels.model_dump()
             for kind, channels in body.channels.items()
@@ -389,6 +396,8 @@ def put_approval_notifications(
     }
     ctx.db.flush()
     after = _approval_notification_view(ctx.db, org)
+    tracked = ("reminder_minutes", "email_rate_per_hour", "slack_rate_per_hour", "teams_rate_per_hour", "channels")
+    changes = {key: {"from": before[key], "to": after[key]} for key in tracked if before[key] != after[key]}
     audit.record(
         ctx.db,
         org_id=org.id,
@@ -397,7 +406,7 @@ def put_approval_notifications(
         action="settings.approval_notifications_updated",
         resource_type="organization",
         resource_id=org.id,
-        data={"before": before, "after": after},
+        data={"changes": changes},
     )
     return after
 

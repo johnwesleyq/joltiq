@@ -13,6 +13,9 @@ x-api-env: &api-env
   JOLTIQ_BROWSER_WORKER_URL: http://browser-worker:8100
   JOLTIQ_BROWSER_WORKER_TOKEN: ${JOLTIQ_BROWSER_WORKER_TOKEN:-dev-browser-worker-token-change-me}
   JOLTIQ_WEB_ORIGIN: ${JOLTIQ_WEB_ORIGIN:-http://localhost:3000}
+  # Explicitly blank by default: set only with the dev-mock profile.
+  JOLTIQ_SLACK_MOCK_BASE_URL: ${JOLTIQ_SLACK_MOCK_BASE_URL:-}
+  JOLTIQ_TEAMS_MOCK_BASE_URL: ${JOLTIQ_TEAMS_MOCK_BASE_URL:-}
   JOLTIQ_SMTP_HOST: ${JOLTIQ_SMTP_HOST:-mailpit}
   JOLTIQ_SMTP_PORT: ${JOLTIQ_SMTP_PORT:-1025}
   # S3 (MinIO) is optional: run with --profile s3 and set JOLTIQ_S3_ENDPOINT=http://minio:9000
@@ -124,5 +127,20 @@ services:
     working_dir: /testapp
     volumes: ["./tests/e2e/testapp:/testapp:ro"]
     command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8300"]
+
+  mock-slack:
+    # MOCK Slack — DEV/TEST ONLY. Permanent red banner; no production profile.
+    build: { context: services/mock-slack }
+    profiles: ["dev-mock"]
+    labels: { joltiq.dev-mock: "true", joltiq.purpose: "DEV/MOCK Slack test target" }
+    environment: { MOCK_SLACK_WEBHOOK_PATHS: "*", MOCK_SLACK_BOT_TOKENS: xoxb-mock-0001 }
+    ports: ["127.0.0.1:8340:8600"]
+
+  mock-teams:
+    # MOCK Teams — DEV/TEST ONLY. Permanent red banner; no production profile.
+    build: { context: services/mock-teams }
+    profiles: ["dev-mock"]
+    labels: { joltiq.dev-mock: "true", joltiq.purpose: "DEV/MOCK Teams test target" }
+    ports: ["127.0.0.1:8341:8610"]
 
 volumes: { pgdata: {}, miniodata: {}, appdata: {}, meshcentral-data: {}, meshcentral-files: {} }
