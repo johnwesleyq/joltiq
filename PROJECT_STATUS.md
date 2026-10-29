@@ -1,8 +1,8 @@
 # Project status — JoltIQ
 
-**Last updated:** 2026-10-22 · **Current environment:** macOS development host plus an enrolled physical Windows 11 64-bit PC used for native build/test evidence. The Windows PC is not a disposable snapshot-reset VM. No Windows 10 VM, production signing certificate, or completed external security review is attached.
+**Last updated:** 2026-10-29 · **Current environment:** macOS development host plus an enrolled physical Windows 11 64-bit PC used for earlier native build/test evidence. The Windows PC is not a disposable snapshot-reset VM. No Windows 10 VM, production signing certificate, or completed external security review is attached.
 
-**Overall:** Windows-native general computer use is implemented with distinct Guide/Fix authority and has passed native tests on the physical Windows 11 PC. Its PowerShell acceptance contract and packaging gates pass, but it is **not approved for unrestricted customer deployment** until the 35-run disposable Windows 10/11 computer-use matrix, production signing, installer lifecycle evidence, and independent security review pass. Browser/SaaS completion remains the next product plan after this Windows increment.
+**Overall:** V7 verification/rollback, lease fencing, approval alerts, Slack/Teams connectors, labelled development fixtures, and the integrated support UI are now merged through source commit `b5b1f98`. Local API, browser-worker, web build, browser, type, lint, dependency, and Compose-configuration gates pass. Windows-native general computer use remains **not approved for unrestricted customer deployment** until the disposable Windows 10/11 matrix, production signing, installer lifecycle evidence, and independent security review pass.
 
 Status legend: **IT** = IMPLEMENTED_AND_TESTED · **INT** = IMPLEMENTED_NOT_TESTED · **P** = PARTIALLY_IMPLEMENTED · **B** = BLOCKED_EXTERNAL_DEPENDENCY · **NI** = NOT_IMPLEMENTED
 
@@ -13,7 +13,7 @@ Status legend: **IT** = IMPLEMENTED_AND_TESTED · **INT** = IMPLEMENTED_NOT_TEST
 | Registration, login, logout, sessions (idle + absolute expiry), CSRF, lockout, rate limits | IT | `test_auth.py` |
 | Email verification, password reset (revokes sessions), invitations, roles, org switching | IT | `test_auth.py`, SMTP delivery via local aiosmtpd (`test_platform_features.py`) |
 | TOTP MFA | IT | `test_auth.py::test_mfa_totp_enrollment_and_login` |
-| OIDC / Microsoft Entra SSO | **NI** | Model column `oidc_subject` exists, but there's no login flow. Needs an Entra app registration. |
+| OIDC / Microsoft Entra SSO | IT (contract/local) / **INT (live)** | Work-email discovery, OIDC callback/session binding, MFA continuation, redacted admin configuration, and browser tests pass. A real Entra tenant/app registration has not been live-tested. |
 | Tenant isolation (app + PostgreSQL RLS), audit hash chain, append-only audit | IT | `test_tenancy_rls.py`, cross-tenant cases in tickets/devices/sessions/approvals tests |
 | Native tickets: lifecycle, SLA, comments/internal notes, attachments, search, similar, idempotent create | IT | `test_tickets.py` |
 | Knowledge: PDF/DOCX/XLSX/CSV/MD/TXT/HTML/transcripts, URL (SSRF-guarded), versions, hybrid search, citations, permission filtering, delete/reindex | IT (PDF/DOCX/XLSX parsers INT) | `test_platform_features.py::test_knowledge_ingest…`; PDF/DOCX/XLSX parsing code is covered only indirectly |
@@ -40,7 +40,8 @@ Status legend: **IT** = IMPLEMENTED_AND_TESTED · **INT** = IMPLEMENTED_NOT_TEST
 | Desktop technician takeover (human driving the remote screen) | **NI** | Browser sessions only |
 | Integrations: Freshdesk (pull/push/status, idempotency, conflict detection, retry, rotate, revoke) | IT (mocked) / **INT (live)** | Fake Freshdesk transport. No Freshdesk account available. |
 | Generic REST inbound, outbound signed webhooks with retry, email-to-ticket | IT | Local webhook receiver, RFC 5322 messages |
-| Zendesk, ServiceNow, Jira SM, HaloPSA, ConnectWise, Intune, NinjaOne, Datto, M365, Google, Slack, Teams | **NI** (documented extension points; API returns 501) | |
+| Slack / Teams approval alerts | IT (labelled local mocks) / **INT (live)** | Encrypted/redacted connector settings, host validation, event selection, rate limits, dedupe, deep links, and MOCK viewers are tested. Real workspaces are not live-tested. |
+| Zendesk, ServiceNow, Jira SM, HaloPSA, ConnectWise, Intune, NinjaOne, Datto, M365, Google | **NI** (documented extension points; API returns 501) | |
 | Notifications: in-app, email, webhook, preferences, SSE real-time | IT (SSE: INT) | SSE endpoint built, but no automated test reads the stream |
 | Stripe: checkout/portal, webhook signature, idempotent processing, retry, plan/entitlement update | IT (webhooks, signed locally) / **INT (checkout/portal)** | No Stripe test key. Checkout honestly reports `billing_not_configured`. |
 | Usage metering (idempotent), server-side entitlements | IT | |
@@ -59,6 +60,8 @@ Status legend: **IT** = IMPLEMENTED_AND_TESTED · **INT** = IMPLEMENTED_NOT_TEST
 
 ## Tests actually run (this environment)
 
+V7 integration evidence is indexed in `docs/evidence/v7-integration-acceptance.md`.
+
 | Command | Result |
 |---|---|
 | Focused API computer-use/device/security/procedure suites | **94 passed, 0 failed** after Guide/Fix orchestration. Full post-increment API verification is rerun as part of the release gate. |
@@ -73,6 +76,10 @@ Status legend: **IT** = IMPLEMENTED_AND_TESTED · **INT** = IMPLEMENTED_NOT_TEST
 | `tests/performance/perf.py` (20 concurrent, 4 API workers, same 2-vCPU box as DB + browser + web) | ticket list p50 1.03 s / p95 1.33 s (~19 rps); search p50 1.03 s; create p95 3.0 s; browser session start p50 109 ms (Chromium launch 817 ms); crashed-worker job reclaimed in 0.5 s. Single-request latency is 10–15 ms, so these figures are CPU-bound by this sandbox. |
 | `pip-audit -r requirements.lock` | **No known vulnerabilities found** after upgrading `certifi` to `2026.10.19`. The post-upgrade container run also passed the complete API/browser suite: 152 passed, 2 expected skips. |
 | `npm audit --omit=dev --audit-level=high` | 0 vulnerabilities. |
+| Full API suite at `b5b1f98` | **287 passed, 3 skipped, 0 failed** (290 collected). Skips require live outside services. |
+| API static gates at `b5b1f98` | Ruff passed; MyPy passed across **88 source files**. |
+| Browser-worker suite at `b5b1f98` | **16 passed, 0 failed**. |
+| Web browser suite at `b5b1f98` | **9 passed, 7 explicitly skipped, 0 failed**. Skips are seeded production-shaped/Mailpit/Slack/Teams scenarios requiring a healthy external stack and credentials. |
 | General computer-use harness contract on physical Windows / PowerShell 5.1 | Passed; final packaging/build gate **15/15**. |
 | General computer-use behavioral acceptance | **0/35 required runs**; no disposable-VM aggregate exists. Physical-PC automated tests do not substitute. |
 | Outlook PDF behavioral acceptance | **0/59 required runs**; no disposable-VM aggregate exists. |
