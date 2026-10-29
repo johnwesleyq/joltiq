@@ -26,12 +26,9 @@ from ..models import (
 from ..models.enums import TERMINAL_RUN_STATES, ApprovalStatus
 from ..services import agent as svc
 from ..services import approvals as approval_svc
+from ..services import ask_chat
 from ..services import research as research_svc
 from ..services import tickets as ticket_svc
-from ..services.ai import router as ai
-from ..services.ai import schemas as S
-from ..services.ai.fixture import MARK
-from ..services.knowledge import service as kb
 from .common import page_params, paginate
 from .tickets import ticket_for
 
@@ -43,52 +40,119 @@ class ChatIn(BaseModel):
     ticket_id: uuid.UUID | None = None
     subject: str | None = Field(default=None, max_length=300)
     attachment_id: uuid.UUID | None = None
+    mode: Literal["chat", "troubleshoot"] = "chat"
+
+
+@router.get("/agents/ai-status")
+def ai_status_endpoint(ctx: Ctx = Depends(perm("agents.run"))):
+    result = ask_chat.status(ctx.db, ctx.org_id)
+    return {"live_chat": result["connected"], "provider": result["provider"], "model": result["model"],
+            "source": result["source"], "notice": result["notice"], "can_connect": ctx.p.can("models.manage")}
+
+
+def _chat_ticket(ctx: Ctx, body: ChatIn) -> Ticket:
+    if body.ticket_id:
+        return ticket_for(ctx, body.ticket_id)
+    subject = body.subject or body.message.split("\n")[0][:120]
+    return ticket_svc.create(ctx.db, ctx.org_id, subject=subject if len(subject) >= 3 else "Support request",
+                             description=body.message, source="chat",
+                             customer_id=ctx.p.customer_id if ctx.p.is_customer else None, requester_id=ctx.p.user_id)
+
+
+def _ask_prepare(ctx: Ctx, body: ChatIn) -> tuple[Ticket, AgentRun]:
+    ticket = _chat_ticket(ctx, body)
+    run = ask_chat.chat_run(ctx.db, ctx.org_id, ticket, ctx.p.user_id)
+    if body.attachment_id:
+        svc.select_attachment_for_run(ctx.db, run, ticket, body.attachment_id)
+    svc.add_message(ctx.db, run, "user", body.message, author_id=ctx.p.user_id)
+    return ticket, run
 
 
 @router.post("/agents/chat", status_code=201)
 def chat(body: ChatIn, ctx: Ctx = Depends(perm("agents.run"))):
-    """Customer (or technician) talks to the AI. Creates/links a ticket and starts or continues the durable run."""
-    if body.ticket_id:
-        t = ticket_for(ctx, body.ticket_id)
-    else:
-        subject = body.subject or body.message.split("\n")[0][:120]
-        t = ticket_svc.create(ctx.db, ctx.org_id, subject=subject if len(subject) >= 3 else "Support request", description=body.message,
-                              source="chat", customer_id=ctx.p.customer_id if ctx.p.is_customer else None, requester_id=ctx.p.user_id)
-    run = ctx.db.execute(select(AgentRun).where(AgentRun.ticket_id == t.id).order_by(AgentRun.created_at.desc())).scalars().first()
-    if run is None or run.state in TERMINAL_RUN_STATES:
+    if body.mode == "troubleshoot":
+        return _troubleshoot(body, ctx)
+    ticket, run = _ask_prepare(ctx, body)
+    result = {"ticket_id": str(ticket.id), "ticket_number": ticket.number, "run_id": str(run.id),
+              "state": run.state, "mode": "chat"}
+    try:
+        answer = ask_chat.reply(ctx.db, ctx.org_id, run)
+    except ask_chat.AskNotConnected as exc:
+        return result | {"reply": None, "setup_required": True, "ai_notice": exc.message}
+    except AppError as exc:
+        return result | {"reply": None, "setup_required": False, "ai_notice": None, "error": exc.message}
+    return result | {"reply": answer, "setup_required": False, "ai_notice": None}
+
+
+@router.post("/agents/chat/stream")
+def chat_stream(body: ChatIn, ctx: Ctx = Depends(perm("agents.run"))):
+    from fastapi.responses import StreamingResponse
+    from ..db import session_scope
+
+    if body.mode != "chat":
+        raise AppError("Streaming is available only for Ask chat", code="validation_error")
+    ticket, run = _ask_prepare(ctx, body)
+    meta = {"ticket_id": str(ticket.id), "ticket_number": ticket.number, "run_id": str(run.id),
+            "state": run.state, "mode": "chat"}
+    plan = ask_chat.stream_plan(ctx.db, ctx.org_id, run)
+    ctx.db.commit()
+    org_id = ctx.org_id
+
+    def event(name: str, data: dict) -> str:
+        return f"event: {name}\ndata: {json.dumps(data)}\n\n"
+
+    def generate():
+        yield event("meta", meta)
+        if plan is None:
+            yield event("setup_required", {"ai_notice": ask_chat.SETUP_NOTICE})
+            return
+        parts, usage = [], {}
+        try:
+            for kind, data in ask_chat.stream_tokens(plan):
+                if kind == "delta":
+                    parts.append(data["text"])
+                    yield event("delta", data)
+                else:
+                    usage = data
+        except Exception as exc:
+            yield event("error", {"message": f"The AI model did not answer ({type(exc).__name__}). Please try again."})
+            return
+        with session_scope(org_id) as db:
+            saved = ask_chat.finish_stream(db, plan, "".join(parts), usage)
+        yield event("done", saved)
+
+    return StreamingResponse(generate(), media_type="text/event-stream",
+                             headers={"cache-control": "no-cache", "x-accel-buffering": "no"})
+
+
+def _troubleshoot(body: ChatIn, ctx: Ctx) -> dict:
+    ticket = _chat_ticket(ctx, body)
+    run = ctx.db.execute(select(AgentRun).where(AgentRun.ticket_id == ticket.id).order_by(AgentRun.created_at.desc())).scalars().first()
+    if run is not None and run.state not in TERMINAL_RUN_STATES and (run.context or {}).get("mode") == "chat":
+        run.paused_for = None
+        run.state = "NEW"
+        run.context = {**(run.context or {}), "mode": "troubleshoot"}
+        svc.add_message(ctx.db, run, "user", body.message, author_id=ctx.p.user_id)
+        svc.enqueue(ctx.db, "agent.advance", {"run_id": str(run.id)}, org_id=run.org_id)
+        resumed = True
+    elif run is None or run.state in TERMINAL_RUN_STATES:
         if body.ticket_id and run is not None:
-            ticket_svc.comment(ctx.db, t, body.message, author_id=ctx.p.user_id)
-        run = svc.start_run(
-            ctx.db,
-            ctx.org_id,
-            ticket=t,
-            started_by=ctx.p.user_id,
-            first_message=body.message,
-            attachment_id=body.attachment_id,
-        )
+            ticket_svc.comment(ctx.db, ticket, body.message, author_id=ctx.p.user_id)
+        run = svc.start_run(ctx.db, ctx.org_id, ticket=ticket, started_by=ctx.p.user_id,
+                            first_message=body.message, attachment_id=body.attachment_id)
         resumed = True
     else:
         if body.attachment_id:
-            svc.select_attachment_for_run(ctx.db, run, t, body.attachment_id)
+            svc.select_attachment_for_run(ctx.db, run, ticket, body.attachment_id)
         resumed = svc.customer_message(ctx.db, run, body.message, ctx.p.user_id)["resumed"]
-        ticket_svc.comment(ctx.db, t, body.message, author_id=ctx.p.user_id)
-    reply = None
-    if not resumed:
-        reply = _quick_reply(ctx, run, body.message)
-    return {"ticket_id": str(t.id), "ticket_number": t.number, "run_id": str(run.id), "state": run.state, "reply": reply}
+        ticket_svc.comment(ctx.db, ticket, body.message, author_id=ctx.p.user_id)
+    answer = None if resumed else _quick_reply(ctx, run, body.message)
+    return {"ticket_id": str(ticket.id), "ticket_number": ticket.number, "run_id": str(run.id),
+            "state": run.state, "reply": answer, "ai_notice": (answer or {}).get("ai_notice"), "mode": "troubleshoot"}
 
 
 def _quick_reply(ctx: Ctx, run: AgentRun, message: str) -> dict | None:
-    """While a run is busy, answer the user's question from knowledge they are allowed to see (with citations)."""
-    hits = kb.search(ctx.db, ctx.org_id, message, role=ctx.p.role, limit=3)
-    ev = [{"id": f"E{i + 1}", "citation": h["citation"], "text": h["text"][:800]} for i, h in enumerate(hits)]
-    try:
-        out, mc = ai.call(ctx.db, ctx.org_id, "chat", system=svc.SYSTEM_BASE, run_id=run.id, output=S.ChatReply,
-                          messages=[{"role": "user", "content": f"<untrusted>\n{MARK} {json.dumps({'question': message, 'evidence': ev, 'state': run.state})}\n</untrusted>"}])
-    except AppError as e:
-        return {"content": f"(AI unavailable: {e.message})", "citations": []}
-    m = svc.add_message(ctx.db, run, "assistant", out.reply, data={"citations": [e for e in ev if e["id"] in out.cited_evidence_ids], "live_model": mc.live})
-    return {"id": str(m.id), "content": out.reply, "citations": m.data["citations"], "live_model": mc.live}
+    return svc.quick_reply(ctx.db, ctx.org_id, run, message, role=ctx.p.role)
 
 
 def _run_for(ctx: Ctx, run_id: uuid.UUID) -> AgentRun:

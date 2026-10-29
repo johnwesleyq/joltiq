@@ -166,3 +166,16 @@ def computer_turn(db: Session, org_id: uuid.UUID, *, system: str, messages: list
                 meter(db, org_id, "ai_usd", cost, f"mc-usd:{mc.id}", {"provider": prov})
             return t, cost
     raise Unavailable("All computer-use providers failed: " + "; ".join(errors[-4:]), code="ai_failed")
+
+
+def ai_status(db: Session, org_id: uuid.UUID) -> dict:
+    """Safe provider status for customer-facing Ask and Fix interfaces."""
+    chat = [candidate[0] for candidate in available_providers(db, org_id, "chat") if candidate[0] != "local_fixture"]
+    from .computer import SUPPORTED_PROVIDERS
+
+    computer = [candidate[0] for candidate in available_providers(db, org_id, "computer_use")
+                if candidate[0] in SUPPORTED_PROVIDERS and candidate[0] != "local_fixture"]
+    notice = None if chat else "No live AI model is connected. An admin can connect one under Admin → Models."
+    computer_notice = None if computer else "Fix it for me needs an approved computer-use model."
+    return {"live_chat": bool(chat), "chat_providers": chat, "live_computer_use": bool(computer),
+            "computer_use_providers": computer, "notice": notice, "computer_use_notice": computer_notice}

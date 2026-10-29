@@ -200,6 +200,9 @@ class DeviceSupportCreatedOut(BaseModel):
     ticket_number: int
     run_id: uuid.UUID
     state: str
+    ai_notice: str | None = None
+    reply: dict | None = None
+    setup_required: bool = False
 
 
 class DeviceSupportMessageOut(BaseModel):
@@ -207,6 +210,21 @@ class DeviceSupportMessageOut(BaseModel):
     ticket_number: int
     run_id: uuid.UUID
     state: str
+    reply: dict | None = None
+    ai_notice: str | None = None
+    setup_required: bool = False
+
+
+def _ask_reply(db: Session, device: Device, run: AgentRun) -> tuple[dict | None, str | None, bool]:
+    """Return an immediate chat reply without starting computer use."""
+    from ..services import ask_chat
+
+    try:
+        return ask_chat.reply(db, device.org_id, run), None, False
+    except ask_chat.AskNotConnected as exc:
+        return None, exc.message, True
+    except AppError as exc:
+        return {"id": None, "content": f"Sorry, the AI model did not answer: {exc.message}", "live_model": False}, None, False
 
 
 def _support_owner(db: Session, device: Device) -> User:
@@ -311,7 +329,11 @@ def create_device_support_request(body: DeviceSupportRequestIn, dd=Depends(devic
         device_id=device.id,
         actor_kind="device",
     )
-    run = agent_svc.start_run(db, device.org_id, ticket=ticket, started_by=owner.id, first_message=body.message)
+    from ..services import ask_chat
+
+    run = ask_chat.chat_run(db, device.org_id, ticket, owner.id)
+    agent_svc.add_message(db, run, "user", body.message, author_id=owner.id)
+    reply, notice, setup_required = _ask_reply(db, device, run)
     audit.record(
         db,
         org_id=device.org_id,
@@ -322,7 +344,8 @@ def create_device_support_request(body: DeviceSupportRequestIn, dd=Depends(devic
         resource_id=run.id,
         data={"ticket_id": str(ticket.id)},
     )
-    response = {"ticket_id": str(ticket.id), "ticket_number": ticket.number, "run_id": str(run.id), "state": run.state}
+    response = {"ticket_id": str(ticket.id), "ticket_number": ticket.number, "run_id": str(run.id), "state": run.state,
+                "reply": reply, "ai_notice": notice, "setup_required": setup_required}
     db.add(
         DeviceSupportRequest(
             org_id=device.org_id,
@@ -342,6 +365,7 @@ def continue_device_support_request(run_id: uuid.UUID, body: DeviceSupportMessag
     db, device = dd
     owner = _support_owner(db, device)
     run, ticket = _device_support_run(db, device, run_id)
+    reply, notice, setup_required = None, None, False
     direct_run = _active_direct_computer_use(db, device, run)
     if direct_run and direct_run.state == "waiting_customer" and direct_run.waiting_for:
         from ..services import computer_use
@@ -349,13 +373,14 @@ def continue_device_support_request(run_id: uuid.UUID, body: DeviceSupportMessag
         response = _native_computer_use_response(body, direct_run)
         computer_use.respond(db, direct_run, user_id=owner.id, via="device", **response)
         state = "AI_INVESTIGATING"
-    elif run.state in TERMINAL_RUN_STATES:
-        run = agent_svc.start_run(db, device.org_id, ticket=ticket, started_by=owner.id, first_message=body.message)
-        state = run.state
     else:
-        agent_svc.customer_message(db, run, body.message, owner.id)
+        from ..services import ask_chat
+
+        run = ask_chat.chat_run(db, device.org_id, ticket, owner.id)
+        agent_svc.add_message(db, run, "user", body.message, author_id=owner.id)
         ticket_svc.comment(db, ticket, body.message, author_id=owner.id, author_kind="device")
         state = run.state
+        reply, notice, setup_required = _ask_reply(db, device, run)
     audit.record(
         db,
         org_id=device.org_id,
@@ -366,7 +391,8 @@ def continue_device_support_request(run_id: uuid.UUID, body: DeviceSupportMessag
         resource_id=run.id,
         data={"ticket_id": str(ticket.id)},
     )
-    return {"ticket_id": ticket.id, "ticket_number": ticket.number, "run_id": run.id, "state": state}
+    return {"ticket_id": ticket.id, "ticket_number": ticket.number, "run_id": run.id, "state": state,
+            "reply": reply, "ai_notice": notice, "setup_required": setup_required}
 
 
 @agent_router.get("/support-requests/{run_id}")
@@ -392,17 +418,63 @@ def get_device_support_request(run_id: uuid.UUID, dd=Depends(device_auth)):
                     "at": direct_run.updated_at.isoformat(),
                 },
             ]
+    from ..services import ask_chat
+    from ..services.ai.router import ai_status
+
+    chat_mode = (run.context or {}).get("mode") == "chat" and run.paused_for == "chat"
     return {
+        "ai_notice": ask_chat.status(db, device.org_id)["notice"],
+        "computer_use": _computer_use_status(db, device, run, ai_status(db, device.org_id)),
         "id": detail["id"],
         "ticket_id": detail["ticket_id"],
-        "state": "AI_INVESTIGATING" if direct_run else detail["state"],
-        "paused_for": "customer" if direct_run and direct_run.state == "waiting_customer" else detail["paused_for"],
+        "state": "AI_INVESTIGATING" if direct_run else ("CHAT" if chat_mode else detail["state"]),
+        "paused_for": "customer" if direct_run and direct_run.state == "waiting_customer" else (None if chat_mode else detail["paused_for"]),
         "outcome_stage": detail["outcome_stage"],
         "messages": [
             {key: message[key] for key in ("id", "role", "content", "at")}
             for message in messages
         ],
     }
+
+
+CU_STATUS_TEXT = {
+    "waiting_session_consent": ("Waiting for you to allow JoltIQ on this PC", "Click Allow in the JoltIQ permission window."),
+    "waiting_local_consent": ("Waiting for you to allow Fix it for me on this PC", "Click Allow in the JoltIQ Fix window."),
+    "pending_approval": ("Waiting for the goal to be approved", "Approve the goal in JoltIQ or the web portal."),
+    "running": ("JoltIQ is working on this PC", "Watch the red banner; press STOP at any time."),
+    "waiting_device": ("JoltIQ is waiting for this PC", "Keep the JoltIQ companion running."),
+    "waiting_customer": ("JoltIQ needs your answer", "Answer the question shown in the conversation."),
+}
+
+
+def _computer_use_status(db: Session, device: Device, run: AgentRun, ai: dict) -> dict | None:
+    session = db.execute(
+        select(SupportSession).where(
+            SupportSession.run_id == run.id,
+            SupportSession.device_id == device.id,
+            SupportSession.request_details["direct_device_request"].as_boolean().is_(True),
+        ).order_by(SupportSession.created_at.desc())
+    ).scalars().first()
+    if not session:
+        return None
+    computer_run = db.execute(
+        select(ComputerUseRun).where(ComputerUseRun.session_id == session.id).order_by(ComputerUseRun.created_at.desc())
+    ).scalars().first()
+    if computer_run is not None:
+        key = computer_run.state
+    elif session.state == "active" and not (session.consent or {}).get("device_local_consent"):
+        key = "waiting_session_consent"
+    else:
+        key = session.state
+    if key in CU_STATUS_TEXT:
+        label, next_step = CU_STATUS_TEXT[key]
+        needs_local = key in ("waiting_session_consent", "waiting_local_consent")
+    else:
+        reason = (computer_run.summary if computer_run is not None else session.pause_reason) or key
+        label, next_step, needs_local = f"Stopped: {reason}"[:300], "Start Guide or Fix again to retry.", False
+    return {"state": key, "label": label, "next_step": next_step, "needs_local_approval": needs_local,
+            "session_id": str(session.id), "computer_use_run_id": str(computer_run.id) if computer_run else None,
+            "model_notice": ai["computer_use_notice"]}
 
 
 class DirectComputerUseIn(BaseModel):

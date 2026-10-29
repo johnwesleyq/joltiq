@@ -28,6 +28,29 @@ export async function api<T = unknown>(path: string, init: RequestInit & { json?
   return body as T;
 }
 
+/** POST and consume a Server-Sent Events response. */
+export async function apiStream(path: string, json: unknown, onEvent: (name: string, data: Record<string, unknown>) => void): Promise<void> {
+  const headers = new Headers({ "content-type": "application/json", accept: "text/event-stream" });
+  const token = csrf(); if (token) headers.set("x-csrf-token", token);
+  const response = await fetch(`/api/v1${path}`, { method: "POST", headers, credentials: "same-origin", body: JSON.stringify(json) });
+  if (!response.ok || !response.body) throw new ApiError(response.status, "http_error", `Request failed (${response.status})`);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let boundary: number;
+    while ((boundary = buffer.indexOf("\n\n")) >= 0) {
+      const chunk = buffer.slice(0, boundary); buffer = buffer.slice(boundary + 2);
+      const name = chunk.match(/^event: (.*)$/m)?.[1] ?? "message";
+      const raw = chunk.match(/^data: (.*)$/m)?.[1];
+      onEvent(name, raw ? JSON.parse(raw) : {});
+    }
+  }
+}
+
 export type Page<T> = { items: T[]; total: number; page: number; page_size: number; has_more: boolean };
 
 export type Me = {

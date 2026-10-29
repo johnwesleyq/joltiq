@@ -212,7 +212,9 @@ def build(provider: str, key: str | None, timeout: int = 60):
         return LocalFixtureProvider()
     if not key:
         return None
-    return {"openai": OpenAIProvider, "anthropic": AnthropicProvider, "gemini": GeminiProvider}[provider](key, timeout=timeout)
+    if provider == "openai":
+        return OpenAIProvider(key, base_url=get_settings().openai_base_url.rstrip("/"), timeout=timeout)
+    return {"anthropic": AnthropicProvider, "gemini": GeminiProvider}[provider](key, timeout=timeout)
 
 
 def test_connectivity(provider: str, key: str, model: str) -> tuple[bool, str]:

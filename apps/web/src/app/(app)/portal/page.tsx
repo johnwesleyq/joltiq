@@ -6,10 +6,11 @@ import { ApprovalCard } from "@/components/ApprovalCard";
 import type { Run, Session } from "@/components/types";
 import Core from "@/components/Core";
 import { ErrorNote } from "@/components/ui";
-import { api, STAFF } from "@/lib/api";
+import { api, apiStream, STAFF } from "@/lib/api";
 import { useApi, useMe } from "@/lib/hooks";
 
-type ChatOut = { ticket_id: string; run_id: string; ticket_number: number; reply: { content: string } | null };
+type Meta = { ticket_id: string; run_id: string; ticket_number: number };
+type AiStatus = { live_chat: boolean; notice: string | null; provider: string | null; model: string | null; can_connect: boolean };
 type Source = { citation?: string; url?: string };
 type Bubble = { id: string; who: "ai" | "you"; text: string; sources?: Source[] };
 
@@ -46,6 +47,12 @@ function Chat() {
   const first = (me.data?.user.name || "").split(" ")[0];
   const [ticketId, setTicketId] = useState<string | null>(params.get("t"));
   const [ticketNo, setTicketNo] = useState<number | null>(null);
+  const aiStatus = useApi<AiStatus>(["ai-status"], "/agents/ai-status");
+  const [chatNotice, setChatNotice] = useState<string | null>(null);
+  const aiNotice = chatNotice ?? aiStatus.data?.notice ?? null;
+  const [keyInput, setKeyInput] = useState("");
+  const [keyBusy, setKeyBusy] = useState(false);
+  const [typing, setTyping] = useState(false);
   const [msg, setMsg] = useState("");
   const [local, setLocal] = useState<Bubble[]>([]);
   const [busy, setBusy] = useState(false);
@@ -54,6 +61,7 @@ function Chat() {
   const voice = useSyncExternalStore(() => () => {}, () => "webkitSpeechRecognition" in window || "SpeechRecognition" in window, () => false);
   const recRef = useRef<{ stop: () => void } | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  const sequence = useRef(0);
 
   const runs = useApi<Run[]>(["run", ticketId ?? "none"], ticketId ? `/tickets/${ticketId}/runs` : null, { refetchInterval: 2000 });
   const sess = useApi<{ items: Session[] }>(["sessions", ticketId ?? "none"], ticketId ? `/sessions?ticket_id=${ticketId}` : null, { refetchInterval: 3000 });
@@ -66,7 +74,8 @@ function Chat() {
     sources: (((m as { data?: { citations?: Source[] } }).data?.citations) ?? []).filter((c) => c.citation),
   }));
   const serverYou = new Set(server.filter((b) => b.who === "you").map((b) => b.text.trim()));
-  const bubbles = [...server, ...local.filter((b) => !(b.who === "you" && serverYou.has(b.text.trim())))];
+  const serverAi = new Set(server.filter((b) => b.who === "ai").map((b) => b.text.trim()));
+  const bubbles = [...server, ...local.filter((b) => !(b.who === "you" ? serverYou : serverAi).has(b.text.trim()))];
   const working = !!run && !DONE.includes(run.state) && !run.paused_for;
   const pendingApprovals = run?.approvals.filter((a) => a.status === "PENDING") ?? [];
   const verified = run?.verifications.at(-1)?.status === "VERIFIED";
@@ -91,15 +100,38 @@ function Chat() {
   async function send(text: string) {
     const t = text.trim();
     if (t.length < 3 || busy) return;
-    setBusy(true); setErr(null); setMsg("");
-    setLocal((l) => [...l, { id: `you-${Date.now()}`, who: "you", text: t }]);
+    setBusy(true); setTyping(true); setErr(null); setMsg("");
+    sequence.current += 1;
+    const streamId = `ai-${sequence.current}`;
+    setLocal((l) => [...l, { id: `you-${sequence.current}`, who: "you", text: t }]);
     try {
-      const out = await api<ChatOut>("/agents/chat", { json: ticketId ? { message: t, ticket_id: ticketId } : { message: t } });
-      if (!ticketId) { setTicketId(out.ticket_id); router.replace(`/portal?t=${out.ticket_id}`); }
-      setTicketNo(out.ticket_number);
-      if (out.reply?.content) setLocal((l) => [...l, { id: `ai-${Date.now()}`, who: "ai", text: out.reply!.content }]);
+      await apiStream("/agents/chat/stream", ticketId ? { message: t, ticket_id: ticketId } : { message: t }, (name, data) => {
+        if (name === "meta") {
+          const meta = data as unknown as Meta;
+          if (!ticketId) { setTicketId(meta.ticket_id); router.replace(`/portal?t=${meta.ticket_id}`); }
+          setTicketNo(meta.ticket_number);
+        } else if (name === "delta") {
+          setTyping(false);
+          const piece = String(data.text ?? "");
+          setLocal((items) => items.some((item) => item.id === streamId)
+            ? items.map((item) => item.id === streamId ? { ...item, text: item.text + piece } : item)
+            : [...items, { id: streamId, who: "ai", text: piece }]);
+        } else if (name === "setup_required") setChatNotice(String(data.ai_notice ?? ""));
+        else if (name === "done") setChatNotice(null);
+        else if (name === "error") setErr(new Error(String(data.message ?? "The AI model did not answer.")));
+      });
     } catch (x) { setErr(x); }
-    setBusy(false);
+    setTyping(false); setBusy(false);
+  }
+
+  async function connectKey() {
+    if (keyInput.trim().length < 20) return;
+    setKeyBusy(true); setErr(null);
+    try {
+      await api("/admin/models/openai", { method: "PATCH", json: { api_key: keyInput.trim(), enabled: true, approved_for_tenant_data: true } });
+      setKeyInput(""); setChatNotice(null); await aiStatus.refetch?.();
+    } catch (error) { setErr(error); }
+    setKeyBusy(false);
   }
 
   function reset() { setTicketId(null); setTicketNo(null); setLocal([]); router.replace("/portal"); }
@@ -109,9 +141,19 @@ function Chat() {
     <header className="flex items-center gap-3 border-b border-line/60 pb-4">
       <Avatar thinking={working} />
       <div className="grow"><div className="font-display text-base font-semibold">{brand}</div>
-        <div className="flex items-center gap-1.5 text-sm text-slate"><span className="h-2 w-2 rounded-full bg-verify" />AI support technician · online</div></div>
+        <div className="flex items-center gap-1.5 text-sm text-slate"><span className={`h-2 w-2 rounded-full ${aiNotice ? "bg-amber-400" : "bg-verify"}`} />
+          {aiNotice ? "Not connected · Connect OpenAI to chat" : `AI technician${aiStatus.data?.model ? ` · ${aiStatus.data.model}` : ""}`}</div></div>
       {!empty && <button className="btn btn-ghost px-3 py-1 text-sm" onClick={reset}>New conversation</button>}
     </header>
+
+    {aiNotice && <div role="status" className="mt-4 rounded-xl border border-amber-400/60 bg-amber-400/10 px-4 py-3 text-sm">
+      <strong>Connect OpenAI to start chatting.</strong>{aiStatus.data?.can_connect ? <div className="mt-2 flex gap-2">
+        <input type="password" autoComplete="off" aria-label="OpenAI API key" placeholder="sk-…" value={keyInput}
+          onChange={(event) => setKeyInput(event.target.value)} className="grow rounded-lg border border-line bg-surface px-3 py-1.5" />
+        <button type="button" className="btn btn-primary" disabled={keyBusy || keyInput.trim().length < 20} onClick={connectKey}>
+          {keyBusy ? "Connecting…" : "Connect OpenAI"}</button>
+      </div> : <span> Ask your administrator to connect it under Admin → Models.</span>}
+    </div>}
 
     <div className="grow space-y-4 py-6" aria-live="polite">
       {empty && <div className="flex flex-col items-center pt-6 text-center">
@@ -129,8 +171,8 @@ function Chat() {
         ? <div key={b.id} className="flex gap-3"><Avatar /><div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-tl-sm bg-surface px-4 py-3 shadow-sm">{b.text}{b.sources && b.sources.length > 0 && <div className="mt-2 border-t border-black/10 pt-2 text-xs text-slate">Sources: {b.sources.map((c, i) => <span key={i}>{i > 0 && " · "}{c.url ? <a className="underline" href={c.url} target="_blank" rel="noopener noreferrer">{c.citation}</a> : c.citation}</span>)}</div>}</div></div>
         : <div key={b.id} className="flex justify-end"><div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-tr-sm bg-gradient-to-br from-plasma to-[#5b4fd6] px-4 py-3 text-white">{b.text}</div></div>)}
 
-      {(working || busy) && <div className="flex gap-3"><Avatar thinking /><div className="rounded-2xl rounded-tl-sm bg-surface px-4 py-3 text-slate shadow-sm">
-        <span className="pulse">{WORKING[run?.state ?? "NEW"] ?? "Working on it…"}</span></div></div>}
+      {(typing || (working && !busy)) && <div className="flex gap-3"><Avatar thinking /><div className="rounded-2xl rounded-tl-sm bg-surface px-4 py-3 text-slate shadow-sm">
+        <span className="pulse">{typing ? `${brand} is typing…` : WORKING[run?.state ?? "NEW"] ?? "Working on it…"}</span></div></div>}
 
       {run?.paused_for === "customer" && <p className="pl-12 text-sm text-slate">Answer in the box below.</p>}
 

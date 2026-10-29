@@ -57,6 +57,9 @@ class Settings(BaseSettings):
 
     # AI providers (keys may also be configured per tenant in admin UI, encrypted)
     openai_api_key: str | None = None
+    openai_base_url: str = "https://api.openai.com/v1"
+    # Development convenience only; production always ignores environment bootstrap.
+    dev_bootstrap_openai_from_env: bool = True
     anthropic_api_key: str | None = None
     gemini_api_key: str | None = None
     # Customer-controlled local model gateway. Deployment-owned so tenants cannot turn it into an SSRF target.

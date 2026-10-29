@@ -157,6 +157,27 @@ def customer_message(db: Session, run: AgentRun, content: str, author_id) -> dic
     return {"resumed": False}
 
 
+def quick_reply(db: Session, org_id: uuid.UUID, run: AgentRun, message: str, *, role: str) -> dict:
+    """Knowledge-grounded reply for an already-running durable troubleshoot flow."""
+    status = ai.ai_status(db, org_id)
+    hits = kb.search(db, org_id, message, role=role, limit=3)
+    evidence = [{"id": f"E{i + 1}", "citation": hit["citation"], "text": hit["text"][:800]} for i, hit in enumerate(hits)]
+    try:
+        output, call = ai.call(db, org_id, "chat", system=SYSTEM_BASE, run_id=run.id, output=S.ChatReply,
+                               messages=[{"role": "user", "content": f"<untrusted>\n{MARK} {json.dumps({'question': message, 'evidence': evidence, 'state': run.state})}\n</untrusted>"}])
+    except AppError as exc:
+        content = f"I can't answer right now: {exc.message}"
+        if status["notice"]:
+            content += f" {status['notice']}"
+        saved = add_message(db, run, "assistant", content, data={"ai_unavailable": True})
+        return {"id": str(saved.id), "content": content, "citations": [], "live_model": False, "ai_notice": status["notice"]}
+    reply = output.reply
+    saved = add_message(db, run, "assistant", reply,
+                        data={"citations": [item for item in evidence if item["id"] in output.cited_evidence_ids], "live_model": call.live})
+    return {"id": str(saved.id), "content": reply, "citations": saved.data["citations"], "live_model": call.live,
+            "ai_notice": status["notice"]}
+
+
 def resume(db: Session, run: AgentRun, reason: str, expect: tuple[str, ...] | None = None) -> bool:
     if run.state in TERMINAL_RUN_STATES:
         return False

@@ -188,7 +188,7 @@ internal sealed class TrayContext : ApplicationContext, IUserInteraction
             _supportConversation.Activate();
             return;
         }
-        var controller = new SupportConversationController(new AgentSupportRequestClient(_client));
+        var controller = new SupportConversationController(new AgentSupportRequestClient(_client), () => _runtime?.RetryLocalApproval());
         _supportConversation = new SupportConversationForm(controller, _client.State.ServerUrl, Environment.MachineName);
         _supportConversation.FormClosed += (_, _) => _supportConversation = null;
         _supportConversation.Show();

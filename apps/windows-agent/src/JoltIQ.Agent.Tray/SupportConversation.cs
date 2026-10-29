@@ -149,6 +149,8 @@ public sealed record SupportConversationState
     public string? ComputerUseStatus { get; init; }
     public bool IsStartingComputerUse { get; init; }
     public string? PausedFor { get; init; }
+    public string? AiNotice { get; init; }
+    public bool NeedsLocalApproval { get; init; }
 }
 
 public sealed class SupportConversationController
@@ -159,13 +161,15 @@ public sealed class SupportConversationController
     };
 
     private readonly ISupportRequestClient _client;
+    private readonly Action? _retryLocalApproval;
     private Guid? _pendingCreateId;
     public SupportConversationState State { get; private set; } = new();
     public event Action<SupportConversationState>? StateChanged;
 
-    public SupportConversationController(ISupportRequestClient client)
+    public SupportConversationController(ISupportRequestClient client, Action? retryLocalApproval = null)
     {
         _client = client;
+        _retryLocalApproval = retryLocalApproval;
         if (client.ActiveRequest is { } active)
         {
             var isTerminal = TerminalStates.Contains(active.State);
@@ -186,7 +190,7 @@ public sealed class SupportConversationController
     {
         var message = State.Draft.Trim();
         if (State.IsSending || State.IsAccessBlocked || message.Length == 0) return;
-        SetState(State with { IsSending = true, Status = "Sending…", Error = null });
+        SetState(State with { IsSending = true, Status = "JoltIQ is typing…", Error = null });
         try
         {
             SupportRequestResult result;
@@ -200,9 +204,15 @@ public sealed class SupportConversationController
             {
                 result = await _client.ContinueSupportRequestAsync(State.RunId, message, ct);
             }
+            var now = DateTimeOffset.UtcNow;
+            var shown = State.Messages.ToList();
+            shown.Add(new SupportConversationMessage($"local-you-{now.ToUnixTimeMilliseconds()}", "user", message, now));
+            if (result.Reply is { Content: { Length: > 0 } content } reply)
+                shown.Add(new SupportConversationMessage(reply.Id ?? $"local-ai-{now.ToUnixTimeMilliseconds()}", "assistant", content, now));
             SetState(State with
             {
                 Draft = "",
+                Messages = shown,
                 TicketId = result.TicketId,
                 TicketNumber = result.TicketNumber,
                 RunId = result.RunId,
@@ -210,6 +220,7 @@ public sealed class SupportConversationController
                 Error = null,
                 IsSending = false,
                 IsTerminal = TerminalStates.Contains(result.State),
+                AiNotice = result.SetupRequired ? result.AiNotice : (result.Reply is not null ? null : result.AiNotice ?? State.AiNotice),
             });
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -256,7 +267,11 @@ public sealed class SupportConversationController
                 ComputerUseSessionId = isTerminal ? null : State.ComputerUseSessionId,
                 ComputerUseRunId = isTerminal ? null : State.ComputerUseRunId,
                 ComputerUseMode = isTerminal ? null : State.ComputerUseMode,
-                ComputerUseStatus = isTerminal ? null : State.ComputerUseStatus,
+                AiNotice = detail.AiNotice,
+                NeedsLocalApproval = !isTerminal && (detail.ComputerUse?.NeedsLocalApproval ?? false),
+                ComputerUseStatus = isTerminal ? null : detail.ComputerUse is { Label: { } label } computerUse
+                    ? (string.IsNullOrWhiteSpace(computerUse.NextStep) ? label : $"{label} — {computerUse.NextStep}")
+                    : State.ComputerUseStatus,
                 Error = null,
             });
         }
@@ -314,6 +329,12 @@ public sealed class SupportConversationController
         }
     }
 
+    public async Task ApproveOnThisPcAsync(CancellationToken ct)
+    {
+        _retryLocalApproval?.Invoke();
+        await StartComputerUseAsync(State.ComputerUseMode ?? "fix", ct);
+    }
+
     private void SetState(SupportConversationState state)
     {
         State = state;
@@ -332,6 +353,9 @@ public sealed class SupportConversationForm : Form
     private readonly Button _guide = new() { Text = "Guide me", AutoSize = true, AccessibleName = "Have JoltIQ guide me" };
     private readonly Button _fix = new() { Text = "Fix it for me", AutoSize = true, AccessibleName = "Allow JoltIQ to fix it for me" };
     private readonly Label _computerUseStatus = new() { AutoSize = true, ForeColor = SystemColors.GrayText };
+    private readonly Button _approve = new() { Text = "Approve on this PC", AutoSize = true, BackColor = Color.Gold, Visible = false,
+        AccessibleName = "Show the JoltIQ permission window on this PC again" };
+    private readonly Label _aiNotice = new() { AutoSize = true, MaximumSize = new Size(640, 0), ForeColor = Color.DarkOrange, Visible = false };
     private readonly LinkLabel _portal = new() { Text = "Open ticket in web portal", AutoSize = true, Visible = false };
     private readonly System.Windows.Forms.Timer _poll = new() { Interval = 2000 };
     private readonly CancellationTokenSource _closed = new();
@@ -370,8 +394,8 @@ public sealed class SupportConversationForm : Form
             ForeColor = SystemColors.GrayText,
             AccessibleName = "Enrolled computer",
         };
-        var header = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 112, FlowDirection = FlowDirection.TopDown, Padding = new Padding(12, 10, 12, 4) };
-        header.Controls.AddRange([heading, computer, privacy]);
+        var header = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, FlowDirection = FlowDirection.TopDown, Padding = new Padding(12, 10, 12, 4) };
+        header.Controls.AddRange([heading, computer, privacy, _aiNotice]);
 
         var footer = new TableLayoutPanel { Dock = DockStyle.Bottom, Height = 205, ColumnCount = 2, RowCount = 4, Padding = new Padding(12, 4, 12, 10) };
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -390,7 +414,7 @@ public sealed class SupportConversationForm : Form
         footer.Controls.Add(_error, 0, 1);
         footer.SetColumnSpan(_error, 2);
         var helpModes = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
-        helpModes.Controls.AddRange([_guide, _fix, _computerUseStatus]);
+        helpModes.Controls.AddRange([_guide, _fix, _approve, _computerUseStatus]);
         footer.Controls.Add(helpModes, 0, 2);
         footer.SetColumnSpan(helpModes, 2);
         footer.Controls.Add(_compose, 0, 3);
@@ -404,6 +428,11 @@ public sealed class SupportConversationForm : Form
         _send.Click += async (_, _) => await SendAsync();
         _guide.Click += async (_, _) => await StartComputerUseAsync("guide");
         _fix.Click += async (_, _) => await StartComputerUseAsync("fix");
+        _approve.Click += async (_, _) =>
+        {
+            try { await _controller.ApproveOnThisPcAsync(_closed.Token); }
+            catch (OperationCanceledException) when (_closed.IsCancellationRequested) { }
+        };
         _compose.KeyDown += async (_, e) =>
         {
             if (e.KeyCode == Keys.Enter && e.Modifiers == Keys.Control)
@@ -460,9 +489,14 @@ public sealed class SupportConversationForm : Form
         _guide.Visible = state.RunId is not null;
         _fix.Visible = state.RunId is not null;
         _computerUseStatus.Text = state.ComputerUseStatus ?? "Choose how JoltIQ should help.";
+        _approve.Visible = state.NeedsLocalApproval;
+        _approve.Enabled = canStart;
+        _aiNotice.Text = state.AiNotice is { } notice ? "⚠ " + notice : "";
+        _aiNotice.Visible = state.AiNotice is not null;
         _transcript.Text = string.Join(
             Environment.NewLine + Environment.NewLine,
-            state.Messages.Select(message => $"{(message.Role == "assistant" ? "JoltIQ" : "You")}: {message.Content}"));
+            state.Messages.Select(message => $"{(message.Role == "assistant" ? "JoltIQ" : "You")}: {message.Content}"))
+            + (state.IsSending ? Environment.NewLine + Environment.NewLine + "JoltIQ is typing…" : "");
         var question = state.PausedFor == "customer"
             ? state.Messages.LastOrDefault(message => message.Role == "assistant")
             : null;
@@ -473,6 +507,8 @@ public sealed class SupportConversationForm : Form
     private static string FriendlyState(string state) => state.Replace('_', ' ').ToLowerInvariant() switch
     {
         "ready" => "Ready",
+        "chat" => "Chat",
+        "joltiq is typing…" => "JoltIQ is typing…",
         "not sent" => "Not sent",
         "access blocked" => "Access blocked",
         var value => char.ToUpperInvariant(value[0]) + value[1..],

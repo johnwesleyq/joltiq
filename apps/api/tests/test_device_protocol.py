@@ -115,7 +115,7 @@ def test_signed_device_support_request_links_identity_and_creates_no_control_art
     )
     assert created.status_code == 201, created.text
     result = created.json()
-    assert set(result) == {"ticket_id", "ticket_number", "run_id", "state"}
+    assert set(result) == {"ticket_id", "ticket_number", "run_id", "state", "reply", "ai_notice", "setup_required"}
 
     with session_scope(uuid.UUID(owner.org_id)) as db:
         device = db.get(Device, uuid.UUID(d.device_id))
@@ -152,7 +152,7 @@ def test_device_support_request_status_is_customer_safe_and_can_continue(app, ow
     status = d.get(f"/support-requests/{run_id}")
     assert status.status_code == 200, status.text
     body = status.json()
-    assert set(body) == {"id", "ticket_id", "state", "paused_for", "outcome_stage", "messages"}
+    assert set(body) == {"id", "ticket_id", "state", "paused_for", "outcome_stage", "messages", "ai_notice", "computer_use"}
     assert all(set(message) == {"id", "role", "content", "at"} for message in body["messages"])
     assert [message["content"] for message in body["messages"]] == [
         "Please help with Outlook.",

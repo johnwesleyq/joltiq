@@ -75,6 +75,15 @@ public sealed class AgentRuntime
     public IReadOnlyDictionary<string, LocalSession> Sessions => _sessions;
     public IReadOnlyList<StopTiming> StopEvents { get { lock (_stopEvents) return _stopEvents.ToArray(); } }
 
+    /// <summary>Forget inactive local sessions so a retried grant shows the consent prompt again.</summary>
+    public int RetryLocalApproval()
+    {
+        var removable = _sessions.Where(item => !item.Value.Active || item.Value.Expired).Select(item => item.Key).ToList();
+        foreach (var id in removable) _sessions.Remove(id);
+        L("info", "Asking again for permission on this PC; click Allow in the JoltIQ window that appears.");
+        return removable.Count;
+    }
+
     private void L(string level, string msg)
     {
         lock (Log) { Log.Add(new(DateTimeOffset.UtcNow, level, Redactor.Redact(msg))); if (Log.Count > 2000) Log.RemoveRange(0, 500); }

@@ -23,7 +23,22 @@ public sealed record SupportRequestResult(
     [property: JsonPropertyName("ticket_id")] string TicketId,
     [property: JsonPropertyName("ticket_number")] int TicketNumber,
     [property: JsonPropertyName("run_id")] string RunId,
-    [property: JsonPropertyName("state")] string State);
+    [property: JsonPropertyName("state")] string State,
+    [property: JsonPropertyName("ai_notice")] string? AiNotice = null,
+    [property: JsonPropertyName("reply")] SupportQuickReply? Reply = null,
+    [property: JsonPropertyName("setup_required")] bool SetupRequired = false);
+
+public sealed record SupportQuickReply(
+    [property: JsonPropertyName("id")] string? Id,
+    [property: JsonPropertyName("content")] string Content,
+    [property: JsonPropertyName("live_model")] bool LiveModel = false);
+
+public sealed record SupportComputerUseStatus(
+    [property: JsonPropertyName("state")] string? State,
+    [property: JsonPropertyName("label")] string? Label,
+    [property: JsonPropertyName("next_step")] string? NextStep,
+    [property: JsonPropertyName("needs_local_approval")] bool NeedsLocalApproval = false,
+    [property: JsonPropertyName("model_notice")] string? ModelNotice = null);
 
 public sealed record SupportConversationMessage(
     [property: JsonPropertyName("id")] string Id,
@@ -37,7 +52,9 @@ public sealed record SupportRequestDetail(
     [property: JsonPropertyName("state")] string State,
     [property: JsonPropertyName("paused_for")] string? PausedFor,
     [property: JsonPropertyName("outcome_stage")] string? OutcomeStage,
-    [property: JsonPropertyName("messages")] IReadOnlyList<SupportConversationMessage> Messages);
+    [property: JsonPropertyName("messages")] IReadOnlyList<SupportConversationMessage> Messages,
+    [property: JsonPropertyName("ai_notice")] string? AiNotice = null,
+    [property: JsonPropertyName("computer_use")] SupportComputerUseStatus? ComputerUse = null);
 
 public sealed record DirectComputerUseResult(
     [property: JsonPropertyName("session_id")] string SessionId,

@@ -82,7 +82,7 @@ def wait_state(c, run_id, predicate, timeout=60):
 
 
 def start_chat(customer):
-    r = customer.post("/api/v1/agents/chat", json={"message": "Our FieldDesk web app is not sending job notifications to our dispatch team. "
+    r = customer.post("/api/v1/agents/chat", json={"mode": "troubleshoot", "message": "Our FieldDesk web app is not sending job notifications to our dispatch team. "
                                                               "The dispatch email seems to be missing in the notification settings."})
     assert r.status_code == 201, r.text
     return r.json()
@@ -185,6 +185,7 @@ def start_upload_run(customer, ticket_id, attachment_id):
     response = customer.post(
         "/api/v1/agents/chat",
         json={
+            "mode": "troubleshoot",
             "ticket_id": ticket_id,
             "attachment_id": attachment_id,
             "message": "The customer supplied evidence is missing from our FieldDesk web app case. Please attach it.",
@@ -269,6 +270,7 @@ def test_browser_upload_wrong_ticket_attachment_is_refused(services, app, team):
     refused = customer.post(
         "/api/v1/agents/chat",
         json={
+            "mode": "troubleshoot",
             "ticket_id": run_ticket["id"],
             "attachment_id": attachment["id"],
             "message": "Attach this evidence to FieldDesk.",
@@ -388,7 +390,7 @@ def test_denied_approval_escalates_without_executing(services, app, team):
 
 def test_unfamiliar_issue_uses_research_and_never_executes_forum_commands(services, app, team):
     owner, tech, customer = team
-    r = customer.post("/api/v1/agents/chat", json={"message": "Outlook crashes every time I open a PDF attachment since this week. "
+    r = customer.post("/api/v1/agents/chat", json={"mode": "troubleshoot", "message": "Outlook crashes every time I open a PDF attachment since this week. "
                                                               "Version 2408, Microsoft 365. My name is Jane Contoso, jane@acmeplumbing.test"})
     run_id = r.json()["run_id"]
     run = wait_state(tech, run_id, lambda r: r["state"] in ("ESCALATED", "AWAITING_APPROVAL", "RESOLVED") or _awaiting_guidance(r))
@@ -408,7 +410,7 @@ def test_unfamiliar_issue_uses_research_and_never_executes_forum_commands(servic
     assert not run["approvals"] and not run["plans"]
     guidance = [m for m in run["messages"] if (m.get("data") or {}).get("kind") == "guidance"]
     assert guidance and "Ignore previous instructions" not in guidance[-1]["content"]
-    customer.post("/api/v1/agents/chat", json={"ticket_id": run["ticket_id"], "message": "Please get me a technician"})
+    customer.post("/api/v1/agents/chat", json={"mode": "troubleshoot", "ticket_id": run["ticket_id"], "message": "Please get me a technician"})
     run = wait_state(tech, run_id, lambda r: r["state"] == "ESCALATED")
     assert not run["approvals"]
 
@@ -420,7 +422,7 @@ def _awaiting_guidance(run):
 
 def test_general_it_question_gets_guidance_and_customer_confirms_fix(services, app, team):
     owner, tech, customer = team
-    r = customer.post("/api/v1/agents/chat", json={"message": "My laptop can't connect to the office Wi-Fi since this morning, "
+    r = customer.post("/api/v1/agents/chat", json={"mode": "troubleshoot", "message": "My laptop can't connect to the office Wi-Fi since this morning, "
                                                               "other people are connected fine and my phone works on it."})
     assert r.status_code == 201, r.text
     run_id, ticket_id = r.json()["run_id"], r.json()["ticket_id"]
@@ -429,7 +431,7 @@ def test_general_it_question_gets_guidance_and_customer_confirms_fix(services, a
     assert "1." in guide["content"] and "fixed" in guide["content"].lower()
     assert customer.get(f"/api/v1/tickets/{ticket_id}").json()["status"] == "AWAITING_CUSTOMER"
 
-    customer.post("/api/v1/agents/chat", json={"ticket_id": ticket_id, "message": "That worked, it's fixed now"})
+    customer.post("/api/v1/agents/chat", json={"mode": "troubleshoot", "ticket_id": ticket_id, "message": "That worked, it's fixed now"})
     run = wait_state(customer, run_id, lambda r: r["state"] in ("RESOLVED", "ESCALATED"))
     assert run["state"] == "RESOLVED"
     t = customer.get(f"/api/v1/tickets/{ticket_id}").json()
@@ -439,14 +441,14 @@ def test_general_it_question_gets_guidance_and_customer_confirms_fix(services, a
 
 def test_guidance_that_does_not_work_retries_then_escalates(services, app, team):
     owner, tech, customer = team
-    r = customer.post("/api/v1/agents/chat", json={"message": "Excel freezes for about a minute every time I save a large "
+    r = customer.post("/api/v1/agents/chat", json={"mode": "troubleshoot", "message": "Excel freezes for about a minute every time I save a large "
                                                               "workbook to the shared drive, started after last week's update."})
     run_id, ticket_id = r.json()["run_id"], r.json()["ticket_id"]
     wait_state(customer, run_id, _awaiting_guidance)
-    customer.post("/api/v1/agents/chat", json={"ticket_id": ticket_id, "message": "No luck, it still freezes after a restart"})
+    customer.post("/api/v1/agents/chat", json={"mode": "troubleshoot", "ticket_id": ticket_id, "message": "No luck, it still freezes after a restart"})
     run = wait_state(customer, run_id, lambda r: _awaiting_guidance(r) and len(
         [m for m in r["messages"] if (m.get("data") or {}).get("kind") == "guidance"]) == 2)
-    customer.post("/api/v1/agents/chat", json={"ticket_id": ticket_id, "message": "Still broken, didn't help"})
+    customer.post("/api/v1/agents/chat", json={"mode": "troubleshoot", "ticket_id": ticket_id, "message": "Still broken, didn't help"})
     run = wait_state(customer, run_id, lambda r: r["state"] == "ESCALATED")
     t = tech.get(f"/api/v1/tickets/{ticket_id}").json()
     assert t["status"] == "ESCALATED" and t["resolution_verified"] is False
@@ -504,12 +506,12 @@ def test_ordinary_request_gets_steps_even_when_model_wants_to_ask_questions(serv
     from joltiq.services.ai.fixture import LocalFixtureProvider
     monkeypatch.setattr(LocalFixtureProvider, "_Clarification", _questions_always)
     owner, tech, customer = team
-    r = customer.post("/api/v1/agents/chat", json={"message": "My laptop won't connect to the office Wi-Fi but my phone connects fine."})
+    r = customer.post("/api/v1/agents/chat", json={"mode": "troubleshoot", "message": "My laptop won't connect to the office Wi-Fi but my phone connects fine."})
     run_id, ticket_id = r.json()["run_id"], r.json()["ticket_id"]
     run = wait_state(customer, run_id, _awaiting_guidance)
     ai_msgs = [m for m in run["messages"] if m["role"] == "assistant"]
     assert not any("need a bit more detail" in m["content"] for m in ai_msgs), "should give steps, not interrogate"
-    customer.post("/api/v1/agents/chat", json={"ticket_id": ticket_id, "message": "that worked, it’s fixed"})
+    customer.post("/api/v1/agents/chat", json={"mode": "troubleshoot", "ticket_id": ticket_id, "message": "that worked, it’s fixed"})
     run = wait_state(customer, run_id, lambda r: r["state"] in ("RESOLVED", "ESCALATED"))
     assert run["state"] == "RESOLVED"
     assert customer.get(f"/api/v1/tickets/{ticket_id}").json()["resolution_verified"] is False
@@ -519,11 +521,11 @@ def test_fixed_reply_resolves_even_during_clarifying_questions(services, app, te
     from joltiq.services.ai.fixture import LocalFixtureProvider
     monkeypatch.setattr(LocalFixtureProvider, "_Clarification", _questions_always)
     owner, tech, customer = team
-    r = customer.post("/api/v1/agents/chat", json={"message": "Internet broken"})  # too vague -> one round of questions
+    r = customer.post("/api/v1/agents/chat", json={"mode": "troubleshoot", "message": "Internet broken"})  # too vague -> one round of questions
     run_id, ticket_id = r.json()["run_id"], r.json()["ticket_id"]
     run = wait_state(customer, run_id, lambda r: r["paused_for"] == "customer")
     assert any("need a bit more detail" in m["content"] for m in run["messages"] if m["role"] == "assistant")
-    customer.post("/api/v1/agents/chat", json={"ticket_id": ticket_id, "message": "Never mind, restarted the router and it works now"})
+    customer.post("/api/v1/agents/chat", json={"mode": "troubleshoot", "ticket_id": ticket_id, "message": "Never mind, restarted the router and it works now"})
     run = wait_state(customer, run_id, lambda r: r["state"] in ("RESOLVED", "ESCALATED"))
     assert run["state"] == "RESOLVED"
     assert customer.get(f"/api/v1/tickets/{ticket_id}").json()["status"] in ("RESOLVED", "OPEN")
