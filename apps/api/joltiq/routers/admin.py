@@ -316,6 +316,92 @@ def run_retention(ctx: Ctx = Depends(perm("settings.manage"))):
     return apply_retention(ctx.db, ctx.org_id)
 
 
+class ApprovalChannelsIn(BaseModel):
+    in_app: bool = True
+    email: bool = True
+    slack: bool = False
+    teams: bool = False
+
+
+class ApprovalNotificationsIn(BaseModel):
+    reminder_minutes: int = Field(ge=1, le=240)
+    email_rate_per_hour: int = Field(ge=1, le=500)
+    slack_rate_per_hour: int = Field(ge=1, le=1000)
+    teams_rate_per_hour: int = Field(ge=1, le=1000)
+    channels: dict[str, ApprovalChannelsIn]
+
+
+def _approval_notification_view(db: Session, org: Organization) -> dict:
+    from ..services.approval_notify import SETTINGS_DEFAULTS, _org_setting, channel_matrix
+
+    return {
+        "reminder_minutes": _org_setting(
+            db, org.id, "approval_reminder_minutes", SETTINGS_DEFAULTS["approval_reminder_minutes"]
+        ),
+        "email_rate_per_hour": _org_setting(
+            db, org.id, "approval_email_rate_per_hour", SETTINGS_DEFAULTS["approval_email_rate_per_hour"]
+        ),
+        "slack_rate_per_hour": _org_setting(
+            db, org.id, "slack_rate_per_hour", SETTINGS_DEFAULTS["slack_rate_per_hour"]
+        ),
+        "teams_rate_per_hour": _org_setting(
+            db, org.id, "teams_rate_per_hour", SETTINGS_DEFAULTS["teams_rate_per_hour"]
+        ),
+        "channels": channel_matrix(db, org.id),
+    }
+
+
+@router.get("/admin/approval-notifications")
+def get_approval_notifications(ctx: Ctx = Depends(perm("settings.manage"))):
+    return _approval_notification_view(ctx.db, ctx.db.get(Organization, ctx.org_id))
+
+
+@router.put("/admin/approval-notifications")
+def put_approval_notifications(
+    body: ApprovalNotificationsIn,
+    ctx: Ctx = Depends(perm("settings.manage")),
+):
+    from ..services.approval_notify import KIND_CATEGORY
+
+    if set(body.channels) != set(KIND_CATEGORY):
+        raise AppError(
+            f"channels must list exactly: {', '.join(KIND_CATEGORY)}",
+            code="validation_error",
+        )
+    requested = body.channels["approval_requested"]
+    if not (requested.in_app or requested.email):
+        raise AppError(
+            "Approval requests must reach approvers in-app or by email",
+            code="validation_error",
+        )
+    org = ctx.db.get(Organization, ctx.org_id)
+    before = _approval_notification_view(ctx.db, org)
+    org.settings = {
+        **(org.settings or {}),
+        "approval_reminder_minutes": body.reminder_minutes,
+        "approval_email_rate_per_hour": body.email_rate_per_hour,
+        "slack_rate_per_hour": body.slack_rate_per_hour,
+        "teams_rate_per_hour": body.teams_rate_per_hour,
+        "approval_channels": {
+            kind: channels.model_dump()
+            for kind, channels in body.channels.items()
+        },
+    }
+    ctx.db.flush()
+    after = _approval_notification_view(ctx.db, org)
+    audit.record(
+        ctx.db,
+        org_id=org.id,
+        actor_kind="user",
+        actor_id=ctx.p.user_id,
+        action="settings.approval_notifications_updated",
+        resource_type="organization",
+        resource_id=org.id,
+        data={"before": before, "after": after},
+    )
+    return after
+
+
 # ======================= Notifications =======================
 @router.get("/notifications")
 def list_notifications(ctx: Ctx = Depends(get_ctx), pp=Depends(page_params), unread: bool = False):

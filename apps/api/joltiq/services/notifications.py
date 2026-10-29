@@ -15,7 +15,19 @@ from .email import send_email
 from .jobs import enqueue, handler
 from .realtime import publish
 
-CATEGORIES = ["ticket", "approval", "session", "escalation", "resolution", "device", "security", "integration", "usage"]
+CATEGORIES = [
+    "ticket",
+    "approval",
+    "approval_reminder",
+    "approval_outcome",
+    "session",
+    "escalation",
+    "resolution",
+    "device",
+    "security",
+    "integration",
+    "usage",
+]
 
 
 def staff_user_ids(db: Session, org_id: uuid.UUID, roles: tuple[str, ...] = (Role.TECHNICIAN, Role.ADMIN, Role.ORG_OWNER)) -> list[uuid.UUID]:

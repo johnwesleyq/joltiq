@@ -14,8 +14,7 @@ from ..core.errors import Conflict, Forbidden, NotFound
 from ..models import Approval, Organization, PlanStep, Ticket, utcnow
 from ..models.enums import ApprovalStatus as A
 from ..security.crypto import canonical_json, hmac_sign, hmac_verify, sha256_hex
-from . import audit
-from .notifications import notify, staff_user_ids
+from . import approval_notify, audit
 from .realtime import publish
 
 
@@ -38,10 +37,7 @@ def request(db: Session, *, org_id, run_id, plan_id, step: PlanStep, plan_hash: 
                  requested_for_user_id=requested_for_user_id, expires_at=utcnow() + timedelta(minutes=ttl))
     db.add(a)
     db.flush()
-    targets = list(staff_user_ids(db, org_id)) if any(r != "customer" for r in approver_roles) else []
-    if "customer" in approver_roles and requested_for_user_id:
-        targets.append(requested_for_user_id)
-    notify(db, org_id, targets, "approval", f"Approval needed: {step.action} ({step.risk})", reason, f"/approvals/{a.id}")
+    approval_notify.on_requested(db, a)
     publish(db, org_id, "approval.requested", {"approval_id": str(a.id), "run_id": str(run_id) if run_id else None,
                                                "ticket_id": str(ticket_id) if ticket_id else None})
     audit.record(db, org_id=org_id, actor_kind="system", actor_id=None, action="approval.requested", resource_type="approval",
@@ -162,6 +158,7 @@ def decide(db: Session, approval_id: uuid.UUID, *, approve: bool, user_id, role:
     audit.record(db, org_id=a.org_id, actor_kind="user", actor_id=user_id, action=f"approval.{'approved' if approve else 'denied'}",
                  resource_type="approval", resource_id=a.id, data={"action": a.action, "risk": a.risk, "comment": comment[:200]})
     publish(db, a.org_id, "approval.decided", {"approval_id": str(a.id), "status": a.status, "run_id": str(a.run_id) if a.run_id else None})
+    approval_notify.on_outcome(db, a)
     return a
 
 
@@ -196,6 +193,7 @@ def expire_stale(db: Session) -> int:
     n = 0
     for a in db.execute(select(Approval).where(Approval.status == A.PENDING, Approval.expires_at < utcnow())).scalars():
         a.status = A.EXPIRED
+        approval_notify.on_outcome(db, a)
         n += 1
     return n
 
