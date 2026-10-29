@@ -201,3 +201,22 @@ def test_dispatch_unique_key_is_final_two_worker_race_barrier(app, owner):
         pass
     else:
         raise AssertionError("duplicate dispatch escaped the database race barrier")
+
+
+def test_approval_list_exposes_rollback_and_caller_decision_authority(app, owner):
+    from joltiq.db import session_scope
+    from joltiq.models import AgentPlan, Approval
+
+    approval_id, _ = _request(owner, roles=("auditor",))
+    with session_scope(uuid.UUID(owner.org_id)) as db:
+        approval = db.get(Approval, approval_id)
+        plan = db.get(AgentPlan, approval.plan_id)
+        plan.rollback_steps = [{"action": "browser.type", "params": {"text": {"$pre": "s0"}}}]
+        plan.rollback_availability = {"status": "AVAILABLE", "channel": "browser", "steps": 1}
+
+    response = owner.get("/api/v1/approvals", params={"status": "PENDING"})
+    assert response.status_code == 200, response.text
+    item = next(row for row in response.json()["items"] if row["id"] == str(approval_id))
+    assert item["can_decide"] is False
+    assert item["rollback"]["status"] == "AVAILABLE"
+    assert item["rollback"]["steps"] == 1

@@ -13,7 +13,8 @@ const CH: [keyof Ch, string][] = [["in_app", "In-app"], ["email", "Email"], ["sl
 
 export default function ApprovalNotifications() {
   const r = useApi<S>(["approval-notify"], "/admin/approval-notifications");
-  if (!r.data) return <Loading />;
+  if (r.isLoading) return <Loading />;
+  if (r.error || !r.data) return <div><PageHead title="Approval alerts" /><ErrorNote error={r.error} /></div>;
   return <Form data={r.data} />;
 }
 
@@ -46,7 +47,8 @@ function Form({ data }: { data: S }) {
       {!data.slack_connected && <p className="text-sm text-slate">Slack isn&apos;t connected, so the Slack switches have no effect until you <Link className="underline" href="/admin/integrations">connect Slack</Link>.</p>}
       {!data.teams_connected && <p className="text-sm text-slate">Teams isn&apos;t connected, so the Teams switches have no effect until you <Link className="underline" href="/admin/integrations">connect Teams</Link>.</p>}
       {local && <p role="alert" className="text-sm text-stop">{local}</p>}
-      <ErrorNote error={save.error} />\n      {save.isSuccess && <p className="text-sm text-verify">Approval alert settings saved</p>}
+      <ErrorNote error={save.error} />
+      {save.isSuccess && <p className="text-sm text-verify">Approval alert settings saved</p>}
       <button className="btn btn-primary">Save approval alerts</button>
     </form></div>;
 }

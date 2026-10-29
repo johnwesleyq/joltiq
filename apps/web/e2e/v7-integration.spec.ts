@@ -14,6 +14,9 @@ async function mockApp(page: Page, role = "org_owner") {
     } });
     if (path === "/api/v1/notifications") return route.fulfill({ json: { items: [], unread_count: 0 } });
     if (path === "/api/v1/events/stream") return route.fulfill({ contentType: "text/event-stream", body: "" });
+    if (path === "/api/v1/admin/approval-notifications" && role === "customer") return route.fulfill({ status: 403, json: {
+      error: { code: "forbidden", message: "You do not have permission to manage approval alerts" },
+    } });
     if (path === "/api/v1/admin/approval-notifications") return route.fulfill({ json: {
       reminder_minutes: 15, email_rate_per_hour: 20, slack_rate_per_hour: 30, teams_rate_per_hour: 30,
       channels: Object.fromEntries(["approval_requested", "approval_reminder", "approval_outcome"].map((kind) =>
@@ -78,4 +81,6 @@ test("customer navigation hides staff and admin routes", async ({ page }) => {
   await expect(page.getByRole("link", { name: "AI runs" })).toHaveCount(0);
   await expect(page.getByRole("link", { name: "Organization security" })).toHaveCount(0);
   await expect(page.getByRole("link", { name: "Approval alerts" })).toHaveCount(0);
+  await page.goto("/admin/approval-notifications");
+  await expect(page.getByRole("alert").filter({ hasText: "permission" })).toBeVisible();
 });

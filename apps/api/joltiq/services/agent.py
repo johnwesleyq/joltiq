@@ -2083,6 +2083,7 @@ def run_detail(db: Session, run: AgentRun, *, customer_view: bool) -> dict[str, 
         steps = db.execute(select(PlanStep).where(PlanStep.plan_id == p.id).order_by(PlanStep.ordinal)).scalars().all()
         plan_out.append({"id": str(p.id), "revision": p.revision, "summary": p.summary, "hypothesis": p.hypothesis, "risks": p.risks,
                          "status": p.status, "plan_hash": p.plan_hash, "citations": p.citations,
+                         "rollback_steps": p.rollback_steps or [], "rollback_availability": p.rollback_availability or {},
                          "procedure": {"article_id": str(p.procedure_article_id), "version": p.procedure_version, "hash": p.procedure_hash}
                          if p.procedure_article_id else None,
                          "steps": [{"id": str(s.id), "ordinal": s.ordinal, "action": s.action, "params": s.params, "risk": s.risk,
@@ -2114,11 +2115,14 @@ def run_detail(db: Session, run: AgentRun, *, customer_view: bool) -> dict[str, 
                        "plan_id": str(a.plan_id) if a.plan_id else None, "step_id": str(a.step_id) if a.step_id else None,
                        "effects": a.effects, "approver_roles": a.approver_roles, "expires_at": a.expires_at.isoformat(),
                        "decided_at": a.decided_at.isoformat() if a.decided_at else None} for a in apps],
-        "verifications": [{"id": str(v.id), "status": v.status, "details": v.details, "at": v.created_at.isoformat()} for v in vrs],
+        "verifications": [{"id": str(v.id), "status": v.status, "kind": v.kind,
+                           "evidence_hash": v.evidence_hash, "details": v.details,
+                           "at": v.created_at.isoformat()} for v in vrs],
         "model_calls": [{"task": c.task, "provider": c.provider, "model": c.model, "live": c.live, "ok": c.ok, "latency_ms": c.latency_ms,
                          "tokens": c.input_tokens + c.output_tokens, "cost_usd": round(c.cost_usd, 5)} for c in calls] if not customer_view else [],
         "uses_test_fixture_model": any(not c.live for c in calls),
         "article_id": ctx.get("article_id"), "research_query_id": ctx.get("research_query_id"),
+        "rollback": ctx.get("rollback"), "rollback_snapshot": ctx.get("rollback_pre", {}),
     }
     return out
 

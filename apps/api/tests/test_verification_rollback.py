@@ -148,7 +148,7 @@ def test_pre_state_is_captured_before_browser_mutation(owner, monkeypatch):
 
 def _sealed_verification(owner, monkeypatch, *, matched=True, critical=True):
     from joltiq.db import session_scope
-    from joltiq.models import ActionExecution, AgentRun, SupportSession
+    from joltiq.models import ActionExecution, AgentPlan, AgentRun, SupportSession
     from joltiq.services import browser_client
 
     monkeypatch.setattr(
@@ -168,6 +168,14 @@ def _sealed_verification(owner, monkeypatch, *, matched=True, critical=True):
         run = AgentRun(org_id=org_id, state="VERIFYING", correlation_id=uuid.uuid4().hex, context={})
         db.add_all([session, run])
         db.flush()
+        db.add(AgentPlan(
+            org_id=org_id,
+            run_id=run.id,
+            summary="Change with a safe inverse",
+            plan_hash="a" * 64,
+            rollback_steps=[{"action": "browser.type", "params": {"text": {"$pre": "s0"}}}],
+            rollback_availability={"status": "AVAILABLE", "channel": "browser", "steps": 1},
+        ))
         execution = ActionExecution(
             org_id=org_id,
             run_id=run.id,
@@ -188,14 +196,14 @@ def _sealed_verification(owner, monkeypatch, *, matched=True, critical=True):
             "params": {"url": "http://app.test/settings", "selector": "#email", "expect_value": "expected"},
         }]
         result = verification.start(db, execution, postconditions, {}, session, None)
-        return org_id, result.id, result.status, result.evidence_hash
+        return org_id, run.id, result.id, result.status, result.evidence_hash
 
 
 def test_evidence_tampering_is_detected(owner, monkeypatch):
     from joltiq.db import session_scope
     from joltiq.models import VerificationRun
 
-    org_id, verification_id, status, evidence_hash = _sealed_verification(owner, monkeypatch)
+    org_id, _, verification_id, status, evidence_hash = _sealed_verification(owner, monkeypatch)
     assert status == V.VERIFIED
     assert evidence_hash and len(evidence_hash) == 64
     with session_scope(org_id) as db:
@@ -223,5 +231,26 @@ def test_critical_check_aggregation_and_false_success_refusal(owner, monkeypatch
         [{"status": V.VERIFIED}, {"status": V.FAILED}]
     ) != V.VERIFIED
 
-    _, _, status, _ = _sealed_verification(owner, monkeypatch, matched=True, critical=False)
+    _, _, _, status, _ = _sealed_verification(owner, monkeypatch, matched=True, critical=False)
     assert status == V.UNKNOWN
+
+
+def test_run_api_exposes_rollback_and_recomputed_evidence(owner, monkeypatch):
+    _, run_id, verification_id, status, evidence_hash = _sealed_verification(owner, monkeypatch)
+
+    detail = owner.get(f"/api/v1/agents/runs/{run_id}")
+    assert detail.status_code == 200, detail.text
+    body = detail.json()
+    assert body["plans"][0]["rollback_availability"]["status"] == "AVAILABLE"
+    assert body["plans"][0]["rollback_steps"][0]["action"] == "browser.type"
+    verification_row = next(item for item in body["verifications"] if item["id"] == str(verification_id))
+    assert verification_row["kind"] == "verification"
+    assert verification_row["status"] == status
+    assert verification_row["evidence_hash"] == evidence_hash
+
+    evidence = owner.get(f"/api/v1/agents/runs/{run_id}/verification-evidence")
+    assert evidence.status_code == 200, evidence.text
+    item = evidence.json()["items"][0]
+    assert item["verification_id"] == str(verification_id)
+    assert item["ok"] is True
+    assert item["stored_hash"] == evidence_hash
