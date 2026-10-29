@@ -163,6 +163,25 @@ public sealed class SupportConversationTests
     }
 
     [Fact]
+    public async Task TerminalRefreshClearsStaleComputerUseApprovalStatus()
+    {
+        var client = new FakeSupportClient();
+        var controller = new SupportConversationController(client);
+        controller.SetDraft("Check free disk space");
+        await controller.SendAsync(default);
+        await controller.StartComputerUseAsync("fix", default);
+        Assert.Equal("Waiting for approval on this PC", controller.State.ComputerUseStatus);
+        client.Detail = Detail("RESOLVED", "C: has 370 GB free of 475 GB.");
+
+        await controller.RefreshAsync(default);
+
+        Assert.True(controller.State.IsTerminal);
+        Assert.Null(controller.State.ComputerUseStatus);
+        Assert.Null(controller.State.ComputerUseSessionId);
+        Assert.Null(controller.State.ComputerUseRunId);
+    }
+
+    [Fact]
     public async Task MessageAfterTerminalTicketCreatesANewRequest()
     {
         var client = new FakeSupportClient();

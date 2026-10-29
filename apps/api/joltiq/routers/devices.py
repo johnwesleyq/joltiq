@@ -14,12 +14,15 @@ from ..core.errors import AppError, Forbidden, NotFound
 from ..db import get_raw_session
 from ..deps import Ctx, get_ctx, perm
 from ..models import (
+    AgentPlan,
     AgentRun,
+    Approval,
     ComputerUseRun,
     Device,
     DeviceCommand,
     DeviceSupportRequest,
     Membership,
+    PlanStep,
     RemoteAccessSession,
     SupportSession,
     Ticket,
@@ -422,12 +425,101 @@ def _direct_computer_use_response(db: Session, session: SupportSession, mode: st
     }
 
 
+def _start_structured_read_only_plan(
+    db: Session,
+    device: Device,
+    owner: User,
+    run: AgentRun,
+    ticket: Ticket,
+) -> SupportSession | None:
+    """Use the already-reviewed typed plan when Fix is only a read-only device diagnostic.
+
+    A screen-driving model must not replace a concrete ``disk.usage`` (or other read-only)
+    plan with unrelated mouse/keyboard actions.  The normal signed command, local-consent,
+    policy, execution, and verification pipeline remains authoritative.
+    """
+    raw_plan_id = (run.context or {}).get("current_plan_id")
+    try:
+        plan_id = uuid.UUID(str(raw_plan_id))
+    except (TypeError, ValueError):
+        return None
+    plan = db.get(AgentPlan, plan_id)
+    if not plan or plan.run_id != run.id or plan.status not in ("proposed", "approved"):
+        return None
+    steps = db.execute(
+        select(PlanStep).where(PlanStep.plan_id == plan.id).order_by(PlanStep.ordinal)
+    ).scalars().all()
+    if not steps or any(
+        step.action not in ACTIONS
+        or ACTIONS[step.action].channel != "desktop"
+        or ACTIONS[step.action].risk != "READ_ONLY"
+        or step.risk != "READ_ONLY"
+        for step in steps
+    ):
+        return None
+    if db.execute(select(Approval.id).where(Approval.plan_id == plan.id)).first():
+        return None
+    session_ids = {str(step.target.get("session_id") or "") for step in steps}
+    if len(session_ids) != 1 or not next(iter(session_ids)):
+        return None
+    try:
+        session = db.get(SupportSession, uuid.UUID(next(iter(session_ids))))
+    except ValueError:
+        return None
+    if (
+        not session
+        or session.device_id != device.id
+        or session.ticket_id != ticket.id
+        or session.run_id != run.id
+        or session.state not in ("pending_consent", "active")
+    ):
+        return None
+    actions = sorted({step.action for step in steps})
+    session.request_details = {
+        **(session.request_details or {}),
+        "structured_plan": True,
+        "plan_id": str(plan.id),
+        "actions": actions,
+    }
+    if session.state == "pending_consent":
+        session_svc.give_consent(
+            db,
+            session,
+            user_id=owner.id,
+            customer_id=device.customer_id,
+            is_staff=True,
+            max_risk="READ_ONLY",
+            actions=actions,
+            recording=False,
+        )
+    audit.record(
+        db,
+        org_id=device.org_id,
+        actor_kind="device",
+        actor_id=device.id,
+        action="support_request.structured_plan_requested",
+        resource_type="support_session",
+        resource_id=session.id,
+        data={"ticket_id": str(ticket.id), "plan_id": str(plan.id), "actions": actions},
+    )
+    return session
+
+
 @agent_router.post("/support-requests/{run_id}/computer-use")
 def start_direct_computer_use(run_id: uuid.UUID, body: DirectComputerUseIn, dd=Depends(device_auth)):
     """Turn this device's own support request into Guide/Fix without weakening either native consent gate."""
     db, device = dd
     owner = _support_owner(db, device)
-    _run, ticket = _device_support_run(db, device, run_id)
+    run, ticket = _device_support_run(db, device, run_id)
+    # Prefer the exact typed read-only plan even if an older generic computer-use
+    # attempt left a still-active support session behind.
+    if body.mode == "fix":
+        structured_session = _start_structured_read_only_plan(db, device, owner, run, ticket)
+        if structured_session:
+            return JSONResponse(
+                _direct_computer_use_response(db, structured_session, body.mode),
+                status_code=200,
+            )
     active = db.execute(
         select(SupportSession).where(
             SupportSession.ticket_id == ticket.id,

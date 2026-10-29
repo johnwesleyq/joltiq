@@ -219,7 +219,11 @@ def terminate(db: Session, s: SupportSession, *, by_kind: str, user_id=None, rea
     if s.consented_at:
         from .billing import meter
 
-        minutes = max(1.0, (utcnow() - s.consented_at).total_seconds() / 60)
+        ended_at = utcnow()
+        # A stale session may not be terminated until long after its consent
+        # expired. Bill only the time the customer actually authorized.
+        billable_end = min(ended_at, s.expires_at) if s.expires_at else ended_at
+        minutes = max(1.0, (billable_end - s.consented_at).total_seconds() / 60)
         m = "browser_minutes" if s.kind == "browser" else ("desktop_minutes" if s.kind == "desktop" else None)
         if m:
             meter(db, s.org_id, m, round(minutes, 2), f"session-minutes:{s.id}")

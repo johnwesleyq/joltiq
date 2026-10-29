@@ -45,7 +45,8 @@ ACTIONS: dict[str, ActionSpec] = {a.id: a for a in [
                {"name_filter": {"type": "string", "pattern": PROCESS_NAME}}, "None (read-only)."),
     ActionSpec("app.info", "desktop", R.READ_ONLY, "Installed application name/version/publisher from Uninstall registry keys.",
                {"name_filter": {"type": "string", "max": 80, "required": True}}, "None (read-only)."),
-    ActionSpec("disk.usage", "desktop", R.READ_ONLY, "Free/used space per fixed drive.", {}, "None (read-only)."),
+    ActionSpec("disk.usage", "desktop", R.READ_ONLY, "Free/used space per fixed drive.", {}, "None (read-only).",
+               default_postconditions=({"type": "device_disk_usage_available"},)),
     ActionSpec("network.diagnostics", "desktop", R.READ_ONLY, "Adapters, DNS servers, default gateway reachability, DNS resolution of a host.",
                {"resolve_host": {"type": "string", "pattern": r"^[A-Za-z0-9.-]{1,253}$"}}, "None (read-only)."),
     ActionSpec("eventlog.query", "desktop", R.READ_ONLY, "Recent entries from Application/System logs, filtered by provider/level.",
@@ -221,6 +222,12 @@ def default_postconditions(action_id: str, params: dict[str, Any]) -> list[dict[
         p = {k: params.get(src) for k, src in pc.get("params_from", {}).items()}
         out.append({"type": pc["type"], "params": p, "description": f"default check for {action_id}"})
     return out
+
+
+def postconditions_for_step(action_id: str, params: dict[str, Any], proposed: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Use registry-owned checks when an action defines them; model checks cannot replace those bindings."""
+    defaults = default_postconditions(action_id, params)
+    return defaults if defaults else proposed
 
 
 def registry_for_prompt() -> list[dict[str, Any]]:

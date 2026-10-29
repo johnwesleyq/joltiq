@@ -244,6 +244,7 @@ public sealed class SupportConversationController
         try
         {
             var detail = await _client.GetSupportRequestAsync(State.RunId, ct);
+            var isTerminal = TerminalStates.Contains(detail.State);
             SetState(State with
             {
                 TicketId = detail.TicketId,
@@ -251,7 +252,11 @@ public sealed class SupportConversationController
                 Status = detail.State,
                 PausedFor = detail.PausedFor,
                 Messages = detail.Messages,
-                IsTerminal = TerminalStates.Contains(detail.State),
+                IsTerminal = isTerminal,
+                ComputerUseSessionId = isTerminal ? null : State.ComputerUseSessionId,
+                ComputerUseRunId = isTerminal ? null : State.ComputerUseRunId,
+                ComputerUseMode = isTerminal ? null : State.ComputerUseMode,
+                ComputerUseStatus = isTerminal ? null : State.ComputerUseStatus,
                 Error = null,
             });
         }

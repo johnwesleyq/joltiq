@@ -57,7 +57,7 @@ from . import tickets as ticket_svc
 from .actions.registry import (
     ACTIONS,
     ActionValidationError,
-    default_postconditions,
+    postconditions_for_step,
     registry_for_prompt,
     validate_params,
 )
@@ -510,6 +510,24 @@ def _words(t: str) -> set[str]:
     return {w for w in _re.findall(r"[a-z0-9]{3,}", t.lower()) if w not in _STOP}
 
 
+def _known_fix_relevant(query: str, candidate: str, resolution: str | None = None) -> bool:
+    """Require both the prior problem and its resolution to match the request.
+
+    Vector/FTS scores are useful for ranking, but generic support language such as
+    "exact", "test", or "JoltIQ" must not be enough to show a fix from another problem.
+    A matching saved goal is also insufficient when its recorded result describes an
+    unrelated action (for example, a typing fixture saved under a disk-check goal).
+    """
+    query_words = _words(query)
+    if not query_words:
+        return False
+    overlap = query_words & _words(candidate)
+    problem_matches = len(overlap) >= min(2, len(query_words)) and len(overlap) / len(query_words) >= 0.5
+    if not problem_matches or resolution is None:
+        return problem_matches
+    return bool(query_words & _words(resolution))
+
+
 def _share_known_fix(db, run, query: str) -> None:
     """Tell the person right away when the company has solved this before, using only knowledge THEY may see.
     Deterministic (no model needed), so it works even before an AI key is added."""
@@ -522,17 +540,17 @@ def _share_known_fix(db, run, query: str) -> None:
         m = db.execute(select(Membership.role).where(Membership.user_id == run.started_by, Membership.org_id == run.org_id)).scalar()
         role = m or "customer"
     hits = kb.search(db, run.org_id, query, role=role, limit=3)
-    qw = _words(query)
     for h in hits:
         body = h["text"]
-        if len(qw & _words(h.get("title", "") + " " + body)) < min(2, len(qw)):
-            continue
         fix = body.split("Resolution:", 1)[1].strip() if "Resolution:" in body else ""
         fix = fix.split("\n")[0].strip()
         if not fix or fix.startswith("(not recorded)"):
             if h.get("source_type") in ("imported_ticket", "ticket"):
                 continue
             fix = body.strip()[:500]
+        problem = h.get("title", "") + " " + body.split("Resolution:", 1)[0]
+        if not _known_fix_relevant(query, problem, fix):
+            continue
         _ctx_update(run, shared_known_fix=True)
         _say(db, run, f"I found a similar issue we've solved before ({h['title']}).\n\nWhat fixed it: {fix[:600]}\n\n"
                       "You can try that now. I'll keep working on it and let you know what I find.",
@@ -800,8 +818,8 @@ def h_plan(db, run):
         except ActionValidationError as e:
             _escalate(db, run, f"Model proposed an invalid action ({e}); refusing plan")
             return
-        pcs = [pc.model_dump() for pc in st.postconditions if pc.type in verification.SUPPORTED]
-        pcs += [d for d in default_postconditions(st.action, params) if d["type"] not in {p["type"] for p in pcs}]
+        proposed_pcs = [pc.model_dump() for pc in st.postconditions if pc.type in verification.SUPPORTED]
+        pcs = postconditions_for_step(st.action, params, proposed_pcs)
         steps.append({"action": st.action, "params": params, "rationale": st.rationale, "postconditions": pcs})
     if not any(s["postconditions"] for s in steps):
         _escalate(db, run, "Plan has no independently verifiable outcome; refusing to run unverifiable changes")

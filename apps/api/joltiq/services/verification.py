@@ -41,6 +41,7 @@ from . import browser_client
 from .realtime import publish
 
 DEVICE_CHECKS = {
+    "device_disk_usage_available": ("disk.usage", lambda p: {}),
     "device_service_running": ("service.status", lambda p: {"name": p["name"]}),
     "device_process_responding": ("process.list", lambda p: {"name_filter": p["process"]}),
     "device_config_equals": ("config.read", lambda p: _addin_key(p)),
@@ -211,6 +212,12 @@ def _queue_device_check(db, vr, device, session, t, p) -> dict:
 
 def evaluate_device_result(t: str, params: dict, result: dict) -> tuple[str, str]:
     r = result or {}
+    if t == "device_disk_usage_available":
+        drives = r.get("drives") or []
+        valid = [d for d in drives if d.get("name") and isinstance(d.get("free_gb"), (int, float))
+                 and isinstance(d.get("total_gb"), (int, float)) and 0 <= d["free_gb"] <= d["total_gb"]]
+        observed = ", ".join(f"{d['name']} {d['free_gb']} GB free of {d['total_gb']} GB" for d in valid)
+        return (V.VERIFIED if r.get("ok") is True and valid else V.FAILED), observed or "no valid fixed-drive usage returned"
     if t == "device_service_running":
         st = str(r.get("status", "")).lower()
         return (V.VERIFIED if st == "running" else V.FAILED), f"service status {r.get('status')}"

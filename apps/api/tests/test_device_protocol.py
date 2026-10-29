@@ -251,6 +251,101 @@ def test_device_support_request_can_start_fix_with_two_local_consent_gates(app, 
     assert conflicting.json()["mode"] == "fix"
 
 
+def test_fix_it_for_me_runs_an_existing_read_only_device_plan_instead_of_fixture_computer_use(app, owner):
+    """A typed read-only plan must stay on the signed action path, not become a generic screen-driving run."""
+    from sqlalchemy import func, select
+
+    from joltiq.db import session_scope
+    from joltiq.models import AgentPlan, AgentRun, ComputerUseRun, Device, PlanStep, SupportSession
+    from joltiq.models.enums import RunState
+    from joltiq.services import sessions
+
+    device = FakeDevice(app)
+    assert device.enroll(_code(owner), caps=["disk.usage", "screen.capture"]).status_code == 200
+    created = device.post(
+        "/support-requests",
+        {
+            "client_request_id": str(uuid.uuid4()),
+            "message": "Check this Windows PC's free disk space using a read-only diagnostic.",
+        },
+    ).json()
+
+    with session_scope(uuid.UUID(owner.org_id)) as db:
+        run = db.get(AgentRun, uuid.UUID(created["run_id"]))
+        enrolled = db.get(Device, uuid.UUID(device.device_id))
+        session = sessions.start(
+            db,
+            run.org_id,
+            kind="desktop",
+            owner_id=enrolled.owner_user_id,
+            ticket_id=run.ticket_id,
+            device_id=enrolled.id,
+            run_id=run.id,
+        )
+        plan = AgentPlan(
+            org_id=run.org_id,
+            run_id=run.id,
+            revision=1,
+            summary="Read the free disk space",
+            plan_hash="a" * 64,
+            status="proposed",
+        )
+        db.add(plan)
+        db.flush()
+        db.add(PlanStep(
+            org_id=run.org_id,
+            plan_id=plan.id,
+            ordinal=0,
+            action="disk.usage",
+            target={"session_id": str(session.id), "device_id": str(enrolled.id)},
+            params={},
+            rationale="Read free disk space",
+            risk="READ_ONLY",
+            postconditions=[{"type": "device_disk_usage_available"}],
+        ))
+        run.context = {**run.context, "current_plan_id": str(plan.id)}
+        run.state = RunState.AWAITING_APPROVAL
+        run.paused_for = "approval"
+        structured_session_id = str(session.id)
+        stale = sessions.start(
+            db,
+            run.org_id,
+            kind="desktop",
+            owner_id=enrolled.owner_user_id,
+            ticket_id=run.ticket_id,
+            device_id=enrolled.id,
+            run_id=run.id,
+            request_details={"direct_device_request": True, "computer_use_mode": "fix"},
+        )
+        sessions.give_consent(
+            db,
+            stale,
+            user_id=enrolled.owner_user_id,
+            customer_id=enrolled.customer_id,
+            is_staff=True,
+        )
+
+    started = device.post(f"/support-requests/{created['run_id']}/computer-use", {"mode": "fix"})
+    assert started.status_code == 200, started.text
+    assert started.json()["state"] == "waiting_session_consent"
+    assert started.json()["computer_use_run_id"] is None
+    assert started.json()["session_id"] == structured_session_id
+
+    envelopes = [json.loads(base64.b64decode(e["payload"])) for e in device.get("/poll").json()["envelopes"]]
+    session_begin = next(
+        e for e in envelopes
+        if e["type"] == "session.begin" and e["session_id"] == structured_session_id
+    )
+    assert session_begin["consent"]["max_risk"] == "READ_ONLY"
+    assert session_begin["consent"]["actions"] == ["disk.usage"]
+    assert not [e for e in envelopes if e["type"] == "computer_use.begin"]
+
+    with session_scope(uuid.UUID(owner.org_id)) as db:
+        assert db.scalar(select(func.count()).select_from(ComputerUseRun)) == 0
+        active = db.get(SupportSession, uuid.UUID(started.json()["session_id"]))
+        assert active.state == "active"
+
+
 def test_active_direct_computer_use_accepts_device_result_after_ticket_run_escalated(app, owner):
     from joltiq.db import session_scope
     from joltiq.models import AgentRun, DeviceCommand
