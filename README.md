@@ -2,7 +2,7 @@
 
 JoltIQ is an AI support technician for MSPs, B2B software support teams, internal IT and small service businesses. It takes in tickets, asks diagnostic questions, searches tenant knowledge, researches unfamiliar problems on the live web, and proposes a typed plan. It asks for consent and approval before acting, then operates an isolated browser or a Windows companion. It verifies each outcome **independently** before it resolves anything, and otherwise escalates to a person.
 
-> Status: development build. V7 rollback/verification, approval alerts, Slack/Teams mock connectors, support UI, and release gates are integrated at `b5b1f98`. This is ready for controlled local evaluation, not public deployment: Windows VM acceptance, signing, installer lifecycle evidence, live connector/provider acceptance, and external security review remain open. See `PROJECT_STATUS.md` and `docs/evidence/v7-integration-acceptance.md`.
+> Status: development build. V7 rollback/verification, approval alerts, Slack/Teams mock connectors, support UI, and release gates are integrated at `68da9a5`. This is ready for controlled local evaluation, not public deployment: Windows VM acceptance, signing, installer lifecycle evidence, live connector/provider acceptance, and external security review remain open. See `PROJECT_STATUS.md` and `docs/evidence/v7-integration-acceptance.md`.
 
 ## Repository
 

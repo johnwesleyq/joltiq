@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-10-29 · **Current environment:** macOS development host plus an enrolled physical Windows 11 64-bit PC used for earlier native build/test evidence. The Windows PC is not a disposable snapshot-reset VM. No Windows 10 VM, production signing certificate, or completed external security review is attached.
 
-**Overall:** V7 verification/rollback, lease fencing, approval alerts, Slack/Teams connectors, labelled development fixtures, and the integrated support UI are now merged through source commit `b5b1f98`. Local API, browser-worker, web build, browser, type, lint, dependency, and Compose-configuration gates pass. Windows-native general computer use remains **not approved for unrestricted customer deployment** until the disposable Windows 10/11 matrix, production signing, installer lifecycle evidence, and independent security review pass.
+**Overall:** V7 verification/rollback, lease fencing, approval alerts, Slack/Teams connectors, labelled development fixtures, and the integrated support UI are now merged through source commit `68da9a5`. Local API, browser-worker, web build, browser, type, lint, dependency, and Compose-configuration gates pass. Windows-native general computer use remains **not approved for unrestricted customer deployment** until the disposable Windows 10/11 matrix, production signing, installer lifecycle evidence, and independent security review pass.
 
 Status legend: **IT** = IMPLEMENTED_AND_TESTED · **INT** = IMPLEMENTED_NOT_TESTED · **P** = PARTIALLY_IMPLEMENTED · **B** = BLOCKED_EXTERNAL_DEPENDENCY · **NI** = NOT_IMPLEMENTED
 
@@ -76,10 +76,10 @@ V7 integration evidence is indexed in `docs/evidence/v7-integration-acceptance.m
 | `tests/performance/perf.py` (20 concurrent, 4 API workers, same 2-vCPU box as DB + browser + web) | ticket list p50 1.03 s / p95 1.33 s (~19 rps); search p50 1.03 s; create p95 3.0 s; browser session start p50 109 ms (Chromium launch 817 ms); crashed-worker job reclaimed in 0.5 s. Single-request latency is 10–15 ms, so these figures are CPU-bound by this sandbox. |
 | `pip-audit -r requirements.lock` | **No known vulnerabilities found** after upgrading `certifi` to `2026.10.19`. The post-upgrade container run also passed the complete API/browser suite: 152 passed, 2 expected skips. |
 | `npm audit --omit=dev --audit-level=high` | 0 vulnerabilities. |
-| Full API suite at `b5b1f98` | **287 passed, 3 skipped, 0 failed** (290 collected). Skips require live outside services. |
-| API static gates at `b5b1f98` | Ruff passed; MyPy passed across **88 source files**. |
-| Browser-worker suite at `b5b1f98` | **16 passed, 0 failed**. |
-| Web browser suite at `b5b1f98` | **9 passed, 7 explicitly skipped, 0 failed**. Skips are seeded production-shaped/Mailpit/Slack/Teams scenarios requiring a healthy external stack and credentials. |
+| Full API suite at `68da9a5` | **289 passed, 3 skipped, 0 failed** (292 collected). Skips require live outside services. |
+| API static gates at `68da9a5` | Ruff passed; MyPy passed across **88 source files**. |
+| Browser-worker suite at `68da9a5` | **16 passed, 0 failed**. |
+| Web browser suite at `68da9a5` | **9 passed, 7 explicitly skipped, 0 failed**. Skips are seeded production-shaped/Mailpit/Slack/Teams scenarios requiring a healthy external stack and credentials. |
 | General computer-use harness contract on physical Windows / PowerShell 5.1 | Passed; final packaging/build gate **15/15**. |
 | General computer-use behavioral acceptance | **0/35 required runs**; no disposable-VM aggregate exists. Physical-PC automated tests do not substitute. |
 | Outlook PDF behavioral acceptance | **0/59 required runs**; no disposable-VM aggregate exists. |

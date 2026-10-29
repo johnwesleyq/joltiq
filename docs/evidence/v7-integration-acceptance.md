@@ -1,8 +1,11 @@
 # V7 safe-integration acceptance evidence
 
-**Date:** 2026-10-29  
-**Canonical branch:** `feat/direct-device-help`  
-**Integrated source commit:** `b5b1f98` (UI checkpoint `3fb6ddc`)  
+**Date:** 2026-10-29
+
+**Canonical branch:** `feat/direct-device-help`
+
+**Integrated source commit:** `68da9a5` (UI checkpoint `3fb6ddc`)
+
 **Reference archive:** `/Users/johnw/Downloads/joltiq-git-v7.zip` was treated as untrusted reference material; current JoltIQ remained canonical.
 
 ## What is locally proven
@@ -19,7 +22,7 @@
 
 ```text
 cd apps/api && PYTHONPATH=. .venv/bin/pytest -q
-Result: 287 passed, 3 skipped, 0 failed (290 collected)
+Result: 289 passed, 3 skipped, 0 failed (292 collected)
 
 cd apps/api && .venv/bin/ruff check joltiq tests
 Result: All checks passed
