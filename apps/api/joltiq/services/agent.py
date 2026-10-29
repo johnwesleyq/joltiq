@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -1275,7 +1276,7 @@ def _start_auto_device_rollback(
     session: SupportSession,
     ticket: Ticket,
     raw_steps: list[dict[str, Any]],
-    source_approvals: list[Approval],
+    source_approvals: Sequence[Approval],
     source_command_id: str,
 ) -> AgentPlan:
     """Run only the inverse already bound into the original approved plan hash."""

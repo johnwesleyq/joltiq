@@ -360,7 +360,7 @@ def _approval_notification_view(db: Session, org: Organization) -> dict:
 
 @router.get("/admin/approval-notifications")
 def get_approval_notifications(ctx: Ctx = Depends(perm("settings.manage"))):
-    return _approval_notification_view(ctx.db, ctx.db.get(Organization, ctx.org_id))
+    return _approval_notification_view(ctx.db, _org(ctx))
 
 
 @router.put("/admin/approval-notifications")
@@ -381,7 +381,7 @@ def put_approval_notifications(
             "Approval requests must reach approvers in-app or by email",
             code="validation_error",
         )
-    org = ctx.db.get(Organization, ctx.org_id)
+    org = _org(ctx)
     before = _approval_notification_view(ctx.db, org)
     org.settings = {
         **(org.settings or {}),

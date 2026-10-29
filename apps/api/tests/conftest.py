@@ -24,10 +24,9 @@ os.environ.setdefault("JOLTIQ_REDIS_URL", "redis://localhost:6379/15")
 import pytest  # noqa: E402
 from alembic import command  # noqa: E402
 from alembic.config import Config  # noqa: E402
+from database_guard import require_test_database_urls  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import create_engine, select, text  # noqa: E402
-
-from database_guard import require_test_database_urls  # noqa: E402
 
 HERE = os.path.dirname(__file__)
 

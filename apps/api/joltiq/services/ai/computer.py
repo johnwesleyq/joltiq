@@ -238,10 +238,11 @@ class OpenAIComputer:
         if computer:
             block["toolset_name"] = "computer"
         usage = raw.get("usage") or {}
+        content: list[dict[str, Any]] = ([{"type": "text", "text": narration}, block] if narration else [block])
         return Turn(
             narration,
             [ToolUse(tool_id, name, params, computer)],
-            *([[{"type": "text", "text": narration}, block]] if narration else [[block]]),
+            content,
             int(usage.get("input_tokens") or 0),
             int(usage.get("output_tokens") or 0),
             str(raw.get("model") or model),
@@ -364,7 +365,7 @@ def _ollama_message(message: dict) -> dict:
             nested = _ollama_message({"role": "user", "content": block.get("content") or []})
             text.append(f"Result of {block.get('tool_use_id')}: {nested.get('content', '')}")
             images.extend(nested.get("images") or [])
-    out = {"role": "assistant" if message.get("role") == "assistant" else "user", "content": "\n".join(x for x in text if x)}
+    out: dict[str, Any] = {"role": "assistant" if message.get("role") == "assistant" else "user", "content": "\n".join(x for x in text if x)}
     if images:
         out["images"] = images
     return out
@@ -450,8 +451,9 @@ def build(provider: str, key: str | None, timeout: int = 120):
     if provider == "ollama":
         from ...config import get_settings
 
-        if get_settings().ollama_base_url:
-            return OllamaComputer(get_settings().ollama_base_url, timeout=timeout)
+        base_url = get_settings().ollama_base_url
+        if base_url:
+            return OllamaComputer(base_url, timeout=timeout)
     return None
 
 

@@ -280,7 +280,8 @@ def send_reminders(db: Session, now=None) -> int:
 def on_outcome(db: Session, approval: Approval) -> None:
     if approval.decision_comment and approval.decision_comment.startswith("inherited from approval"):
         return
-    verb = {A.APPROVED: "approved", A.DENIED: "denied", A.EXPIRED: "expired"}.get(approval.status)
+    verbs: dict[str, str] = {A.APPROVED: "approved", A.DENIED: "denied", A.EXPIRED: "expired"}
+    verb = verbs.get(approval.status)
     if not verb:
         return
     requester = requester_id(db, approval)

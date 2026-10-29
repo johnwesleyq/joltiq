@@ -10,8 +10,9 @@ const remoteFrameOrigin = (() => {
     return null;
   }
 })();
+const developmentScriptPolicy = process.env.NODE_ENV === "development" ? " 'unsafe-eval'" : "";
 const csp = [
-  "default-src 'self'", "script-src 'self' 'unsafe-inline'", "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "default-src 'self'", `script-src 'self' 'unsafe-inline'${developmentScriptPolicy}`, "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "font-src 'self' https://fonts.gstatic.com", "img-src 'self' data: blob: https:", "connect-src 'self'",
   `frame-src 'self'${remoteFrameOrigin ? ` ${remoteFrameOrigin}` : ""}`, "frame-ancestors 'none'",
   "base-uri 'self'", "form-action 'self'",

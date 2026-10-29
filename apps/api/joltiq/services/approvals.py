@@ -4,6 +4,7 @@ an APPROVED approval: only `decide()` from an authenticated human principal does
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, timedelta
 
 from sqlalchemy import select
@@ -62,7 +63,7 @@ def request_each_customer_step(db: Session, *, run, plan, steps: list[PlanStep],
 
 def inherit_for_rollback(
     db: Session,
-    source_approvals: list[Approval],
+    source_approvals: Sequence[Approval],
     step: PlanStep,
     plan_hash: str,
     *,

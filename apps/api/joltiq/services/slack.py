@@ -163,7 +163,7 @@ def render(a: Approval, kind: str) -> tuple[str, list[dict]]:
     exp = a.expires_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
     link = f"{get_settings().web_origin.rstrip('/')}/approvals/{a.id}"
     text = f"{title}: {a.action} ({a.risk}) — expires {exp}"
-    blocks = [{"type": "header", "text": {"type": "plain_text", "text": title[:150]}},
+    blocks: list[dict] = [{"type": "header", "text": {"type": "plain_text", "text": title[:150]}},
               {"type": "section", "fields": [{"type": "mrkdwn", "text": f"*Risk*\n{a.risk}"}, {"type": "mrkdwn", "text": f"*Action*\n{a.action}"[:2000]},
                                              {"type": "mrkdwn", "text": f"*{'Expires' if kind != 'approval_outcome' else 'Status'}*\n"
                                                                         f"{exp if kind != 'approval_outcome' else verb}"}]},
