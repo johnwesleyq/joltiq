@@ -99,9 +99,20 @@ def execute_step(db: Session, run: AgentRun, plan: AgentPlan, step: PlanStep) ->
                 return _done(db, run, ex, s, "failed", "no running browser session")
             if step.action == "browser.upload":
                 attachment = browser_uploads.load_for_execution(db, run, s, dec.params["attachment_id"])
-                res = browser_client.upload(s.worker_session_ref, dec.params["selector"], attachment)
+                res = browser_client.upload(
+                    s.worker_session_ref,
+                    dec.params["selector"],
+                    attachment,
+                    epoch=s.lease_epoch,
+                )
             else:
-                res = browser_client.act(s.worker_session_ref, step.action, dec.params, actor="ai")
+                res = browser_client.act(
+                    s.worker_session_ref,
+                    step.action,
+                    dec.params,
+                    actor="ai",
+                    epoch=s.lease_epoch,
+                )
             ex.result = {k: v for k, v in res.items() if k != "page"} | {"page": {"url": (res.get("page") or {}).get("url")}}
             if res.get("auth_required"):
                 sessions.awaiting_user_auth(db, s, res.get("kind") or "login")

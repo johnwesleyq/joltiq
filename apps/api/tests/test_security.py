@@ -209,7 +209,7 @@ def test_browser_upload_executes_only_after_approval_and_never_audits_contents(o
     fixture = _browser_upload_plan(owner)
     calls = []
 
-    def worker_upload(session_id, selector, upload):
+    def worker_upload(session_id, selector, upload, epoch=None):
         calls.append((session_id, selector, upload))
         return {
             "ok": True,
@@ -343,6 +343,43 @@ def test_single_control_lease_and_takeover_rules(owner):
 
             db.add(ControlLease(org_id=org, session_id=sid, holder_kind="ai", acquired_at=utcnow(), expires_at=utcnow()))
             db.flush()
+
+
+def test_browser_control_transfer_pushes_monotonic_epoch(owner, monkeypatch):
+    from joltiq.db import session_scope
+    from joltiq.models import SupportSession
+    from joltiq.services import browser_client, sessions
+
+    pushed = []
+    monkeypatch.setattr(
+        browser_client,
+        "set_lease",
+        lambda ref, epoch, controller: pushed.append((ref, epoch, controller)) or {"ok": True},
+    )
+    org = uuid.UUID(owner.org_id)
+    with session_scope(org) as db:
+        session = SupportSession(
+            org_id=org,
+            kind="browser",
+            state="active",
+            owner_id=_uid(owner),
+            allowed_domains=["example.com"],
+            consent={},
+            worker_session_ref="worker-epoch",
+        )
+        db.add(session)
+        db.flush()
+        sessions.acquire_lease(db, session, "ai")
+        first = session.lease_epoch
+        sessions.acquire_lease(db, session, "customer", _uid(owner), preempt=True)
+        second = session.lease_epoch
+        sessions.release_lease(db, session, "customer finished")
+        assert first > 0 and second > first and session.lease_epoch > second
+    assert pushed == [
+        ("worker-epoch", first, "ai"),
+        ("worker-epoch", second, "customer"),
+        ("worker-epoch", second + 1, "none"),
+    ]
 
 
 def test_policy_denies_after_emergency_stop_or_expired_consent(owner):

@@ -98,7 +98,15 @@ def start_session(client: TestClient, upload_site: str, page: str = "/upload") -
     return sid
 
 
-def upload(client: TestClient, sid: str, *, selector: str = "#file", content: bytes = MARKER, digest: str | None = None):
+def upload(
+    client: TestClient,
+    sid: str,
+    *,
+    selector: str = "#file",
+    content: bytes = MARKER,
+    digest: str | None = None,
+    epoch: int | None = None,
+):
     return client.post(
         f"/sessions/{sid}/upload",
         headers=AUTH,
@@ -107,6 +115,7 @@ def upload(client: TestClient, sid: str, *, selector: str = "#file", content: by
             "filename": "customer-note.txt",
             "content_type": "text/plain",
             "sha256": digest or hashlib.sha256(content).hexdigest(),
+            **({"epoch": str(epoch)} if epoch is not None else {}),
         },
         files={"file": ("transfer.bin", content, "application/octet-stream")},
     )
@@ -152,6 +161,21 @@ def test_upload_requires_worker_bearer_token(client, upload_site):
 
     assert response.status_code == 401
     assert receipt(client, sid) == "ready"
+
+
+def test_upload_is_bound_to_current_lease_epoch(client, upload_site):
+    sid = start_session(client, upload_site)
+    assert client.post(
+        f"/sessions/{sid}/lease",
+        headers=AUTH,
+        json={"epoch": 7, "controller": "ai"},
+    ).status_code == 200
+
+    assert upload(client, sid).status_code == 409
+    assert upload(client, sid, epoch=6).status_code == 409
+    assert upload(client, sid, epoch=8).status_code == 409
+    response = upload(client, sid, epoch=7)
+    assert response.status_code == 200 and response.json()["ok"] is True
 
 def test_navigation_surfaces_authentication_required_before_sensitive_action(client, upload_site):
     sid = uuid.uuid4().hex

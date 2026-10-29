@@ -126,6 +126,7 @@ def _end(db: Session, run: ComputerUseRun, state: str, summary: str, success: bo
     audit.record(db, org_id=run.org_id, actor_kind="ai", actor_id=None, action=f"computer_use.{state}", resource_type="computer_use_run",
                  resource_id=run.id, data={"summary": summary[:500], "success": success, "steps": run.step_count})
     _event(db, run, state, {"summary": summary[:500], "success": success})
+    _record_noninvertible_failure(db, run, state, success)
     if state == "completed" and success:
         try:
             remember(db, run, summary)
@@ -328,6 +329,80 @@ def recall(db: Session, run: ComputerUseRun) -> str:
             "and still ask approval before changes):\n\n" + "\n\n".join(parts))
 
 
+CHANGING_KINDS = {
+    "left_click", "double_click", "right_click", "middle_click", "triple_click",
+    "type", "key", "left_click_drag", "left_mouse_down", "left_mouse_up",
+    "open_url", "click", "drag", "keypress",
+}
+
+
+def rollback_marker(goal: str, mode: str) -> dict[str, Any]:
+    """Disclose screen automation's non-invertibility in the exact approved goal hash."""
+    from ..security.crypto import canonical_json, sha256_hex
+
+    if mode == "guide":
+        marker = {
+            "status": "NOT_NEEDED",
+            "channel": "computer_use",
+            "reason": "Guide mode only highlights; JoltIQ does not change anything.",
+        }
+    else:
+        marker = {
+            "status": "NO_ROLLBACK_AVAILABLE",
+            "channel": "computer_use",
+            "reason": (
+                "Screen clicks and typing have no server-verifiable inverse. "
+                "If the result cannot be verified, JoltIQ stops and escalates."
+            ),
+        }
+    marker["approval_hash"] = sha256_hex(canonical_json({
+        "v": "joltiq-cu-goal-v1",
+        "goal": goal,
+        "mode": mode,
+        "rollback": marker["status"],
+    }))
+    return marker
+
+
+def _record_noninvertible_failure(
+    db: Session,
+    run: ComputerUseRun,
+    state: str,
+    success: bool | None,
+) -> None:
+    if run.mode != "fix" or state != "failed" or success:
+        return
+    changed = db.execute(
+        select(ComputerUseStep.id).where(
+            ComputerUseStep.run_id == run.id,
+            ComputerUseStep.status == "done",
+            ComputerUseStep.kind.in_(CHANGING_KINDS),
+        )
+    ).first()
+    if not changed:
+        return
+    marker = dict(run.rollback or {})
+    marker["outcome"] = marker.get("status") or "NO_ROLLBACK_AVAILABLE"
+    marker["outcome_reason"] = (
+        "The run changed the computer and failed; no safe inverse exists, so it was escalated."
+    )
+    run.rollback = marker
+    audit.record(
+        db,
+        org_id=run.org_id,
+        actor_kind="system",
+        actor_id=None,
+        action="rollback.result",
+        resource_type="computer_use_run",
+        resource_id=run.id,
+        data={
+            "status": marker["outcome"],
+            "channel": "computer_use",
+            "reason": marker["outcome_reason"],
+        },
+    )
+
+
 # ---------------- public API ----------------
 def start(
     db: Session,
@@ -371,11 +446,14 @@ def start(
         transcript=[],
         queue=[],
         results=[],
+        rollback=rollback_marker(redact_text(goal).text, mode),
     )
     db.add(run)
     db.flush()
     audit.record(db, org_id=s.org_id, actor_kind="user", actor_id=user_id, action="computer_use.requested", resource_type="computer_use_run",
-                 resource_id=run.id, data={"goal": run.goal[:500], "session_id": str(s.id), "mode": run.mode})
+                 resource_id=run.id, data={"goal": run.goal[:500], "session_id": str(s.id), "mode": run.mode,
+                                           "rollback": run.rollback.get("status"),
+                                           "approval_hash": run.rollback.get("approval_hash")})
     if approved_by_customer:
         _request_local_consent(db, run, user_id)
     else:
@@ -389,6 +467,9 @@ def approve_goal(db: Session, run: ComputerUseRun, *, user_id, approved: bool) -
     if not approved:
         _end(db, run, "stopped", "The customer declined to let JoltIQ control the computer.", False)
         return run
+    expected_hash = rollback_marker(run.goal, run.mode)["approval_hash"]
+    if (run.rollback or {}).get("approval_hash") not in (None, expected_hash):
+        raise Conflict("The request changed after it was shown; review it again", code="approval_hash_mismatch")
     _request_local_consent(db, run, user_id)
     return run
 
@@ -403,7 +484,9 @@ def _request_local_consent(db: Session, run: ComputerUseRun, user_id) -> None:
         action="computer_use.goal_approved",
         resource_type="computer_use_run",
         resource_id=run.id,
-        data={"goal": run.goal[:500], "mode": run.mode},
+        data={"goal": run.goal[:500], "mode": run.mode,
+              "rollback": (run.rollback or {}).get("status"),
+              "approval_hash": (run.rollback or {}).get("approval_hash")},
     )
     _event(db, run, "local_consent_requested", {"goal": run.goal[:500], "mode": run.mode})
 
@@ -963,6 +1046,7 @@ def ser(run: ComputerUseRun, steps: list[ComputerUseStep] | None = None) -> dict
         "provider": run.provider, "model": run.model, "live_model": run.provider not in (None, "local_fixture"),
         "step_count": run.step_count, "max_steps": run.max_steps, "summary": run.summary, "success": run.success,
         "cost_usd": round(run.cost_usd or 0, 4), "has_screen": bool(run.last_screenshot_key), "display": run.display,
+        "rollback": {k: v for k, v in (run.rollback or {}).items() if k != "approval_hash"} or None,
         "created_at": run.created_at.isoformat() if run.created_at else None, "finished_at": run.finished_at.isoformat() if run.finished_at else None,
     }
     if steps is not None:

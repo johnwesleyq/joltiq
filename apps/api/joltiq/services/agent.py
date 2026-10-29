@@ -1168,6 +1168,46 @@ def offer_rollback(db: Session, run: AgentRun, source_execution: ActionExecution
     if source_execution.action != "office.addin.set_load_behavior":
         raise ValueError("the source command is not an add-in change")
 
+    if source_plan.rollback_steps:
+        authorized, reason, _ = rollback.authorized(db, run, source_plan)
+        resolved, snapshot, problem = (
+            rollback.resolve_device_steps(db, run, source_plan)
+            if authorized
+            else ([], {}, "")
+        )
+        if authorized and resolved and not problem:
+            source_approvals = db.execute(
+                select(Approval).where(Approval.plan_id == source_plan.id)
+            ).scalars().all()
+            _ctx_update(run, rollback_pre=snapshot)
+            return _start_auto_device_rollback(
+                db,
+                run,
+                source_execution,
+                source_plan,
+                session,
+                ticket,
+                resolved,
+                source_approvals,
+                str(source_command_id),
+            )
+        blocked_reason = reason or problem or "approved inverse could not be resolved"
+        _ctx_update(run, rollback_auto_blocked=blocked_reason[:500])
+        audit.record(
+            db,
+            org_id=run.org_id,
+            actor_kind="system",
+            actor_id=None,
+            action="rollback.blocked",
+            resource_type="agent_plan",
+            resource_id=source_plan.id,
+            data={
+                "status": rollback.ROLLBACK_BLOCKED,
+                "reason": blocked_reason[:500],
+                "fallback": "separate_approval",
+            },
+        )
+
     raw_steps: list[dict[str, Any]] = [
         {
             "action": "office.addin.restore_load_behavior",
@@ -1227,6 +1267,89 @@ def offer_rollback(db: Session, run: AgentRun, source_execution: ActionExecution
     return plan
 
 
+def _start_auto_device_rollback(
+    db: Session,
+    run: AgentRun,
+    source_execution: ActionExecution,
+    source_plan: AgentPlan,
+    session: SupportSession,
+    ticket: Ticket,
+    raw_steps: list[dict[str, Any]],
+    source_approvals: list[Approval],
+    source_command_id: str,
+) -> AgentPlan:
+    """Run only the inverse already bound into the original approved plan hash."""
+    plan_hash = sha256_hex(canonical_json({
+        "rollback_of": source_plan.plan_hash,
+        "steps": raw_steps,
+    }))
+    revision = len(db.execute(select(AgentPlan.id).where(AgentPlan.run_id == run.id)).all()) + 1
+    plan = AgentPlan(
+        org_id=run.org_id,
+        run_id=run.id,
+        revision=revision,
+        summary="Roll back the change approved with the original plan",
+        hypothesis="Independent verification failed after an approved change",
+        risks=["The application may need a safe restart"],
+        plan_hash=plan_hash,
+        status="approved",
+        citations=[],
+        procedure_article_id=source_plan.procedure_article_id,
+        procedure_version=source_plan.procedure_version,
+        procedure_hash=source_plan.procedure_hash,
+        rollback_availability={"status": "ROLLBACK_PLAN", "rollback_of": str(source_plan.id)},
+    )
+    db.add(plan)
+    db.flush()
+    target = {"session_id": str(session.id), "device_id": str(session.device_id)}
+    for ordinal, item in enumerate(raw_steps):
+        plan_step = PlanStep(
+            org_id=run.org_id,
+            plan_id=plan.id,
+            ordinal=ordinal,
+            action=item["action"],
+            target=target,
+            params=item["params"],
+            rationale=item["rationale"],
+            risk=ACTIONS[item["action"]].risk,
+            postconditions=item["postconditions"],
+        )
+        db.add(plan_step)
+        db.flush()
+        approvals.inherit_for_rollback(
+            db,
+            source_approvals,
+            plan_step,
+            plan_hash,
+            source_plan_hash=source_plan.plan_hash,
+            ticket_id=ticket.id,
+            session_id=session.id,
+        )
+    _ctx_update(
+        run,
+        current_plan_id=str(plan.id),
+        rollback_plan_id=str(plan.id),
+        rollback_auto=True,
+        rollback_source_execution_id=str(source_execution.id),
+        rollback_source_command_id=source_command_id,
+        verification_id=None,
+        rollback_restart_problem=None,
+        pre_state_captured=False,
+        rollback={"status": "IN_PROGRESS", "channel": "device", "auto": True},
+    )
+    sessions.event(
+        db,
+        session,
+        "rollback_started",
+        actor_kind="system",
+        data={"plan_id": str(plan.id), "auto": True},
+    )
+    transition(db, run, R.EXECUTING, "executing inverse approved with the plan hash")
+    run.paused_for = None
+    _set_ticket(db, run, TS.IN_PROGRESS, "rolling back an unverified change")
+    return plan
+
+
 def mark_partial_application(db: Session, run: AgentRun, failed_step: PlanStep,
                              completed_executions: list[ActionExecution], why: str = "") -> AgentPlan | None:
     """Record a confirmed change and offer recovery; never retry or silently undo it."""
@@ -1258,7 +1381,12 @@ def mark_partial_application(db: Session, run: AgentRun, failed_step: PlanStep,
 
     _say(db, run, PARTIAL_APPLICATION, data={"outcome_stage": str(run.outcome_stage)})
     if source is None:
-        _rollback_failed(db, run, "No authenticated local-journal command reference is available; the change has not been undone")
+        _rollback_failed(
+            db,
+            run,
+            "No authenticated local-journal command reference is available; the change has not been undone",
+            rollback.NO_ROLLBACK_AVAILABLE,
+        )
         return None
     try:
         return offer_rollback(db, run, source)
@@ -1267,9 +1395,41 @@ def mark_partial_application(db: Session, run: AgentRun, failed_step: PlanStep,
         return None
 
 
-def _rollback_failed(db: Session, run: AgentRun, reason: str) -> None:
+def _record_rollback_result(db: Session, run: AgentRun, status: str, reason: str) -> None:
+    partial = dict(run.context.get("partial_application") or {})
+    changed = [partial.get("source_execution_id")] if partial.get("source_execution_id") else []
+    restored = changed if status == rollback.ROLLED_BACK else []
+    result = {
+        "status": status,
+        "reason": reason[:500],
+        "channel": "device",
+        "auto": bool(run.context.get("rollback_auto")),
+        "changed": changed,
+        "restored": restored,
+        "unresolved": [item for item in changed if item not in restored],
+    }
+    _ctx_update(run, rollback=result)
+    audit.record(
+        db,
+        org_id=run.org_id,
+        actor_kind="system",
+        actor_id=None,
+        action="rollback.result",
+        resource_type="agent_run",
+        resource_id=run.id,
+        data=result,
+    )
+
+
+def _rollback_failed(
+    db: Session,
+    run: AgentRun,
+    reason: str,
+    code: str = rollback.ROLLBACK_FAILED,
+) -> None:
     from .customer_messages import ROLLBACK_CHANGE_REMAINS
 
+    _record_rollback_result(db, run, code, reason)
     partial = dict(run.context.get("partial_application") or {})
     partial["rollback_status"] = "FAILED"
     partial["rollback_reason"] = reason[:500]
@@ -1320,6 +1480,12 @@ def _begin_restore_verification(db: Session, run: AgentRun, reason: str) -> None
 def _finish_rollback(db: Session, run: AgentRun, *, restore_verified: bool, restart_completed: bool, reason: str = "") -> None:
     if not restore_verified:
         return _rollback_failed(db, run, reason or "independent registry read-back did not confirm the original setting")
+    _record_rollback_result(
+        db,
+        run,
+        rollback.ROLLED_BACK if restart_completed else rollback.ROLLBACK_UNVERIFIED,
+        reason or ("restore verified" if restart_completed else "restore verified; restart incomplete"),
+    )
     partial = dict(run.context.get("partial_application") or {})
     partial["rollback_status"] = "RESTORED" if restart_completed else "RESTORED_PENDING_RESTART"
     _ctx_update(run, partial_application=partial)
@@ -1364,13 +1530,13 @@ def h_awaiting_approval(db, run):
             if restore_done and a.action == "app.restart":
                 _begin_restore_verification(db, run, "The customer declined the safe Outlook restart")
             else:
-                _rollback_failed(db, run, f"Customer denied rollback step {a.action}")
+                _rollback_failed(db, run, f"Customer denied rollback step {a.action}", rollback.ROLLBACK_BLOCKED)
         else:
             _escalate(db, run, f"Approval denied for {a.action}{': ' + a.decision_comment if a.decision_comment else ''}")
         return
     if any(a.status in (ApprovalStatus.EXPIRED, ApprovalStatus.CANCELLED) for a in apps):
         if is_rollback:
-            _rollback_failed(db, run, "Rollback approval expired or was cancelled")
+            _rollback_failed(db, run, "Rollback approval expired or was cancelled", rollback.ROLLBACK_BLOCKED)
         else:
             _escalate(db, run, "Approval request expired or was cancelled")
         return
@@ -1379,7 +1545,7 @@ def h_awaiting_approval(db, run):
     s = db.get(SupportSession, uuid.UUID(sid)) if sid else None
     if s is not None and s.state == "terminated":
         if is_rollback:
-            _rollback_failed(db, run, "The desktop session ended before rollback could run")
+            _rollback_failed(db, run, "The desktop session ended before rollback could run", rollback.ROLLBACK_BLOCKED)
         else:
             _escalate(db, run, "Session was ended before the fix could run")
         return
@@ -1460,7 +1626,12 @@ def h_execute(db, run):
             if is_rollback and st.action == "app.restart":
                 _begin_restore_verification(db, run, f"Safe Outlook restart was blocked: {out.detail}")
             elif is_rollback:
-                _rollback_failed(db, run, f"Rollback action {st.action} was blocked: {out.detail}")
+                _rollback_failed(
+                    db,
+                    run,
+                    f"Rollback action {st.action} was blocked: {out.detail}",
+                    rollback.ROLLBACK_BLOCKED,
+                )
             else:
                 changed = completed_state_changes(db, run, plan)
                 if changed and _is_outlook_pdf_plan(db, plan):

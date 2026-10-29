@@ -64,6 +64,69 @@ def request_each_customer_step(db: Session, *, run, plan, steps: list[PlanStep],
     return created
 
 
+def inherit_for_rollback(
+    db: Session,
+    source_approvals: list[Approval],
+    step: PlanStep,
+    plan_hash: str,
+    *,
+    source_plan_hash: str,
+    ticket_id,
+    session_id,
+) -> Approval:
+    """Create a signed rollback grant only from an approved original plan that bound the inverse."""
+    source = [
+        approval
+        for approval in source_approvals
+        if approval.status == A.APPROVED
+        and approval.plan_hash == source_plan_hash
+        and approval.decided_by
+    ]
+    if not source:
+        raise Conflict("No valid original approval covers this rollback", code="rollback_not_approved")
+    origin = source[0]
+    approval = Approval(
+        org_id=step.org_id,
+        run_id=origin.run_id,
+        plan_id=step.plan_id,
+        step_id=step.id,
+        ticket_id=ticket_id,
+        session_id=session_id,
+        status=A.APPROVED,
+        risk=step.risk,
+        action=step.action,
+        target=step.target,
+        params=step.params,
+        reason=f"Rollback approved with plan {source_plan_hash[:12]}",
+        effects="Restores the pre-change state.",
+        plan_hash=plan_hash,
+        step_hash=step_hash(step.action, step.target, step.params, plan_hash),
+        approver_roles=origin.approver_roles,
+        requested_for_user_id=origin.requested_for_user_id,
+        decided_by=origin.decided_by,
+        decided_at=origin.decided_at,
+        expires_at=origin.expires_at,
+    )
+    approval.grant_signature = hmac_sign(get_settings().approval_signing_key, _grant_message(approval))
+    db.add(approval)
+    db.flush()
+    audit.record(
+        db,
+        org_id=step.org_id,
+        actor_kind="system",
+        actor_id=None,
+        action="approval.inherited_for_rollback",
+        resource_type="approval",
+        resource_id=approval.id,
+        data={
+            "source_approval_id": str(origin.id),
+            "source_plan_hash": source_plan_hash,
+            "action": step.action,
+        },
+    )
+    return approval
+
+
 def can_decide(db: Session, a: Approval, *, user_id, role: str | None, customer_id) -> tuple[bool, str]:
     if role is None:
         return False, "no role"

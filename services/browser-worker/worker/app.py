@@ -54,6 +54,28 @@ class Session:
         self.blocked_requests: list[str] = []
         self.log: list[dict[str, Any]] = []
         self.downloads: list[dict[str, Any]] = []
+        self.epoch = 0
+        self.controller = "none"
+
+
+def check_epoch(session: Session, epoch: int | None, actor: str) -> None:
+    """Fence revoked and not-yet-issued control leases."""
+    if epoch is None:
+        if session.epoch:
+            raise HTTPException(409, "lease epoch required")
+        return
+    if epoch != session.epoch:
+        relation = "stale" if epoch < session.epoch else "future"
+        session.log.append({
+            "t": time.time(), "actor": actor, "action": "refused", "ok": False,
+            "error": f"{relation} lease epoch",
+        })
+        raise HTTPException(409, f"{relation} lease epoch")
+    matches = actor == session.controller or (
+        actor == "human" and session.controller in ("customer", "technician")
+    )
+    if session.controller != "none" and not matches:
+        raise HTTPException(409, "controller does not hold the current lease")
 
 
 class State:
@@ -149,7 +171,17 @@ async def create(body: CreateIn):
             return await route.abort("blockedbyclient")
         return await route.continue_()
 
+    async def ws_guard(ws):
+        parsed = urlsplit(ws.url)
+        if parsed.scheme in ("ws", "wss") and domain_allowed(parsed.hostname or "", allowed):
+            ws.connect_to_server()
+            return
+        if "s" in sess_ref:
+            sess_ref["s"].blocked_requests.append(ws.url[:200])
+        await ws.close(code=1008, reason="blocked by JoltIQ allowlist")
+
     await ctx.route("**/*", guard)
+    await ctx.route_web_socket("**/*", ws_guard)
     page = await ctx.new_page()
     s = Session(body.session_id, ctx, page, allowed, dl)
     sess_ref["s"] = s
@@ -242,6 +274,7 @@ class ActionIn(BaseModel):
     action: str
     params: dict[str, Any] = {}
     actor: str = "ai"  # ai|customer|technician (lease already checked by the API)
+    epoch: int | None = None
 
 
 def _resolve(page: Page, selector: str):
@@ -277,9 +310,11 @@ async def upload(
     content_type: str = Form(..., max_length=120),
     sha256: str = Form(..., pattern=r"^[0-9a-fA-F]{64}$"),
     file: UploadFile = File(...),
+    epoch: int | None = Form(None),
 ):
     """Set one API-supplied attachment on one deterministic file input without accepting a host path."""
     s = get(sid)
+    check_epoch(s, epoch, "ai")
     if s.paused:
         return await _upload_refusal(s, "session paused")
     auth_state = await detect_auth(s.page)
@@ -320,6 +355,7 @@ async def upload(
 @app.post("/sessions/{sid}/actions", dependencies=[Depends(auth)])
 async def act(sid: str, body: ActionIn):
     s = get(sid)
+    check_epoch(s, body.epoch, body.actor)
     if s.paused and body.actor == "ai":
         raise HTTPException(409, "session paused")
     p = s.page
@@ -395,11 +431,32 @@ class InputIn(BaseModel):
     key: str | None = Field(default=None, max_length=40)
     dy: float | None = None
     protected: bool = False  # secret entry: never logged, never returned
+    epoch: int | None = None
+
+
+class LeaseIn(BaseModel):
+    epoch: int = Field(ge=1)
+    controller: str = Field(pattern="^(none|ai|customer|technician)$")
+
+
+@app.post("/sessions/{sid}/lease", dependencies=[Depends(auth)])
+async def set_lease(sid: str, body: LeaseIn):
+    session = get(sid)
+    if body.epoch <= session.epoch:
+        raise HTTPException(409, "lease epoch must increase")
+    session.epoch = body.epoch
+    session.controller = body.controller
+    session.log.append({
+        "t": time.time(), "actor": "system", "action": "lease", "ok": True,
+        "epoch": body.epoch, "controller": body.controller,
+    })
+    return {"ok": True, "epoch": session.epoch, "controller": session.controller}
 
 
 @app.post("/sessions/{sid}/input", dependencies=[Depends(auth)])
 async def human_input(sid: str, body: InputIn):
     s = get(sid)
+    check_epoch(s, body.epoch, "human")
     p = s.page
     if body.kind == "click" and body.x is not None and body.y is not None:
         await p.mouse.click(body.x, body.y)

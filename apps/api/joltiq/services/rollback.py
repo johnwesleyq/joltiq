@@ -261,6 +261,81 @@ def authorized(db: Session, run: AgentRun, plan: AgentPlan) -> tuple[bool, str, 
     return True, "", approvals[0]
 
 
+def resolve_device_steps(
+    db: Session,
+    run: AgentRun,
+    plan: AgentPlan,
+) -> tuple[list[dict], dict[str, Any], str]:
+    """Bind journal placeholders to completed authenticated commands, never to server values."""
+    from ..models import PlanStep
+
+    del run
+    by_ordinal = {
+        step.ordinal: step
+        for step in db.execute(select(PlanStep).where(PlanStep.plan_id == plan.id)).scalars()
+    }
+    resolved: list[dict] = []
+    snapshot: dict[str, Any] = {}
+    for rollback_step in plan.rollback_steps or []:
+        pre = rollback_step.get("pre") or {}
+        key = pre.get("key")
+        command_id = None
+        if key:
+            source_step = by_ordinal.get(int(key[1:]))
+            execution = (
+                db.execute(
+                    select(ActionExecution)
+                    .where(
+                        ActionExecution.step_id == source_step.id,
+                        ActionExecution.status == "succeeded",
+                    )
+                    .order_by(ActionExecution.created_at.desc())
+                ).scalars().first()
+                if source_step
+                else None
+            )
+            if execution is None:
+                continue
+            result = execution.result or {}
+            command_id = result.get("command_id")
+            device = result.get("device") or {}
+            if not command_id or (
+                device.get("source_command_id")
+                and device["source_command_id"] != command_id
+            ):
+                return [], snapshot, "the authenticated change command ID is unavailable or inconsistent"
+            enrolled_sid = device.get("enrolled_user_sid")
+            interactive_sid = device.get("interactive_user_sid")
+            if enrolled_sid and interactive_sid and enrolled_sid.casefold() != interactive_sid.casefold():
+                return [], snapshot, "the logged-in Windows user no longer matches the enrolled user"
+            if device.get("before") is None:
+                return [], snapshot, "the pre-change state was not read back by the device"
+            snapshot[key] = {
+                "command_id": command_id,
+                "before": device.get("before"),
+                "after": device.get("after"),
+            }
+
+        def bind(value: Any, bound_command_id: Any = command_id) -> Any:
+            if isinstance(value, dict) and "$cmd" in value:
+                return str(bound_command_id)
+            if isinstance(value, dict):
+                return {name: bind(item) for name, item in value.items()}
+            if isinstance(value, list):
+                return [bind(item) for item in value]
+            return value
+
+        resolved.append({
+            "action": rollback_step["action"],
+            "params": validate_params(rollback_step["action"], bind(rollback_step["params"])),
+            "rationale": rollback_step.get("rationale", ""),
+            "postconditions": bind(rollback_step.get("postconditions", [])),
+        })
+    if not any(step["action"] in DEVICE_INVERTIBLE.values() for step in resolved):
+        return [], snapshot, "no completed change needs restoring"
+    return resolved, snapshot, ""
+
+
 def execute_browser(
     db: Session,
     run: AgentRun,
@@ -356,6 +431,7 @@ def execute_browser(
                 step["action"],
                 params,
                 actor="ai",
+                epoch=session.lease_epoch,
             )
         except Exception as exc:  # noqa: BLE001
             response = {"ok": False, "error": str(exc)[:200]}
