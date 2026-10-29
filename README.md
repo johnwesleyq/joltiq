@@ -2,7 +2,7 @@
 
 JoltIQ is an AI support technician for MSPs, B2B software support teams, internal IT and small service businesses. It takes in tickets, asks diagnostic questions, searches tenant knowledge, researches unfamiliar problems on the live web, and proposes a typed plan. It asks for consent and approval before acting, then operates an isolated browser or a Windows companion. It verifies each outcome **independently** before it resolves anything, and otherwise escalates to a person.
 
-> Status: development build. The Windows Outlook PDF workflow is implemented but has **not** passed Windows CI, Windows VM acceptance, signing, or external review. It is not customer- or pilot-ready. See `PROJECT_STATUS.md` and `docs/operations/windows-outlook-pdf-evidence-index.md`.
+> Status: development build. V7 rollback/verification, approval alerts, Slack/Teams mock connectors, support UI, and release gates are integrated at `8fc3b9b`. This is ready for controlled local evaluation, not public deployment: Windows VM acceptance, signing, installer lifecycle evidence, live connector/provider acceptance, and external security review remain open. See `PROJECT_STATUS.md` and `docs/evidence/v7-integration-acceptance.md`.
 
 ## Repository
 
@@ -53,6 +53,7 @@ cd apps/web && npm ci && npm run build && JOLTIQ_API_URL=http://127.0.0.1:8000 n
 createdb joltiq_test && psql joltiq_test -c 'create extension vector'
 cd apps/api && PYTHONPATH=. .venv/bin/pytest         # unit, integration, security, browser E2E, desktop protocol E2E
 cd apps/web && npm run typecheck && npm run build
+cd apps/web && npm run test:config && npm audit --omit=dev --audit-level=high && npx playwright test
 python tests/e2e/web/ui_smoke.py http://127.0.0.1:3000 ./shots   # real-browser UI smoke (stack must be running)
 python tests/performance/perf.py                     # latency/concurrency against a running stack
 cd apps/windows-agent && dotnet run --project tests/JoltIQ.Agent.Core.SelfTest   # protocol/policy self-tests (any OS)
@@ -69,6 +70,7 @@ Browser/SaaS automation remains the next product priority after Windows internal
 - **AI models**: Admin → AI models. Add an OpenAI, Anthropic or Gemini key, tick *Approved to receive our ticket data*, then Test. Without a key, a clearly labelled deterministic **local test model** runs approved procedures only, and it is disabled in production.
 - **Web research**: set `JOLTIQ_BRAVE_SEARCH_API_KEY` or `JOLTIQ_TAVILY_API_KEY`.
 - **Freshdesk**: Admin → Integrations → Freshdesk (subdomain + API key) → Test → Sync now.
+- **Slack / Teams approval alerts**: connect and test the destination in Admin → Integrations, then explicitly enable its event toggles in Admin → Approval alerts. Local mock destinations are permanently labelled `MOCK` and are never live-workspace evidence.
 - **Email to ticket**: create an *Email to ticket* integration and point your mail relay at `POST /api/v1/integrations/email/inbound/{id}` with `Authorization: Bearer <secret>`.
 - **Stripe**: set test keys, create prices with lookup keys `joltiq_{starter|growth|scale}_{month|year}`, and point a webhook at `/api/v1/billing/webhook`.
 - **Windows companion**: Devices → *Add a Windows PC* gives a one-time code. Install the MSI, choose *Enroll this device* from the tray, and enter the code.

@@ -21,6 +21,7 @@ from ..models import (
     Organization,
     PolicyRule,
     SlaPolicy,
+    SsoRecoveryGrant,
     Subscription,
     TicketCounter,
     User,
@@ -48,25 +49,28 @@ def slugify(name: str) -> str:
 
 
 def create_session(db: Session, user: User, response: Response | None, *, org_id: uuid.UUID | None,
-                   ip: str | None = None, ua: str | None = None, mfa_passed: bool = False) -> tuple[str, AuthSession]:
+                   ip: str | None = None, ua: str | None = None, mfa_passed: bool = False,
+                   auth_method: str = "password", oidc_provider_id: uuid.UUID | None = None,
+                   ttl_seconds: int | None = None) -> tuple[str, AuthSession]:
     s = get_settings()
     token = new_token()
     now = utcnow()
     sess = AuthSession(
         user_id=user.id, token_hash=sha256_hex(token), csrf_token=new_token(24), active_org_id=org_id,
-        expires_at=now + timedelta(minutes=s.session_ttl_minutes), last_seen_at=now, ip=ip, user_agent=(ua or "")[:400],
-        mfa_passed=mfa_passed,
+        expires_at=now + (timedelta(seconds=ttl_seconds) if ttl_seconds else timedelta(minutes=s.session_ttl_minutes)),
+        last_seen_at=now, ip=ip, user_agent=(ua or "")[:400], mfa_passed=mfa_passed,
+        auth_method=auth_method, oidc_provider_id=oidc_provider_id,
     )
     db.add(sess)
     db.flush()
     if response is not None:
-        set_session_cookies(response, token, sess.csrf_token)
+        set_session_cookies(response, token, sess.csrf_token, max_age_seconds=ttl_seconds)
     return token, sess
 
 
-def set_session_cookies(response: Response, token: str, csrf: str) -> None:
+def set_session_cookies(response: Response, token: str, csrf: str, *, max_age_seconds: int | None = None) -> None:
     s = get_settings()
-    max_age = s.session_ttl_minutes * 60
+    max_age = max_age_seconds or s.session_ttl_minutes * 60
     response.set_cookie(SESSION_COOKIE, token, max_age=max_age, httponly=True, secure=s.cookie_secure,
                         samesite="lax", domain=s.cookie_domain, path="/")
     # CSRF cookie is readable by JS so the SPA can echo it in X-CSRF-Token.
@@ -197,3 +201,42 @@ def mfa_begin(user: User) -> tuple[str, str]:
 def default_org_for(db: Session, user: User) -> uuid.UUID | None:
     m = db.execute(select(Membership).where(Membership.user_id == user.id).order_by(Membership.created_at)).scalars().first()
     return m.org_id if m else None
+
+
+def issue_sso_recovery_grant(
+    db: Session, org_id: uuid.UUID, email: str, *, ttl_minutes: int = 15
+) -> str:
+    """Issue a single-use recovery token from a trusted host/CLI context."""
+
+    if ttl_minutes < 1 or ttl_minutes > 60:
+        raise ValueError("recovery TTL must be between 1 and 60 minutes")
+    user = db.execute(select(User).where(User.email == email.strip().lower())).scalar_one_or_none()
+    if not user or not user.email_verified_at:
+        raise ValueError("recovery requires an existing verified organization owner")
+    membership = db.execute(
+        select(Membership).where(Membership.org_id == org_id, Membership.user_id == user.id)
+    ).scalar_one_or_none()
+    if not membership or membership.role != Role.ORG_OWNER:
+        raise ValueError("recovery requires an existing verified organization owner")
+    if not user.mfa_enabled or not user.mfa_secret_enc:
+        raise ValueError("recovery requires MFA to be enabled for the organization owner")
+    raw = new_token(32)
+    grant = SsoRecoveryGrant(
+        org_id=org_id,
+        user_id=user.id,
+        token_hash=sha256_hex(raw),
+        expires_at=utcnow() + timedelta(minutes=ttl_minutes),
+    )
+    db.add(grant)
+    db.flush()
+    audit.record(
+        db,
+        org_id=org_id,
+        actor_kind="system",
+        actor_id=None,
+        action="oidc.recovery_issued",
+        resource_type="user",
+        resource_id=user.id,
+        data={"expires_at": grant.expires_at.isoformat()},
+    )
+    return raw

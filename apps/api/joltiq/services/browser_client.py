@@ -49,11 +49,35 @@ def close(session_id: str) -> None:
         pass
 
 
-def act(session_id: str, action: str, params: dict[str, Any], actor: str = "ai") -> dict[str, Any]:
-    return _req("POST", f"/sessions/{session_id}/actions", json={"action": action, "params": params, "actor": actor})
+def act(
+    session_id: str,
+    action: str,
+    params: dict[str, Any],
+    actor: str = "ai",
+    epoch: int | None = None,
+) -> dict[str, Any]:
+    return _req(
+        "POST",
+        f"/sessions/{session_id}/actions",
+        json={"action": action, "params": params, "actor": actor, "epoch": epoch},
+    )
 
 
-def upload(session_id: str, selector: str, attachment: BrowserUpload) -> dict[str, Any]:
+def set_lease(session_id: str, epoch: int, controller: str) -> dict[str, Any]:
+    return _req(
+        "POST",
+        f"/sessions/{session_id}/lease",
+        json={"epoch": epoch, "controller": controller},
+        timeout=5,
+    )
+
+
+def upload(
+    session_id: str,
+    selector: str,
+    attachment: BrowserUpload,
+    epoch: int | None = None,
+) -> dict[str, Any]:
     return _req(
         "POST",
         f"/sessions/{session_id}/upload",
@@ -62,6 +86,7 @@ def upload(session_id: str, selector: str, attachment: BrowserUpload) -> dict[st
             "filename": attachment.filename,
             "content_type": attachment.content_type,
             "sha256": attachment.sha256,
+            **({"epoch": str(epoch)} if epoch is not None else {}),
         },
         files={"file": ("attachment", attachment.data, "application/octet-stream")},
     )

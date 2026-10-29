@@ -22,7 +22,7 @@ export default function Knowledge() {
   const del = useAct((id: string) => api(`/knowledge/documents/${id}`, { method: "DELETE" }), [["kdocs"]]);
   const reindex = useAct((id: string) => api(`/knowledge/documents/${id}/reindex`, { method: "POST" }), [["kdocs"]]);
   const search = useAct(() => api<{ results: H[]; retrieval: { vector: string; semantic_model: boolean } }>("/knowledge/search", { json: { query: q } }));
-  return <div><PageHead title="Knowledge" />
+  return <div><PageHead title="Knowledge" description="Runbooks, past fixes, and articles the assistant can cite. Imported material informs suggestions but never bypasses approval policy." />
     <div className="mb-5 flex gap-2">{(["docs", "import", "articles", "search"] as const).map((t) => <button key={t} className={tab === t ? "btn btn-primary px-3 py-1" : "btn btn-ghost px-3 py-1"} onClick={() => setTab(t)}>{t === "docs" ? "Sources" : t === "import" ? "Import history" : t === "articles" ? "Articles" : "Test search"}</button>)}</div>
     <ErrorNote error={upload.error || addUrl.error || del.error || imp.error} />
     {tab === "import" && <div className="grid max-w-[900px] gap-5 md:grid-cols-2">

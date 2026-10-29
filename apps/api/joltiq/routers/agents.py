@@ -12,6 +12,7 @@ from sqlalchemy import select
 from ..core.errors import AppError, Forbidden, NotFound
 from ..deps import Ctx, get_ctx, perm
 from ..models import (
+    AgentPlan,
     AgentRun,
     Approval,
     ResearchFinding,
@@ -117,6 +118,20 @@ def get_run(run_id: uuid.UUID, ctx: Ctx = Depends(get_ctx)):
     return svc.run_detail(ctx.db, run, customer_view=not ctx.p.can("agents.read_all"))
 
 
+@router.get("/agents/runs/{run_id}/verification-evidence")
+def get_run_verification_evidence(run_id: uuid.UUID, ctx: Ctx = Depends(perm("agents.read_all"))):
+    from ..services import verification
+
+    run = _run_for(ctx, run_id)
+    rows = ctx.db.execute(
+        select(VerificationRun)
+        .where(VerificationRun.run_id == run.id)
+        .order_by(VerificationRun.created_at)
+    ).scalars().all()
+    items = [verification.recompute_evidence(ctx.db, row) for row in rows]
+    return {"ok": all(item["ok"] for item in items) if items else None, "items": items}
+
+
 @router.get("/tickets/{ticket_id}/runs")
 def runs_for_ticket(ticket_id: uuid.UUID, ctx: Ctx = Depends(get_ctx)):
     ticket_for(ctx, ticket_id)
@@ -184,14 +199,21 @@ def escalate(run_id: uuid.UUID, body: EscalateIn, ctx: Ctx = Depends(get_ctx)):
 
 
 # ---------------- Approvals ----------------
-def ser_approval(a: Approval) -> dict:
+def ser_approval(a: Approval, ctx: Ctx) -> dict:
+    plan = ctx.db.get(AgentPlan, a.plan_id) if a.plan_id else None
+    rollback = dict(plan.rollback_availability or {}) if plan else {}
+    if plan:
+        rollback.setdefault("steps", len(plan.rollback_steps or []))
+    can_decide = approval_svc.can_decide(
+        ctx.db, a, user_id=ctx.p.user_id, role=ctx.p.role, customer_id=ctx.p.customer_id
+    )[0]
     return {"id": str(a.id), "status": a.status, "risk": a.risk, "action": a.action, "target": a.target, "params": a.params,
             "plan_id": str(a.plan_id) if a.plan_id else None, "step_id": str(a.step_id) if a.step_id else None,
             "reason": a.reason, "effects": a.effects, "approver_roles": a.approver_roles, "run_id": str(a.run_id) if a.run_id else None,
             "ticket_id": str(a.ticket_id) if a.ticket_id else None, "session_id": str(a.session_id) if a.session_id else None,
             "expires_at": a.expires_at.isoformat(), "decided_at": a.decided_at.isoformat() if a.decided_at else None,
             "decided_by": str(a.decided_by) if a.decided_by else None, "decision_comment": a.decision_comment,
-            "created_at": a.created_at.isoformat()}
+            "created_at": a.created_at.isoformat(), "rollback": rollback or None, "can_decide": can_decide}
 
 
 @router.get("/approvals")
@@ -204,7 +226,7 @@ def list_approvals(ctx: Ctx = Depends(get_ctx), pp=Depends(page_params), status:
         stmt = stmt.where(Approval.ticket_id.in_(mine), Approval.approver_roles.contains(["customer"]))
     else:
         ctx.p.require("tickets.read_all")
-    return paginate(ctx.db, stmt, pp, ser_approval)
+    return paginate(ctx.db, stmt, pp, lambda approval: ser_approval(approval, ctx))
 
 
 @router.get("/approvals/{aid}")
@@ -214,9 +236,7 @@ def get_approval(aid: uuid.UUID, ctx: Ctx = Depends(get_ctx)):
         raise NotFound("Approval not found")
     if a.ticket_id:
         ticket_for(ctx, a.ticket_id)
-    out = ser_approval(a)
-    out["can_decide"] = approval_svc.can_decide(ctx.db, a, user_id=ctx.p.user_id, role=ctx.p.role, customer_id=ctx.p.customer_id)[0]
-    return out
+    return ser_approval(a, ctx)
 
 
 class DecideIn(BaseModel):
@@ -237,7 +257,7 @@ def decide(aid: uuid.UUID, body: DecideIn, ctx: Ctx = Depends(perm("approvals.de
         run = ctx.db.get(AgentRun, a.run_id)
         if run:
             svc.resume(ctx.db, run, f"approval {a.status}", ("approval",))
-    return ser_approval(a)
+    return ser_approval(a, ctx)
 
 
 # ---------------- Research ----------------

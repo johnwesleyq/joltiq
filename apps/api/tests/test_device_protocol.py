@@ -266,7 +266,7 @@ def test_active_direct_computer_use_accepts_device_result_after_ticket_run_escal
         {"client_request_id": str(uuid.uuid4()), "message": "Please uninstall Adobe Acrobat DC."},
     ).json()
 
-    started = device.post(f"/support-requests/{created['run_id']}/computer-use", {"mode": "fix"}).json()
+    device.post(f"/support-requests/{created['run_id']}/computer-use", {"mode": "fix"}).json()
     pending = [json.loads(base64.b64decode(e["payload"])) for e in device.get("/poll").json()["envelopes"]]
     session_begin = next(e for e in pending if e["type"] == "session.begin")
     assert device.post(
@@ -315,7 +315,7 @@ def test_active_direct_computer_use_owns_native_conversation_after_ticket_agent_
         {"client_request_id": str(uuid.uuid4()), "message": "Please uninstall Adobe Acrobat DC."},
     ).json()
 
-    started = device.post(f"/support-requests/{created['run_id']}/computer-use", {"mode": "fix"}).json()
+    device.post(f"/support-requests/{created['run_id']}/computer-use", {"mode": "fix"}).json()
     pending = [json.loads(base64.b64decode(e["payload"])) for e in device.get("/poll").json()["envelopes"]]
     session_begin = next(e for e in pending if e["type"] == "session.begin")
     assert device.post(

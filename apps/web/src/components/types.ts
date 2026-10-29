@@ -15,7 +15,9 @@ export type Evidence = { id: string; kind: "internal" | "external"; citation: st
 export type Step = { id: string; ordinal: number; action: string; params: Record<string, unknown>; risk: string; rationale: string;
   postconditions: { type: string; description?: string; params?: Record<string, unknown> }[]; status: string; target: Record<string, string | null> };
 export type Approval = { id: string; status: string; action: string; risk: string; params: Record<string, unknown>; reason: string; effects: string;
-  approver_roles: string[]; expires_at: string; decided_at: string | null; ticket_id?: string | null; run_id?: string | null; can_decide?: boolean };
+  approver_roles: string[]; expires_at: string; created_at?: string; decided_at: string | null; decision_comment?: string | null;
+  ticket_id?: string | null; run_id?: string | null; can_decide?: boolean;
+  rollback?: { status: string; reason?: string; steps?: string[] } };
 export type Run = {
   id: string; ticket_id: string; state: string; paused_for: string | null; retries: number; max_retries: number; cost_usd: number;
   outcome_summary: string | null; outcome_stage: string; symptom_response: { result: string; at: string } | null;

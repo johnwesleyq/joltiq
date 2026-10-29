@@ -17,7 +17,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -50,7 +52,7 @@ from ..models.enums import TERMINAL_RUN_STATES, ApprovalStatus, OutcomeStage
 from ..models.enums import RunState as R
 from ..models.enums import TicketStatus as TS
 from ..security.crypto import canonical_json, sha256_hex
-from . import approvals, audit, devices, policy, research, sessions, verification
+from . import approvals, audit, devices, policy, research, rollback, sessions, verification
 from . import tickets as ticket_svc
 from .actions.registry import (
     ACTIONS,
@@ -144,6 +146,10 @@ def add_message(db: Session, run: AgentRun, role: str, content: str, *, author_i
 
 def customer_message(db: Session, run: AgentRun, content: str, author_id) -> dict:
     add_message(db, run, "user", content, author_id=author_id)
+    if run.paused_for == "customer" and is_resolution_message(content):
+        # At any point where JoltIQ is waiting on the customer, "fixed"/"that worked" ends the run as customer-confirmed.
+        _customer_confirmed_resolution(db, run)
+        return {"resumed": False, "resolved": True}
     if run.paused_for == "customer":
         run.paused_for = None
         enqueue(db, "agent.advance", {"run_id": str(run.id)}, org_id=run.org_id)
@@ -317,14 +323,25 @@ def h_intake(db, run):
 
 def h_collect(db, run):
     ctx = run.context
+    # Ask first only when the request is too vague to act on. Ordinary "guide me" requests go straight to steps; the
+    # clarification model is not called at all, so an unnecessary or malformed question list cannot block guidance.
+    said = " ".join(m["content"] for m in _transcript(db, run) if m["role"] == "user") or _customer_text(db, run)
+    too_vague = len(said.split()) < MIN_WORDS_TO_SKIP_CLARIFY
+    if not too_vague:
+        _ctx_update(run, known_facts={}, open_questions=[])
+        if _maybe_collect_diagnostics(db, run):
+            return
+        transition(db, run, R.SEARCHING_INTERNAL, "context sufficient")
+        return
+
     clar = _model(db, run, "clarify", S.Clarification, {"text": _customer_text(db, run), "rounds": ctx.get("clarify_rounds", 0)})
-    if not clar.sufficient and clar.questions and ctx.get("clarify_rounds", 0) < 2:
+    if not clar.sufficient and clar.questions and ctx.get("clarify_rounds", 0) < 1 and too_vague:
         _ctx_update(run, clarify_rounds=ctx.get("clarify_rounds", 0) + 1)
         _say(db, run, "To diagnose this I need a bit more detail:\n" + "\n".join(f"• {q}" for q in clar.questions[:5]))
         _set_ticket(db, run, TS.AWAITING_CUSTOMER, "waiting for diagnostic answers")
         run.paused_for = "customer"
         return
-    _ctx_update(run, known_facts=clar.known_facts)
+    _ctx_update(run, known_facts=clar.known_facts, open_questions=clar.questions[:5])
     if _maybe_collect_diagnostics(db, run):
         return
     transition(db, run, R.SEARCHING_INTERNAL, "context sufficient")
@@ -789,10 +806,7 @@ def h_plan(db, run):
     if not any(s["postconditions"] for s in steps):
         _escalate(db, run, "Plan has no independently verifiable outcome; refusing to run unverifiable changes")
         return
-    phash = sha256_hex(canonical_json([{"a": s["action"], "p": s["params"]} for s in steps]))
-    if phash in ctx.get("failed_plan_hashes", []):
-        _escalate(db, run, "Loop detected: the same plan already failed verification")
-        return
+    base_hash = sha256_hex(canonical_json([{"a": s["action"], "p": s["params"]} for s in steps]))
     # Ensure the needed live session exists and is consented.
     needs_browser = any(ACTIONS[s["action"]].channel == "browser" for s in steps)
     needs_desktop = any(ACTIONS[s["action"]].channel == "desktop" for s in steps)
@@ -817,16 +831,24 @@ def h_plan(db, run):
                                      device_id=dev_id, run_id=run.id)
         session.run_id = run.id
         device = db.get(Device, session.device_id)
+    channel = "browser" if needs_browser else "desktop" if needs_desktop else "internal"
+    rollback_steps, rollback_availability = rollback.derive(steps, channel)
+    phash = rollback.plan_hash(base_hash, rollback_steps, rollback_availability)
+    if phash in ctx.get("failed_plan_hashes", []):
+        _escalate(db, run, "Loop detected: the same plan already failed verification")
+        return
     # Persist plan (supersede previous one & its approvals).
     for old in db.execute(select(AgentPlan).where(AgentPlan.run_id == run.id, AgentPlan.status.in_(["proposed", "approved"]))).scalars():
         old.status = "superseded"
         approvals.supersede_for_plan(db, old.id)
     rev = len(db.execute(select(AgentPlan.id).where(AgentPlan.run_id == run.id)).all()) + 1
     ap = AgentPlan(org_id=run.org_id, run_id=run.id, revision=rev, summary=plan.summary, hypothesis=plan.hypothesis, risks=plan.risks,
-                   plan_hash=phash, status="proposed",
+                   plan_hash=phash, status="proposed", rollback_steps=rollback_steps,
+                   rollback_availability=rollback_availability,
                    citations=[e for e in ctx.get("evidence", []) if e["id"] in plan.evidence_ids])
     db.add(ap)
     db.flush()
+    rollback.remember(run, ap, base_hash)
     target = {"session_id": str(session.id) if session else None, "device_id": str(device.id) if device else None}
     decisions = []
     for i, st in enumerate(steps):
@@ -868,13 +890,26 @@ def h_plan(db, run):
 
 
 
+MIN_WORDS_TO_SKIP_CLARIFY = 8
+_NEGATION = re.compile(r"\b(not|nothing|none|n't|didn't|didnt|doesn't|doesnt|isn't|isnt|still|no luck|never (?:worked|fixed|resolved)|nope|won't|wont|can't|cant)\b")
+_RESOLVED = re.compile(r"\b(fixed|worked|works now|working now|working again|works again|resolved|"
+                       r"solved|all good|sorted|problem gone|back to normal)\b")
+
+
+def is_resolution_message(text: str) -> bool:
+    """Deterministic check for 'it's fixed' replies, so resolution never depends on a model call."""
+    low = " ".join((text or "").lower().replace("’", "'").split())
+    return bool(_RESOLVED.search(low)) and not _NEGATION.search(low)
+
+
 # ---------------- guided self-service (the person does the steps; JoltIQ never executes them) ----------------
 MAX_GUIDANCE_ROUNDS = 2
 GUIDANCE_PROMPT = (
     "No approved automated fix exists, so act as an experienced IT technician guiding the person to fix this themselves. "
     "Cover any IT topic: Windows, macOS, Linux, Microsoft 365, networking, VPN, DNS, printers, cloud (AWS, Azure, GCP), "
     "security, scripting and programming. Give a short plain-language answer, then at most 8 ordered steps from safest and "
-    "most likely to least. Prefer steps backed by evidence ids; when a step comes from general knowledge, keep it standard and "
+    "most likely to least. Do NOT ask the person questions instead of giving steps: give useful first-line steps now, and where an open_question "
+    "matters, fold it into a step (for example 'If only this laptop is affected, ...'). Prefer steps backed by evidence ids; when a step comes from general knowledge, keep it standard and "
     "low risk. Never tell the person to disable security software, run untrusted scripts, delete data without a backup, or share "
     "passwords. If previous_attempts is non-empty, do not repeat those steps; use what the person reported. Set needs_technician "
     "when the fix needs admin rights the person likely lacks, physical repair, data-loss risk, or account/billing changes."
@@ -898,6 +933,7 @@ def _give_guidance(db, run) -> bool:
     ev = ctx.get("evidence", [])
     payload = {"subject": t.subject, "customer_text": _customer_text(db, run)[:4000], "intent": ctx.get("intent"),
                "evidence": ev, "hypotheses": ctx.get("hypotheses", []), "observations": ctx.get("observations", []),
+               "known_facts": ctx.get("known_facts", {}), "open_questions": ctx.get("open_questions", []),
                "previous_attempts": ctx.get("guidance_history", [])}
     try:
         guide = _model(db, run, "guidance", S.TroubleshootingGuide, payload, GUIDANCE_PROMPT)
@@ -932,6 +968,9 @@ def _handle_guidance_feedback(db, run) -> None:
     reply = _latest_user_message(db, run)
     _ctx_update(run, awaiting_guidance_feedback=False)
     low = reply.lower()
+    if is_resolution_message(reply):
+        _customer_confirmed_resolution(db, run)
+        return
     if any(w in low for w in ("technician", "human", "real person", "escalate")):
         _escalate(db, run, "Customer asked for a technician after self-service guidance")
         return
@@ -981,18 +1020,25 @@ def build_canonical_plan(db, run, article: KnowledgeArticle, procedure, session:
         raise ValueError("canonical procedure is missing its publication fingerprint")
     steps = [step.model_dump(mode="json") for step in procedure.procedure]
     approval_copy = outlook_session_details(procedure, article.procedure_hash)["step_messages"]
-    phash = sha256_hex(canonical_json(steps))
+    base_hash = sha256_hex(canonical_json(steps))
+    rollback_steps, rollback_availability = rollback.derive(
+        steps,
+        "browser" if session.kind == "browser" else "desktop",
+    )
+    phash = rollback.plan_hash(base_hash, rollback_steps, rollback_availability)
     rev = len(db.execute(select(AgentPlan.id).where(AgentPlan.run_id == run.id)).all()) + 1
     candidate = run.context["candidate_procedure"]
     plan = AgentPlan(
         org_id=run.org_id, run_id=run.id, revision=rev,
         summary=f"Apply approved procedure: {article.title}", hypothesis=run.context.get("candidate_hypothesis") or article.title,
         risks=candidate.get("risks", []), plan_hash=phash, status="proposed",
+        rollback_steps=rollback_steps, rollback_availability=rollback_availability,
         citations=[e for e in run.context.get("evidence", []) if e["id"] == candidate.get("evidence_id")],
         procedure_article_id=article.id, procedure_version=article.version, procedure_hash=article.procedure_hash,
     )
     db.add(plan)
     db.flush()
+    rollback.remember(run, plan, base_hash)
     device = db.get(Device, session.device_id)
     target = {"session_id": str(session.id), "device_id": str(device.id)}
     for ordinal, step in enumerate(steps):
@@ -1029,7 +1075,9 @@ def build_canonical_browser_plan(
     """Persist a published browser template after its customer-owned binding is resolved."""
     if article.procedure_hash is None:
         raise ValueError("canonical procedure is missing its publication fingerprint")
-    phash = sha256_hex(canonical_json(steps))
+    base_hash = sha256_hex(canonical_json(steps))
+    rollback_steps, rollback_availability = rollback.derive(steps, "browser")
+    phash = rollback.plan_hash(base_hash, rollback_steps, rollback_availability)
     rev = len(db.execute(select(AgentPlan.id).where(AgentPlan.run_id == run.id)).all()) + 1
     candidate = run.context["candidate_procedure"]
     plan = AgentPlan(
@@ -1045,9 +1093,12 @@ def build_canonical_browser_plan(
         procedure_article_id=article.id,
         procedure_version=article.version,
         procedure_hash=article.procedure_hash,
+        rollback_steps=rollback_steps,
+        rollback_availability=rollback_availability,
     )
     db.add(plan)
     db.flush()
+    rollback.remember(run, plan, base_hash)
     target = {"session_id": str(session.id), "device_id": None}
     selected = run.context["selected_attachment"]
     for ordinal, step in enumerate(steps):
@@ -1118,6 +1169,46 @@ def offer_rollback(db: Session, run: AgentRun, source_execution: ActionExecution
     if source_execution.action != "office.addin.set_load_behavior":
         raise ValueError("the source command is not an add-in change")
 
+    if source_plan.rollback_steps:
+        authorized, reason, _ = rollback.authorized(db, run, source_plan)
+        resolved, snapshot, problem = (
+            rollback.resolve_device_steps(db, run, source_plan)
+            if authorized
+            else ([], {}, "")
+        )
+        if authorized and resolved and not problem:
+            source_approvals = db.execute(
+                select(Approval).where(Approval.plan_id == source_plan.id)
+            ).scalars().all()
+            _ctx_update(run, rollback_pre=snapshot)
+            return _start_auto_device_rollback(
+                db,
+                run,
+                source_execution,
+                source_plan,
+                session,
+                ticket,
+                resolved,
+                source_approvals,
+                str(source_command_id),
+            )
+        blocked_reason = reason or problem or "approved inverse could not be resolved"
+        _ctx_update(run, rollback_auto_blocked=blocked_reason[:500])
+        audit.record(
+            db,
+            org_id=run.org_id,
+            actor_kind="system",
+            actor_id=None,
+            action="rollback.blocked",
+            resource_type="agent_plan",
+            resource_id=source_plan.id,
+            data={
+                "status": rollback.ROLLBACK_BLOCKED,
+                "reason": blocked_reason[:500],
+                "fallback": "separate_approval",
+            },
+        )
+
     raw_steps: list[dict[str, Any]] = [
         {
             "action": "office.addin.restore_load_behavior",
@@ -1177,6 +1268,89 @@ def offer_rollback(db: Session, run: AgentRun, source_execution: ActionExecution
     return plan
 
 
+def _start_auto_device_rollback(
+    db: Session,
+    run: AgentRun,
+    source_execution: ActionExecution,
+    source_plan: AgentPlan,
+    session: SupportSession,
+    ticket: Ticket,
+    raw_steps: list[dict[str, Any]],
+    source_approvals: Sequence[Approval],
+    source_command_id: str,
+) -> AgentPlan:
+    """Run only the inverse already bound into the original approved plan hash."""
+    plan_hash = sha256_hex(canonical_json({
+        "rollback_of": source_plan.plan_hash,
+        "steps": raw_steps,
+    }))
+    revision = len(db.execute(select(AgentPlan.id).where(AgentPlan.run_id == run.id)).all()) + 1
+    plan = AgentPlan(
+        org_id=run.org_id,
+        run_id=run.id,
+        revision=revision,
+        summary="Roll back the change approved with the original plan",
+        hypothesis="Independent verification failed after an approved change",
+        risks=["The application may need a safe restart"],
+        plan_hash=plan_hash,
+        status="approved",
+        citations=[],
+        procedure_article_id=source_plan.procedure_article_id,
+        procedure_version=source_plan.procedure_version,
+        procedure_hash=source_plan.procedure_hash,
+        rollback_availability={"status": "ROLLBACK_PLAN", "rollback_of": str(source_plan.id)},
+    )
+    db.add(plan)
+    db.flush()
+    target = {"session_id": str(session.id), "device_id": str(session.device_id)}
+    for ordinal, item in enumerate(raw_steps):
+        plan_step = PlanStep(
+            org_id=run.org_id,
+            plan_id=plan.id,
+            ordinal=ordinal,
+            action=item["action"],
+            target=target,
+            params=item["params"],
+            rationale=item["rationale"],
+            risk=ACTIONS[item["action"]].risk,
+            postconditions=item["postconditions"],
+        )
+        db.add(plan_step)
+        db.flush()
+        approvals.inherit_for_rollback(
+            db,
+            source_approvals,
+            plan_step,
+            plan_hash,
+            source_plan_hash=source_plan.plan_hash,
+            ticket_id=ticket.id,
+            session_id=session.id,
+        )
+    _ctx_update(
+        run,
+        current_plan_id=str(plan.id),
+        rollback_plan_id=str(plan.id),
+        rollback_auto=True,
+        rollback_source_execution_id=str(source_execution.id),
+        rollback_source_command_id=source_command_id,
+        verification_id=None,
+        rollback_restart_problem=None,
+        pre_state_captured=False,
+        rollback={"status": "IN_PROGRESS", "channel": "device", "auto": True},
+    )
+    sessions.event(
+        db,
+        session,
+        "rollback_started",
+        actor_kind="system",
+        data={"plan_id": str(plan.id), "auto": True},
+    )
+    transition(db, run, R.EXECUTING, "executing inverse approved with the plan hash")
+    run.paused_for = None
+    _set_ticket(db, run, TS.IN_PROGRESS, "rolling back an unverified change")
+    return plan
+
+
 def mark_partial_application(db: Session, run: AgentRun, failed_step: PlanStep,
                              completed_executions: list[ActionExecution], why: str = "") -> AgentPlan | None:
     """Record a confirmed change and offer recovery; never retry or silently undo it."""
@@ -1208,7 +1382,12 @@ def mark_partial_application(db: Session, run: AgentRun, failed_step: PlanStep,
 
     _say(db, run, PARTIAL_APPLICATION, data={"outcome_stage": str(run.outcome_stage)})
     if source is None:
-        _rollback_failed(db, run, "No authenticated local-journal command reference is available; the change has not been undone")
+        _rollback_failed(
+            db,
+            run,
+            "No authenticated local-journal command reference is available; the change has not been undone",
+            rollback.NO_ROLLBACK_AVAILABLE,
+        )
         return None
     try:
         return offer_rollback(db, run, source)
@@ -1217,9 +1396,41 @@ def mark_partial_application(db: Session, run: AgentRun, failed_step: PlanStep,
         return None
 
 
-def _rollback_failed(db: Session, run: AgentRun, reason: str) -> None:
+def _record_rollback_result(db: Session, run: AgentRun, status: str, reason: str) -> None:
+    partial = dict(run.context.get("partial_application") or {})
+    changed = [partial.get("source_execution_id")] if partial.get("source_execution_id") else []
+    restored = changed if status == rollback.ROLLED_BACK else []
+    result = {
+        "status": status,
+        "reason": reason[:500],
+        "channel": "device",
+        "auto": bool(run.context.get("rollback_auto")),
+        "changed": changed,
+        "restored": restored,
+        "unresolved": [item for item in changed if item not in restored],
+    }
+    _ctx_update(run, rollback=result)
+    audit.record(
+        db,
+        org_id=run.org_id,
+        actor_kind="system",
+        actor_id=None,
+        action="rollback.result",
+        resource_type="agent_run",
+        resource_id=run.id,
+        data=result,
+    )
+
+
+def _rollback_failed(
+    db: Session,
+    run: AgentRun,
+    reason: str,
+    code: str = rollback.ROLLBACK_FAILED,
+) -> None:
     from .customer_messages import ROLLBACK_CHANGE_REMAINS
 
+    _record_rollback_result(db, run, code, reason)
     partial = dict(run.context.get("partial_application") or {})
     partial["rollback_status"] = "FAILED"
     partial["rollback_reason"] = reason[:500]
@@ -1270,6 +1481,12 @@ def _begin_restore_verification(db: Session, run: AgentRun, reason: str) -> None
 def _finish_rollback(db: Session, run: AgentRun, *, restore_verified: bool, restart_completed: bool, reason: str = "") -> None:
     if not restore_verified:
         return _rollback_failed(db, run, reason or "independent registry read-back did not confirm the original setting")
+    _record_rollback_result(
+        db,
+        run,
+        rollback.ROLLED_BACK if restart_completed else rollback.ROLLBACK_UNVERIFIED,
+        reason or ("restore verified" if restart_completed else "restore verified; restart incomplete"),
+    )
     partial = dict(run.context.get("partial_application") or {})
     partial["rollback_status"] = "RESTORED" if restart_completed else "RESTORED_PENDING_RESTART"
     _ctx_update(run, partial_application=partial)
@@ -1314,13 +1531,13 @@ def h_awaiting_approval(db, run):
             if restore_done and a.action == "app.restart":
                 _begin_restore_verification(db, run, "The customer declined the safe Outlook restart")
             else:
-                _rollback_failed(db, run, f"Customer denied rollback step {a.action}")
+                _rollback_failed(db, run, f"Customer denied rollback step {a.action}", rollback.ROLLBACK_BLOCKED)
         else:
             _escalate(db, run, f"Approval denied for {a.action}{': ' + a.decision_comment if a.decision_comment else ''}")
         return
     if any(a.status in (ApprovalStatus.EXPIRED, ApprovalStatus.CANCELLED) for a in apps):
         if is_rollback:
-            _rollback_failed(db, run, "Rollback approval expired or was cancelled")
+            _rollback_failed(db, run, "Rollback approval expired or was cancelled", rollback.ROLLBACK_BLOCKED)
         else:
             _escalate(db, run, "Approval request expired or was cancelled")
         return
@@ -1329,7 +1546,7 @@ def h_awaiting_approval(db, run):
     s = db.get(SupportSession, uuid.UUID(sid)) if sid else None
     if s is not None and s.state == "terminated":
         if is_rollback:
-            _rollback_failed(db, run, "The desktop session ended before rollback could run")
+            _rollback_failed(db, run, "The desktop session ended before rollback could run", rollback.ROLLBACK_BLOCKED)
         else:
             _escalate(db, run, "Session was ended before the fix could run")
         return
@@ -1410,7 +1627,12 @@ def h_execute(db, run):
             if is_rollback and st.action == "app.restart":
                 _begin_restore_verification(db, run, f"Safe Outlook restart was blocked: {out.detail}")
             elif is_rollback:
-                _rollback_failed(db, run, f"Rollback action {st.action} was blocked: {out.detail}")
+                _rollback_failed(
+                    db,
+                    run,
+                    f"Rollback action {st.action} was blocked: {out.detail}",
+                    rollback.ROLLBACK_BLOCKED,
+                )
             else:
                 changed = completed_state_changes(db, run, plan)
                 if changed and _is_outlook_pdf_plan(db, plan):
@@ -1565,6 +1787,45 @@ def h_verify(db, run):
         steps = db.execute(select(PlanStep).where(PlanStep.plan_id == plan.id).order_by(PlanStep.ordinal)).scalars().all()
         marker = steps[-1]
         mark_partial_application(db, run, marker, changed, f"independent verification {status}")
+        return
+    if status in ("FAILED", "PARTIAL") and plan.rollback_steps:
+        steps = db.execute(
+            select(PlanStep).where(PlanStep.plan_id == plan.id).order_by(PlanStep.ordinal)
+        ).scalars().all()
+        session_id = steps[0].target.get("session_id") if steps else None
+        session = db.get(SupportSession, uuid.UUID(session_id)) if session_id else None
+        if session and session.kind == "browser":
+            rollback_result = rollback.execute_browser(db, run, plan, session)
+            _escalate(
+                db,
+                run,
+                f"Verification {status}; automatic rollback ended {rollback_result['status']}: "
+                f"{rollback_result['reason']}",
+            )
+            return
+    if (
+        status in ("FAILED", "PARTIAL")
+        and (plan.rollback_availability or {}).get("status") == rollback.NO_ROLLBACK_AVAILABLE
+    ):
+        rollback_result = {
+            "status": rollback.NO_ROLLBACK_AVAILABLE,
+            "reason": (plan.rollback_availability or {}).get("reason", "No safe inverse was approved"),
+            "changed": [str(execution.id) for execution in changed],
+            "restored": [],
+            "unresolved": [str(execution.id) for execution in changed],
+        }
+        _ctx_update(run, rollback=rollback_result)
+        audit.record(
+            db,
+            org_id=run.org_id,
+            actor_kind="system",
+            actor_id=None,
+            action="rollback.result",
+            resource_type="agent_plan",
+            resource_id=plan.id,
+            data=rollback_result,
+        )
+        _escalate(db, run, f"Verification {status}; no approved safe rollback is available")
         return
     analysis = _model(db, run, "verification_analysis", S.VerificationAnalysis, {"status": vr.status, "details": vr.details})
     if status == "FAILED" and run.retries < run.max_retries:
@@ -1822,6 +2083,7 @@ def run_detail(db: Session, run: AgentRun, *, customer_view: bool) -> dict[str, 
         steps = db.execute(select(PlanStep).where(PlanStep.plan_id == p.id).order_by(PlanStep.ordinal)).scalars().all()
         plan_out.append({"id": str(p.id), "revision": p.revision, "summary": p.summary, "hypothesis": p.hypothesis, "risks": p.risks,
                          "status": p.status, "plan_hash": p.plan_hash, "citations": p.citations,
+                         "rollback_steps": p.rollback_steps or [], "rollback_availability": p.rollback_availability or {},
                          "procedure": {"article_id": str(p.procedure_article_id), "version": p.procedure_version, "hash": p.procedure_hash}
                          if p.procedure_article_id else None,
                          "steps": [{"id": str(s.id), "ordinal": s.ordinal, "action": s.action, "params": s.params, "risk": s.risk,
@@ -1853,11 +2115,14 @@ def run_detail(db: Session, run: AgentRun, *, customer_view: bool) -> dict[str, 
                        "plan_id": str(a.plan_id) if a.plan_id else None, "step_id": str(a.step_id) if a.step_id else None,
                        "effects": a.effects, "approver_roles": a.approver_roles, "expires_at": a.expires_at.isoformat(),
                        "decided_at": a.decided_at.isoformat() if a.decided_at else None} for a in apps],
-        "verifications": [{"id": str(v.id), "status": v.status, "details": v.details, "at": v.created_at.isoformat()} for v in vrs],
+        "verifications": [{"id": str(v.id), "status": v.status, "kind": v.kind,
+                           "evidence_hash": v.evidence_hash, "details": v.details,
+                           "at": v.created_at.isoformat()} for v in vrs],
         "model_calls": [{"task": c.task, "provider": c.provider, "model": c.model, "live": c.live, "ok": c.ok, "latency_ms": c.latency_ms,
                          "tokens": c.input_tokens + c.output_tokens, "cost_usd": round(c.cost_usd, 5)} for c in calls] if not customer_view else [],
         "uses_test_fixture_model": any(not c.live for c in calls),
         "article_id": ctx.get("article_id"), "research_query_id": ctx.get("research_query_id"),
+        "rollback": ctx.get("rollback"), "rollback_snapshot": ctx.get("rollback_pre", {}),
     }
     return out
 

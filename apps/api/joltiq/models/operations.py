@@ -144,6 +144,7 @@ class SupportSession(IdMixin, TimestampMixin, TenantMixin, Base):
     terminated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     pause_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
     request_details: Mapped[dict] = mapped_column(JSONB, default=dict)
+    lease_epoch: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class SessionParticipant(IdMixin, TimestampMixin, TenantMixin, Base):
@@ -280,6 +281,8 @@ class AgentPlan(IdMixin, TimestampMixin, TenantMixin, Base):
     )
     procedure_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     procedure_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    rollback_steps: Mapped[list] = mapped_column(JSONB, default=list)
+    rollback_availability: Mapped[dict] = mapped_column(JSONB, default=dict)
 
 
 class PlanStep(IdMixin, TimestampMixin, TenantMixin, Base):
@@ -375,6 +378,8 @@ class VerificationRun(IdMixin, TimestampMixin, TenantMixin, Base):
     details: Mapped[list] = mapped_column(JSONB, default=list)  # per-postcondition result
     unintended_effects: Mapped[list] = mapped_column(JSONB, default=list)
     persistence_checked: Mapped[bool] = mapped_column(Boolean, default=False)
+    kind: Mapped[str] = mapped_column(String(20), default="verification")
+    evidence_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class VerificationEvidence(IdMixin, TimestampMixin, TenantMixin, Base):
@@ -445,6 +450,7 @@ class ComputerUseRun(IdMixin, TimestampMixin, TenantMixin, Base):
     success: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rollback: Mapped[dict] = mapped_column(JSONB, default=dict)
 
 
 class ComputerUseStep(IdMixin, TimestampMixin, TenantMixin, Base):

@@ -19,6 +19,7 @@ from .db import session_scope
 from .models import Integration, Organization, utcnow
 from .services import (  # noqa: F401 - register handlers
     agent,
+    approval_notify,
     approvals,
     computer_use,
     email,
@@ -35,6 +36,7 @@ log = logging.getLogger("joltiq.worker")
 @handler("approvals.expire")
 def _expire(db, payload):
     approvals.expire_stale(db)
+    approval_notify.send_reminders(db)
 
 
 def schedule_tick() -> None:

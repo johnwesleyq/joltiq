@@ -113,6 +113,18 @@ def active_lease(db: Session, s: SupportSession) -> ControlLease | None:
     return lease
 
 
+def bump_epoch(db: Session, s: SupportSession, controller: str) -> int:
+    """Fence every previous controller before the new controller can act."""
+    s.lease_epoch = (s.lease_epoch or 0) + 1
+    db.flush()
+    if s.kind == "browser" and s.worker_session_ref:
+        try:
+            browser_client.set_lease(s.worker_session_ref, s.lease_epoch, controller)
+        except Exception:  # noqa: BLE001,S110 - later actions fail closed on the worker
+            pass
+    return s.lease_epoch
+
+
 def acquire_lease(db: Session, s: SupportSession, holder_kind: str, user_id=None, *, preempt: bool = False, reason: str = "") -> ControlLease:
     """Exactly one active lease per session (enforced by a partial unique index). Humans preempt the AI;
     the customer preempts everyone; a technician can only take control from the AI or by customer handoff."""
@@ -136,14 +148,23 @@ def acquire_lease(db: Session, s: SupportSession, holder_kind: str, user_id=None
         db.flush()
     except IntegrityError as e:  # concurrent acquire lost the race
         raise Conflict("Another participant acquired control first", code="lease_held") from e
-    event(db, s, "control_acquired", actor_kind=holder_kind, actor_id=user_id, data={"reason": reason})
+    epoch = bump_epoch(db, s, holder_kind)
+    event(
+        db,
+        s,
+        "control_acquired",
+        actor_kind=holder_kind,
+        actor_id=user_id,
+        data={"reason": reason, "epoch": epoch},
+    )
     return lease
 
 
 def release_lease(db: Session, s: SupportSession, reason: str) -> None:
     db.execute(update(ControlLease).where(ControlLease.session_id == s.id, ControlLease.released_at.is_(None))
                .values(released_at=utcnow(), release_reason=reason))
-    event(db, s, "control_released", actor_kind="system", data={"reason": reason})
+    epoch = bump_epoch(db, s, "none")
+    event(db, s, "control_released", actor_kind="system", data={"reason": reason, "epoch": epoch})
 
 
 def holds_lease(db: Session, s: SupportSession, holder_kind: str, user_id=None) -> bool:

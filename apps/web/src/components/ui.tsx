@@ -20,10 +20,10 @@ export function Badge({ value, label }: { value: string; label?: string }) {
     {label ?? value.replaceAll("_", " ").toLowerCase().replace(/^\w/, (c) => c.toUpperCase())}</span>;
 }
 
-export function PageHead({ title, children, back }: { title: string; children?: ReactNode; back?: { href: string; label: string } }) {
+export function PageHead({ title, children, back, description }: { title: string; children?: ReactNode; back?: { href: string; label: string }; description?: ReactNode }) {
   return <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
     <div>{back && <Link href={back.href} className="text-sm text-slate hover:text-ink">‹ {back.label}</Link>}
-      <h1 className="text-[1.7rem] font-bold">{title}</h1></div>
+      <h1 className="text-[1.7rem] font-bold">{title}</h1>{description && <p className="mt-2 max-w-[72ch] text-slate">{description}</p>}</div>
     <div className="flex gap-2">{children}</div>
   </div>;
 }

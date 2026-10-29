@@ -1,5 +1,4 @@
 import pytest
-
 from database_guard import require_test_database_urls
 
 

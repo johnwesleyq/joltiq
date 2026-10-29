@@ -61,8 +61,107 @@ class AuthSession(IdMixin, TimestampMixin, Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     mfa_passed: Mapped[bool] = mapped_column(Boolean, default=False)
+    auth_method: Mapped[str] = mapped_column(String(30), default="password", server_default="password")
+    oidc_provider_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("oidc_providers.id", ondelete="SET NULL"), nullable=True
+    )
     ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
     user_agent: Mapped[str | None] = mapped_column(String(400), nullable=True)
+
+
+class OidcProvider(IdMixin, TimestampMixin, TenantMixin, Base):
+    """One organization-owned OIDC provider. Disabled until explicitly tested and enabled."""
+
+    __tablename__ = "oidc_providers"
+    __table_args__ = (UniqueConstraint("org_id", name="uq_oidc_provider_org"),)
+    display_name: Mapped[str] = mapped_column(String(100))
+    kind: Mapped[str] = mapped_column(String(32), default="entra")
+    issuer: Mapped[str] = mapped_column(String(500))
+    client_id: Mapped[str] = mapped_column(String(500))
+    client_secret_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scopes: Mapped[str] = mapped_column(String(500), default="openid email profile")
+    default_role: Mapped[str] = mapped_column(String(30), default="technician")
+    role_mapping: Mapped[dict] = mapped_column(JSONB, default=dict)
+    jit_provisioning: Mapped[bool] = mapped_column(Boolean, default=False)
+    enforce_sso: Mapped[bool] = mapped_column(Boolean, default=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    tested_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class OidcProviderDomain(IdMixin, TimestampMixin, TenantMixin, Base):
+    """Normalized login-routing domain. Globally unique while configured."""
+
+    __tablename__ = "oidc_provider_domains"
+    __table_args__ = (UniqueConstraint("domain", name="uq_oidc_provider_domain_global"),)
+    provider_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("oidc_providers.id", ondelete="CASCADE"), index=True
+    )
+    domain: Mapped[str] = mapped_column(String(253))
+
+
+class UserIdentity(IdMixin, TimestampMixin, TenantMixin, Base):
+    """Stable external subject linked to one existing JoltIQ user."""
+
+    __tablename__ = "user_identities"
+    __table_args__ = (
+        UniqueConstraint("provider_id", "subject", name="uq_user_identity_provider_subject"),
+        UniqueConstraint("org_id", "user_id", "provider_id", name="uq_user_identity_user_provider"),
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    provider_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("oidc_providers.id", ondelete="CASCADE"), index=True
+    )
+    issuer: Mapped[str] = mapped_column(String(500))
+    subject: Mapped[str] = mapped_column(String(500))
+    email_at_link: Mapped[str] = mapped_column(String(320))
+    linked_via: Mapped[str] = mapped_column(String(32))
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class OidcLoginState(IdMixin, TimestampMixin, TenantMixin, Base):
+    """Single-use authorization request state; raw state and verifier are never stored."""
+
+    __tablename__ = "oidc_login_states"
+    provider_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("oidc_providers.id", ondelete="CASCADE"), index=True
+    )
+    state_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    nonce: Mapped[str] = mapped_column(String(255))
+    code_verifier_enc: Mapped[str] = mapped_column(Text)
+    return_to: Mapped[str] = mapped_column(String(500), default="/portal")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class SsoMfaChallenge(IdMixin, TimestampMixin, TenantMixin, Base):
+    """Pending MFA after a validated OIDC first factor."""
+
+    __tablename__ = "sso_mfa_challenges"
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    provider_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("oidc_providers.id", ondelete="CASCADE"), index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class SsoRecoveryGrant(IdMixin, TimestampMixin, TenantMixin, Base):
+    """CLI-issued, MFA-bound, single-use SSO enforcement recovery grant."""
+
+    __tablename__ = "sso_recovery_grants"
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class OneTimeToken(IdMixin, TimestampMixin, Base):

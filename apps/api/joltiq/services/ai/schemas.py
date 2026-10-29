@@ -18,7 +18,8 @@ class Intent(BaseModel):
 
 class Clarification(BaseModel):
     sufficient: bool = Field(description="True if enough information exists to search and diagnose")
-    questions: list[str] = Field(default_factory=list, max_length=5)
+    # Providers sometimes return more questions than requested. The workflow safely displays/stores only the first five.
+    questions: list[str] = Field(default_factory=list)
     known_facts: dict[str, str] = Field(default_factory=dict)
 
 

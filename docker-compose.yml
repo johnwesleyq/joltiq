@@ -13,6 +13,9 @@ x-api-env: &api-env
   JOLTIQ_BROWSER_WORKER_URL: http://browser-worker:8100
   JOLTIQ_BROWSER_WORKER_TOKEN: ${JOLTIQ_BROWSER_WORKER_TOKEN:-dev-browser-worker-token-change-me}
   JOLTIQ_WEB_ORIGIN: ${JOLTIQ_WEB_ORIGIN:-http://localhost:3000}
+  # Explicitly blank by default: set only with the dev-mock profile.
+  JOLTIQ_SLACK_MOCK_BASE_URL: ${JOLTIQ_SLACK_MOCK_BASE_URL:-}
+  JOLTIQ_TEAMS_MOCK_BASE_URL: ${JOLTIQ_TEAMS_MOCK_BASE_URL:-}
   JOLTIQ_SMTP_HOST: ${JOLTIQ_SMTP_HOST:-mailpit}
   JOLTIQ_SMTP_PORT: ${JOLTIQ_SMTP_PORT:-1025}
   # S3 (MinIO) is optional: run with --profile s3 and set JOLTIQ_S3_ENDPOINT=http://minio:9000
@@ -125,4 +128,43 @@ services:
     volumes: ["./tests/e2e/testapp:/testapp:ro"]
     command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8300"]
 
-volumes: { pgdata: {}, miniodata: {}, appdata: {}, meshcentral-data: {}, meshcentral-files: {} }
+  mock-slack:
+    # MOCK Slack — DEV/TEST ONLY. Permanent red banner; no production profile.
+    build: { context: services/mock-slack }
+    profiles: ["dev-mock"]
+    labels: { joltiq.dev-mock: "true", joltiq.purpose: "DEV/MOCK Slack test target" }
+    environment: { MOCK_SLACK_WEBHOOK_PATHS: "*", MOCK_SLACK_BOT_TOKENS: xoxb-mock-0001 }
+    ports: ["127.0.0.1:8340:8600"]
+
+  mock-teams:
+    # MOCK Teams — DEV/TEST ONLY. Permanent red banner; no production profile.
+    build: { context: services/mock-teams }
+    profiles: ["dev-mock"]
+    labels: { joltiq.dev-mock: "true", joltiq.purpose: "DEV/MOCK Teams test target" }
+    ports: ["127.0.0.1:8341:8610"]
+
+  mock-freshdesk:
+    # MOCK Freshdesk — DEV/TEST ONLY. Fixed credentials; no production profile.
+    build: { context: services/mock-freshdesk }
+    profiles: ["dev-mock"]
+    labels: { joltiq.dev-mock: "true", joltiq.purpose: "DEV/MOCK Freshdesk API test target" }
+    environment: { MOCK_FRESHDESK_API_KEYS: mock-fd-key-0001 }
+    ports: ["127.0.0.1:8320:8500"]
+
+  companion-headless:
+    # DEV/TEST ONLY: real signed protocol core with deterministic SIMULATED Windows state.
+    build: { context: apps/windows-agent, dockerfile: Dockerfile.headless }
+    profiles: ["dev-mock"]
+    labels: { joltiq.dev-mock: "true", joltiq.purpose: "DEV/TEST headless companion (simulated OS)" }
+    depends_on: [api]
+    environment:
+      JOLTIQ_ENV: development
+      AGENT_SERVER_URL: http://localhost:8000
+      AGENT_DEV_FORWARD: api:8000
+      AGENT_CONTROL_KEY: ${COMPANION_CONTROL_KEY:-dev-only-control-key-not-a-secret}
+      AGENT_ENROLL_CODE: ${COMPANION_ENROLL_CODE:-}
+      AGENT_AUTO_CONSENT: ${COMPANION_AUTO_CONSENT:-false}
+    volumes: ["companion-data:/var/lib/joltiq-companion"]
+    ports: ["127.0.0.1:8410:8400"]
+
+volumes: { companion-data: {}, pgdata: {}, miniodata: {}, appdata: {}, meshcentral-data: {}, meshcentral-files: {} }

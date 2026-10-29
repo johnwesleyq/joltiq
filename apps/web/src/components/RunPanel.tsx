@@ -1,10 +1,10 @@
 "use client";
 import Link from "next/link";
-import { useState } from "react";
 import { api } from "@/lib/api";
 import { useAct } from "@/lib/hooks";
-import type { Approval, Run } from "./types";
+import type { Run } from "./types";
 import { Badge, ErrorNote } from "./ui";
+import { ApprovalCard } from "./ApprovalCard";
 
 const PAUSE_TEXT: Record<string, string> = {
   customer: "Waiting for your answer to the questions above.", approval: "Waiting for approval of the plan.",
@@ -32,26 +32,6 @@ function OutcomeCard({ run }: { run: Run }) {
   return <div className={`border-l-4 px-4 py-3 ${outcome.tone}`} aria-label="Support outcome">
     <div className="font-bold">{outcome.label}</div>
     <p className="mt-0.5 text-sm text-slate">{outcome.detail}</p>
-  </div>;
-}
-
-export function ApprovalCard({ a, staff }: { a: Approval; staff: boolean }) {
-  const [comment, setComment] = useState("");
-  const decide = useAct((decision: "approve" | "deny") => api(`/approvals/${a.id}/decision`, { json: { decision, comment } }), [["run"], ["ticket"], ["approvals"]]);
-  return <div className="rounded-md border border-ink p-4">
-    <div className="flex flex-wrap items-center gap-2"><b className="font-mono text-sm">{a.action}</b><Badge value={a.risk} /><Badge value={a.status} /></div>
-    <p className="mt-2">{a.reason}</p>
-    <p className="mt-1 text-sm text-slate"><b>What changes:</b> {a.effects}</p>
-    <pre className="mt-2 overflow-x-auto rounded bg-paper p-2 text-xs">{JSON.stringify(a.params, null, 2)}</pre>
-    {a.status === "PENDING" && <div className="mt-3 space-y-2">
-      <ErrorNote error={decide.error} />
-      {staff && <input className="input" placeholder="Note (optional)" value={comment} onChange={(e) => setComment(e.target.value)} />}
-      <div className="flex gap-2">
-        <button className="btn btn-primary" disabled={decide.isPending} onClick={() => decide.mutate("approve")}>Approve this step</button>
-        <button className="btn btn-ghost" disabled={decide.isPending} onClick={() => decide.mutate("deny")}>Deny</button>
-      </div>
-      <p className="text-xs text-slate">Expires {new Date(a.expires_at).toLocaleTimeString()}. If the step changes, you&apos;ll be asked again.</p>
-    </div>}
   </div>;
 }
 

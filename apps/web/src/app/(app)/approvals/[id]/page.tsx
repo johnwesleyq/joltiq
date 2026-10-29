@@ -1,6 +1,6 @@
 "use client";
 import { use } from "react";
-import { ApprovalCard } from "@/components/RunPanel";
+import { ApprovalCard } from "@/components/ApprovalCard";
 import type { Approval } from "@/components/types";
 import { ErrorNote, Loading, PageHead } from "@/components/ui";
 import { STAFF } from "@/lib/api";

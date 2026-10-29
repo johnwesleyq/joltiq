@@ -4,6 +4,7 @@ an APPROVED approval: only `decide()` from an authenticated human principal does
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, timedelta
 
 from sqlalchemy import select
@@ -14,8 +15,7 @@ from ..core.errors import Conflict, Forbidden, NotFound
 from ..models import Approval, Organization, PlanStep, Ticket, utcnow
 from ..models.enums import ApprovalStatus as A
 from ..security.crypto import canonical_json, hmac_sign, hmac_verify, sha256_hex
-from . import audit
-from .notifications import notify, staff_user_ids
+from . import approval_notify, audit
 from .realtime import publish
 
 
@@ -38,10 +38,7 @@ def request(db: Session, *, org_id, run_id, plan_id, step: PlanStep, plan_hash: 
                  requested_for_user_id=requested_for_user_id, expires_at=utcnow() + timedelta(minutes=ttl))
     db.add(a)
     db.flush()
-    targets = list(staff_user_ids(db, org_id)) if any(r != "customer" for r in approver_roles) else []
-    if "customer" in approver_roles and requested_for_user_id:
-        targets.append(requested_for_user_id)
-    notify(db, org_id, targets, "approval", f"Approval needed: {step.action} ({step.risk})", reason, f"/approvals/{a.id}")
+    approval_notify.on_requested(db, a)
     publish(db, org_id, "approval.requested", {"approval_id": str(a.id), "run_id": str(run_id) if run_id else None,
                                                "ticket_id": str(ticket_id) if ticket_id else None})
     audit.record(db, org_id=org_id, actor_kind="system", actor_id=None, action="approval.requested", resource_type="approval",
@@ -62,6 +59,69 @@ def request_each_customer_step(db: Session, *, run, plan, steps: list[PlanStep],
             requested_for_user_id=ticket.requester_id,
         ))
     return created
+
+
+def inherit_for_rollback(
+    db: Session,
+    source_approvals: Sequence[Approval],
+    step: PlanStep,
+    plan_hash: str,
+    *,
+    source_plan_hash: str,
+    ticket_id,
+    session_id,
+) -> Approval:
+    """Create a signed rollback grant only from an approved original plan that bound the inverse."""
+    source = [
+        approval
+        for approval in source_approvals
+        if approval.status == A.APPROVED
+        and approval.plan_hash == source_plan_hash
+        and approval.decided_by
+    ]
+    if not source:
+        raise Conflict("No valid original approval covers this rollback", code="rollback_not_approved")
+    origin = source[0]
+    approval = Approval(
+        org_id=step.org_id,
+        run_id=origin.run_id,
+        plan_id=step.plan_id,
+        step_id=step.id,
+        ticket_id=ticket_id,
+        session_id=session_id,
+        status=A.APPROVED,
+        risk=step.risk,
+        action=step.action,
+        target=step.target,
+        params=step.params,
+        reason=f"Rollback approved with plan {source_plan_hash[:12]}",
+        effects="Restores the pre-change state.",
+        plan_hash=plan_hash,
+        step_hash=step_hash(step.action, step.target, step.params, plan_hash),
+        approver_roles=origin.approver_roles,
+        requested_for_user_id=origin.requested_for_user_id,
+        decided_by=origin.decided_by,
+        decided_at=origin.decided_at,
+        expires_at=origin.expires_at,
+    )
+    approval.grant_signature = hmac_sign(get_settings().approval_signing_key, _grant_message(approval))
+    db.add(approval)
+    db.flush()
+    audit.record(
+        db,
+        org_id=step.org_id,
+        actor_kind="system",
+        actor_id=None,
+        action="approval.inherited_for_rollback",
+        resource_type="approval",
+        resource_id=approval.id,
+        data={
+            "source_approval_id": str(origin.id),
+            "source_plan_hash": source_plan_hash,
+            "action": step.action,
+        },
+    )
+    return approval
 
 
 def can_decide(db: Session, a: Approval, *, user_id, role: str | None, customer_id) -> tuple[bool, str]:
@@ -99,6 +159,7 @@ def decide(db: Session, approval_id: uuid.UUID, *, approve: bool, user_id, role:
     audit.record(db, org_id=a.org_id, actor_kind="user", actor_id=user_id, action=f"approval.{'approved' if approve else 'denied'}",
                  resource_type="approval", resource_id=a.id, data={"action": a.action, "risk": a.risk, "comment": comment[:200]})
     publish(db, a.org_id, "approval.decided", {"approval_id": str(a.id), "status": a.status, "run_id": str(a.run_id) if a.run_id else None})
+    approval_notify.on_outcome(db, a)
     return a
 
 
@@ -133,6 +194,7 @@ def expire_stale(db: Session) -> int:
     n = 0
     for a in db.execute(select(Approval).where(Approval.status == A.PENDING, Approval.expires_at < utcnow())).scalars():
         a.status = A.EXPIRED
+        approval_notify.on_outcome(db, a)
         n += 1
     return n
 
