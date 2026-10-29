@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -72,6 +72,26 @@ class NotificationPreference(IdMixin, TimestampMixin, TenantMixin, Base):
     category: Mapped[str] = mapped_column(String(40))
     in_app: Mapped[bool] = mapped_column(Boolean, default=True)
     email: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class NotificationDispatch(IdMixin, TimestampMixin, TenantMixin, Base):
+    """Idempotent record of one approval notification event and its channel outcomes."""
+
+    __tablename__ = "notification_dispatches"
+    __table_args__ = (
+        UniqueConstraint("org_id", "dedupe_key", name="uq_notification_dispatch_org_dedupe"),
+        Index("ix_notification_dispatches_user_created", "user_id", "created_at"),
+    )
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=True
+    )
+    dedupe_key: Mapped[str] = mapped_column(String(200))
+    kind: Mapped[str] = mapped_column(String(40))
+    approval_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("approvals.id", ondelete="SET NULL"), nullable=True
+    )
+    channels: Mapped[list] = mapped_column(JSONB, default=list)
+    suppressed: Mapped[list] = mapped_column(JSONB, default=list)
 
 
 class WebhookEndpoint(IdMixin, TimestampMixin, TenantMixin, Base):
