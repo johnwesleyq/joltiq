@@ -16,11 +16,13 @@ type Run = {
   outcome_summary: string | null; created_at: string; transitions: { from: string; to: string; reason: string; at: string }[];
   plans: Plan[]; approvals: { id: string; status: string; action: string; risk: string; reason: string; expires_at: string; decided_at: string | null }[];
   verifications: Ver[]; browser_rollback?: RollbackOutcome | null; rollback?: RollbackOutcome | null;
-  rollback_snapshot?: Record<string, { before: unknown; after: unknown }>; uses_test_fixture_model: boolean;
+  rollback_snapshot?: Record<string, unknown>; uses_test_fixture_model: boolean;
 };
 type Evidence = { ok: boolean | null; items: { verification_id: string; ok: boolean; stored_hash: string | null; recomputed_hash: string | null; audit_hash: string | null; chain_ok: boolean }[] };
 
 const show = (v: unknown) => (v === "" ? "(empty)" : typeof v === "string" ? v : JSON.stringify(v));
+const journalSnapshot = (value: unknown): value is { before: unknown; after: unknown } =>
+  !!value && typeof value === "object" && "before" in value && "after" in value;
 const preRef = (p: Record<string, unknown>) =>
   Object.entries(p).map(([k, v]) => `${k}=${v && typeof v === "object" && "$pre" in v ? "‹value read back before the change›"
     : v && typeof v === "object" && "$cmd" in v ? "‹PC journal entry of the change›" : show(v)}`).join(" · ");
@@ -56,8 +58,10 @@ export default function RunDetail({ params }: { params: Promise<{ id: string }> 
       <p className="mt-1 text-sm">{OUTCOME_HELP[rb.status] ?? ""}</p>
       <p className="text-sm text-slate">{rb.reason}</p>
       {rb.auto_blocked_reason && <p className="mt-1 text-sm text-slate">Automatic rollback not used: {rb.auto_blocked_reason}</p>}
-      {Object.keys(d.rollback_snapshot ?? {}).length > 0 && <div className="mt-2 text-sm"><p className="font-medium">Pre-change read-back (from the PC&apos;s journal)</p>
-        <ul className="mt-1 space-y-1 text-slate">{Object.entries(d.rollback_snapshot!).map(([k, v]) => <li key={k}><code>{k}</code> before {show(v.before)} → after {show(v.after)}</li>)}</ul></div>}
+      {Object.keys(d.rollback_snapshot ?? {}).length > 0 && <div className="mt-2 text-sm"><p className="font-medium">{rb.channel === "device" ? "Pre-change read-back from the PC journal" : "Pre-change browser read-back"}</p>
+        <ul className="mt-1 space-y-1 text-slate">{Object.entries(d.rollback_snapshot!).map(([k, v]) => <li key={k}><code>{k}</code>{journalSnapshot(v)
+          ? <> before {show(v.before)} → after {show(v.after)}</>
+          : <> captured before change: {show(v)}</>}</li>)}</ul></div>}
       <p className="mt-2 text-xs text-slate">A rolled-back run always escalates to a technician.</p></div>; })()}
 
     <h2 className="mt-8 font-bold">Plans</h2>

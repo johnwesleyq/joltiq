@@ -37,8 +37,8 @@ async function mockApp(page: Page, role = "org_owner") {
       id: runId, ticket_id: "ticket-1", state: "ESCALATED", paused_for: null, retries: 0, max_retries: 2, cost_usd: 0.01,
       outcome_summary: "Change rolled back and escalated", created_at: "2026-10-29T17:00:00Z", uses_test_fixture_model: false,
       transitions: [{ from: "VERIFYING", to: "ESCALATED", reason: "rollback complete", at: "2026-10-29T17:05:00Z" }],
-      plans: [], approvals: [], rollback: { status: "ROLLED_BACK", reason: "Original setting restored", channel: "device", auto: true },
-      rollback_snapshot: { addin: { before: 3, after: 2 } },
+      plans: [], approvals: [], rollback: { status: "ROLLED_BACK", reason: "Original setting restored", channel: "browser", auto: true },
+      rollback_snapshot: { email: "old@example.test" },
       verifications: [{ id: "v1", status: "VERIFIED", kind: "rollback", evidence_hash: "abcdef1234567890", at: "2026-10-29T17:05:00Z",
         details: [{ index: 0, type: "config.read", description: "Original value restored", status: "PASS", critical: true, observed: 3, expected: 3 }] }],
     } });
@@ -72,6 +72,8 @@ test("approval alert settings and run evidence pages are available", async ({ pa
   await expect(page.getByLabel("Approval requested Slack")).not.toBeChecked();
   await page.goto(`/console/runs/${runId}`);
   await expect(page.getByTestId("rollback-result")).toContainText("Original setting restored");
+  await expect(page.getByTestId("rollback-result")).toContainText("email captured before change: old@example.test");
+  await expect(page.getByTestId("rollback-result")).not.toContainText("PC's journal");
   await expect(page.getByTestId("verification")).toContainText("matches audit chain");
 });
 

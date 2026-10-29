@@ -165,7 +165,15 @@ def _sealed_verification(owner, monkeypatch, *, matched=True, critical=True):
             state="active",
             worker_session_ref="worker-evidence",
         )
-        run = AgentRun(org_id=org_id, state="VERIFYING", correlation_id=uuid.uuid4().hex, context={})
+        run = AgentRun(
+            org_id=org_id,
+            state="VERIFYING",
+            correlation_id=uuid.uuid4().hex,
+            context={
+                "rollback": {"status": "ROLLED_BACK", "reason": "restored", "channel": "browser"},
+                "rollback_pre": {"s0": "previous-value"},
+            },
+        )
         db.add_all([session, run])
         db.flush()
         db.add(AgentPlan(
@@ -243,6 +251,8 @@ def test_run_api_exposes_rollback_and_recomputed_evidence(owner, monkeypatch):
     body = detail.json()
     assert body["plans"][0]["rollback_availability"]["status"] == "AVAILABLE"
     assert body["plans"][0]["rollback_steps"][0]["action"] == "browser.type"
+    assert body["rollback"]["channel"] == "browser"
+    assert body["rollback_snapshot"] == {"s0": "previous-value"}
     verification_row = next(item for item in body["verifications"] if item["id"] == str(verification_id))
     assert verification_row["kind"] == "verification"
     assert verification_row["status"] == status
