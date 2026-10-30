@@ -384,7 +384,8 @@ def test_fix_it_for_me_runs_an_existing_read_only_device_plan_instead_of_fixture
 
 def test_active_direct_computer_use_accepts_device_result_after_ticket_run_escalated(app, owner):
     from joltiq.db import session_scope
-    from joltiq.models import AgentRun, DeviceCommand
+    from joltiq.models import AgentRun, ComputerUseRun, DeviceCommand
+    from joltiq.services.jobs import drain
 
     capabilities = [
         "system.info", "screen.capture", "input.click", "input.type", "input.key", "input.scroll", "input.move",
@@ -428,6 +429,13 @@ def test_active_direct_computer_use_accepts_device_result_after_ticket_run_escal
         command = db.get(DeviceCommand, uuid.UUID(action["command_id"]))
         assert command.status == "failed"
         assert command.result == {"ok": False, "error": "Desktop capture refused: remote_session"}
+
+    drain()
+    with session_scope(uuid.UUID(owner.org_id)) as db:
+        computer_run = db.get(ComputerUseRun, uuid.UUID(run_begin["computer_use_run_id"]))
+        assert computer_run.state == "failed"
+        assert computer_run.success is False
+        assert "remote_session" in (computer_run.summary or "")
 
 
 def test_active_direct_computer_use_owns_native_conversation_after_ticket_agent_escalates(app, owner):

@@ -56,7 +56,8 @@ def available_providers(db: Session, org_id: uuid.UUID, task: str) -> list[tuple
     if task == "computer_use" and not s.allow_external_computer_use_models:
         out = [candidate for candidate in out if candidate[0] == "ollama"]
     fixture_cfg = cfgs.get("local_fixture")
-    if s.enable_local_fixture_providers and s.env != "production" and (not out or (fixture_cfg and fixture_cfg.enabled)):
+    fixture_requested = fixture_cfg.enabled if fixture_cfg is not None else not out
+    if s.enable_local_fixture_providers and s.env != "production" and fixture_requested:
         out.append(("local_fixture", "local-rules-v1", fixture_cfg, None))
     return out
 

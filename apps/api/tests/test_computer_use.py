@@ -704,9 +704,13 @@ def test_openai_computer_provider_requires_deployment_and_tenant_approval(owner,
         "api_key": "sk-test-openai-computer-0000000000",
     })
     assert created.status_code == 200, created.text
+    disabled_fixture = owner.patch("/api/v1/admin/models/local_fixture", json={"enabled": False})
+    assert disabled_fixture.status_code == 200, disabled_fixture.text
     org_id = uuid.UUID(owner.org_id)
     with session_scope(org_id) as db:
-        assert "openai" not in [p[0] for p in available_providers(db, org_id, "computer_use")]
+        disabled = [p[0] for p in available_providers(db, org_id, "computer_use")]
+        assert "openai" not in disabled
+        assert "local_fixture" not in disabled
 
     monkeypatch.setattr(settings, "allow_external_computer_use_models", True)
     with session_scope(org_id) as db:

@@ -699,6 +699,10 @@ def on_device_result(db: Session, cmd: DeviceCommand) -> bool:
         _handle_completion_verification(db, run, res, ok, completion_verification, st)
         return True
     if tid is None:  # the opening screenshot
+        if not ok or not key or not run.display:
+            reason = str(res.get("error") or "the computer did not return a usable screenshot")[:500]
+            _end(db, run, "failed", f"Could not inspect the computer screen: {reason}", False)
+            return True
         dev = db.get(Device, cmd.device_id)
         os_line = f" The computer runs {dev.os_name} {dev.os_version}." if dev else ""
         run.transcript = [{"role": "user", "content": [
