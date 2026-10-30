@@ -254,10 +254,17 @@ def pending_for(db: Session, device: Device) -> list[dict]:
         ComputerUseRun.state.in_(("waiting_local_consent", "running", "waiting_device", "waiting_customer")),
         ComputerUseRun.local_consent_state.in_(("pending", "approved")),
     )).scalars():
+        run_session = db.get(SupportSession, run.session_id)
+        details = (run_session.request_details or {}) if run_session else {}
+        inherits_session_consent = bool(
+            details.get("direct_device_request")
+            and details.get("computer_use_mode") == run.mode
+            and details.get("computer_use_goal") == run.goal
+        )
         out.append(sign_envelope({
             "type": "computer_use.begin", "session_id": str(run.session_id),
             "computer_use_run_id": str(run.id), "device_id": str(device.id),
-            "mode": run.mode, "goal": run.goal,
+            "mode": run.mode, "goal": run.goal, "inherits_session_consent": inherits_session_consent,
             "issued_at": int(now.timestamp()), "expires_at": int((now + timedelta(seconds=COMMAND_TTL_S)).timestamp()),
             "nonce": new_token(12),
         }))

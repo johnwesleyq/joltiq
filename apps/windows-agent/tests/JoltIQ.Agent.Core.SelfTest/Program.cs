@@ -483,6 +483,35 @@ await TA("runtime shows an exact native action approval and posts the decision",
     Assert(JsonNode.Parse(response.Body)?["approved"]?.GetValue<bool>() == true, "allow decision changed in transit");
 });
 
+await TA("direct computer use inherits the one native session approval", async () =>
+{
+    using var h = new RuntimeHarness();
+    var ui = new CountingConsentUi();
+    var runtime = new AgentRuntime(h.Client, new CountingProvider(), ui, new InMemoryCommandJournal());
+
+    h.EnqueuePoll(h.SessionBegin("direct-session", new JsonObject
+    {
+        ["direct_device_request"] = true,
+        ["computer_use_mode"] = "fix",
+        ["computer_use_goal"] = "Open Notepad and type the test sentence.",
+    }));
+    await runtime.PollOnceAsync(default);
+    h.EnqueuePoll(h.ComputerUseBegin(
+        "direct-run",
+        "direct-session",
+        "fix",
+        "Open Notepad and type the test sentence.",
+        inheritsSessionConsent: true));
+    await runtime.PollOnceAsync(default);
+
+    Assert(ui.SessionConsentCount == 1, "the support session did not ask exactly once");
+    Assert(ui.ComputerUseConsentCount == 0, "direct Fix asked for a duplicate approval");
+    Assert(ui.StartedGrant?.RunId == "direct-run", "the inherited Fix grant did not start");
+    var consent = h.Requests.Single(r => r.Path.EndsWith("/computer-use/direct-run/local-consent"));
+    Assert(JsonNode.Parse(consent.Body)?["accepted"]?.GetValue<bool>() == true,
+        "the inherited approval was not recorded at the server");
+});
+
 await TA("runtime uploads screenshot before result and restart resumes without repeating native input", async () =>
 {
     var store = new MemoryKeyStore();
@@ -804,10 +833,11 @@ sealed class RuntimeHarness : IDisposable
         return Envelope(body);
     }
 
-    public JsonObject ComputerUseBegin(string runId, string sessionId, string mode, string goal) => Envelope(new JsonObject
+    public JsonObject ComputerUseBegin(string runId, string sessionId, string mode, string goal, bool inheritsSessionConsent = false) => Envelope(new JsonObject
     {
         ["type"] = "computer_use.begin", ["computer_use_run_id"] = runId, ["session_id"] = sessionId,
         ["device_id"] = "device-1", ["mode"] = mode, ["goal"] = goal,
+        ["inherits_session_consent"] = inheritsSessionConsent,
         ["issued_at"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
         ["expires_at"] = DateTimeOffset.UtcNow.AddMinutes(2).ToUnixTimeSeconds(),
         ["nonce"] = Guid.NewGuid().ToString("N"),
@@ -876,6 +906,28 @@ sealed class AcceptingUi : IUserInteraction
 {
     public string CurrentUserDisplayName => "Test User";
     public Task<bool> AskConsentAsync(string sessionId, NativeConsentRequest request, TimeSpan timeout, CancellationToken ct) => Task.FromResult(true);
+    public void SessionStarted(string sessionId, string activeMessage, Action stopRequested) { }
+    public void SessionEnded(string sessionId, string reason) { }
+    public void ActionPerformed(string sessionId, string summary) { }
+}
+
+sealed class CountingConsentUi : IUserInteraction
+{
+    public int SessionConsentCount { get; private set; }
+    public int ComputerUseConsentCount { get; private set; }
+    public ComputerUseGrant? StartedGrant { get; private set; }
+    public string CurrentUserDisplayName => "Test User";
+    public Task<bool> AskConsentAsync(string sessionId, NativeConsentRequest request, TimeSpan timeout, CancellationToken ct)
+    {
+        SessionConsentCount++;
+        return Task.FromResult(true);
+    }
+    public Task<bool> AskComputerUseConsentAsync(ComputerUseConsentRequest request, TimeSpan timeout, CancellationToken ct)
+    {
+        ComputerUseConsentCount++;
+        return Task.FromResult(true);
+    }
+    public void ComputerUseStarted(ComputerUseGrant grant, Func<GuideResponse, Task> respond, Action stopRequested) => StartedGrant = grant;
     public void SessionStarted(string sessionId, string activeMessage, Action stopRequested) { }
     public void SessionEnded(string sessionId, string reason) { }
     public void ActionPerformed(string sessionId, string summary) { }

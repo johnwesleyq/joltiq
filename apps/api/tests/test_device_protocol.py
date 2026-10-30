@@ -189,7 +189,7 @@ def test_device_support_request_is_private_to_its_device_even_in_same_tenant(app
     assert second.post(f"/support-requests/{run_id}/messages", {"message": "Cross-device write."}).status_code == 404
 
 
-def test_device_support_request_can_start_fix_with_two_local_consent_gates(app, owner):
+def test_device_support_request_reuses_the_single_session_consent_for_fix(app, owner):
     capabilities = [
         "system.info", "screen.capture", "input.click", "input.type", "input.key", "input.scroll", "input.move",
         "url.open", "guide.highlight", "guide.clear",
@@ -226,6 +226,7 @@ def test_device_support_request_can_start_fix_with_two_local_consent_gates(app, 
     run_begin = next(e for e in pending if e["type"] == "computer_use.begin")
     assert run_begin["mode"] == "fix"
     assert run_begin["goal"] == "I can't find Adobe Sign in Outlook."
+    assert run_begin["inherits_session_consent"] is True
 
     assert device.post(
         f"/computer-use/{run_begin['computer_use_run_id']}/local-consent",

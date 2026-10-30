@@ -219,7 +219,9 @@ public sealed class AgentRuntime
         }
         if (session.ComputerUseRunId == runId && session.ComputerUseMode == mode) return;
         var request = new ComputerUseConsentRequest(runId, sessionId, mode, goal);
-        var accepted = await _ui.AskComputerUseConsentAsync(request, ConsentTimeout, ct);
+        var inheritsSessionConsent = envelope.TryGetProperty("inherits_session_consent", out var inheritedEl) &&
+                                     inheritedEl.ValueKind == JsonValueKind.True;
+        var accepted = inheritsSessionConsent || await _ui.AskComputerUseConsentAsync(request, ConsentTimeout, ct);
         if (accepted)
         {
             session.ComputerUseRunId = runId;
@@ -228,7 +230,9 @@ public sealed class AgentRuntime
                 response => RespondToGuideAsync(runId, response), () => _ = StopComputerUseAsync(runId));
         }
         await _client.SendAsync(HttpMethod.Post, $"/computer-use/{runId}/local-consent", new { accepted }, ct);
-        L("info", $"computer-use run {runId} ({mode}) {(accepted ? "accepted" : "declined")} locally");
+        L("info", inheritsSessionConsent
+            ? $"computer-use run {runId} ({mode}) inherited the active session consent"
+            : $"computer-use run {runId} ({mode}) {(accepted ? "accepted" : "declined")} locally");
     }
 
     private void EndComputerUse(JsonElement envelope, string? sessionId, string reason)
