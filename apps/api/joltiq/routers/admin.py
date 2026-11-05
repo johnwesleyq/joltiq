@@ -55,7 +55,8 @@ def ser_provider(c: ModelProviderConfig, db: Session) -> dict:
     s = get_settings()
     platform_key = bool({"openai": s.openai_api_key, "anthropic": s.anthropic_api_key, "gemini": s.gemini_api_key,
                          "ollama": s.ollama_base_url}.get(c.provider))
-    return {"provider": c.provider, "enabled": c.enabled, "approved_for_tenant_data": c.approved_for_tenant_data, "models": c.models,
+    return {"provider": c.provider, "enabled": c.enabled, "approved_for_tenant_data": c.approved_for_tenant_data,
+            "approved_for_computer_use": c.approved_for_computer_use, "models": c.models,
             "input_cost_per_mtok": c.input_cost_per_mtok, "output_cost_per_mtok": c.output_cost_per_mtok, "timeout_seconds": c.timeout_seconds,
             "max_retries": c.max_retries, "key_fingerprint": cred.fingerprint if cred and not cred.revoked_at else None,
             "platform_key_available": platform_key, "last_test_at": c.last_test_at.isoformat() if c.last_test_at else None,
@@ -93,6 +94,7 @@ def list_models(ctx: Ctx = Depends(perm("models.manage"))):
 class ProviderIn(BaseModel):
     enabled: bool | None = None
     approved_for_tenant_data: bool | None = None
+    approved_for_computer_use: bool | None = None
     api_key: str | None = Field(default=None, max_length=500)
     models: dict[str, str] | None = None
     input_cost_per_mtok: float | None = Field(default=None, ge=0)
@@ -111,7 +113,7 @@ def update_provider(provider: str, body: ProviderIn, ctx: Ctx = Depends(perm("mo
                 old.revoked_at = utcnow()
         c.credential_id = store_credential(ctx.db, ctx.org_id, f"model:{provider}", "api_key", body.api_key.strip()).id
         c.last_test_ok = None
-    for k in ("enabled", "approved_for_tenant_data", "models", "input_cost_per_mtok", "output_cost_per_mtok", "timeout_seconds", "max_retries"):
+    for k in ("enabled", "approved_for_tenant_data", "approved_for_computer_use", "models", "input_cost_per_mtok", "output_cost_per_mtok", "timeout_seconds", "max_retries"):
         v = getattr(body, k)
         if v is not None:
             setattr(c, k, v)
@@ -317,97 +319,71 @@ def run_retention(ctx: Ctx = Depends(perm("settings.manage"))):
     return apply_retention(ctx.db, ctx.org_id)
 
 
-class ApprovalChannelsIn(BaseModel):
+# ======================= Approval notification settings (ADR 0021) =======================
+class ChannelsIn(BaseModel):
     in_app: bool = True
     email: bool = True
-    slack: bool = False
-    teams: bool = False
+    slack: bool = True
+    teams: bool = True
 
 
-class ApprovalNotificationsIn(BaseModel):
+class ApprovalNotifyIn(BaseModel):
     reminder_minutes: int = Field(ge=1, le=240)
     email_rate_per_hour: int = Field(ge=1, le=500)
     slack_rate_per_hour: int = Field(ge=1, le=1000)
-    teams_rate_per_hour: int | None = Field(default=None, ge=1, le=1000)
-    channels: dict[str, ApprovalChannelsIn]
+    teams_rate_per_hour: int | None = Field(default=None, ge=1, le=1000)  # omitted = keep current (ADR 0022)
+    channels: dict[str, ChannelsIn]
 
 
-def _approval_notification_view(db: Session, org: Organization) -> dict:
+def _approval_notify_view(db: Session, org: Organization) -> dict:
     from ..services.approval_notify import SETTINGS_DEFAULTS, _org_setting, channel_matrix
 
-    return {
-        "reminder_minutes": _org_setting(
-            db, org.id, "approval_reminder_minutes", SETTINGS_DEFAULTS["approval_reminder_minutes"]
-        ),
-        "email_rate_per_hour": _org_setting(
-            db, org.id, "approval_email_rate_per_hour", SETTINGS_DEFAULTS["approval_email_rate_per_hour"]
-        ),
-        "slack_rate_per_hour": _org_setting(
-            db, org.id, "slack_rate_per_hour", SETTINGS_DEFAULTS["slack_rate_per_hour"]
-        ),
-        "teams_rate_per_hour": _org_setting(
-            db, org.id, "teams_rate_per_hour", SETTINGS_DEFAULTS["teams_rate_per_hour"]
-        ),
-        "channels": channel_matrix(db, org.id),
-        "slack_connected": bool(db.execute(select(Integration.id).where(
-            Integration.org_id == org.id, Integration.kind == "slack", Integration.status == "connected"
-        )).first()),
-        "teams_connected": bool(db.execute(select(Integration.id).where(
-            Integration.org_id == org.id, Integration.kind == "teams", Integration.status == "connected"
-        )).first()),
-    }
+    return {"reminder_minutes": _org_setting(db, org.id, "approval_reminder_minutes", SETTINGS_DEFAULTS["approval_reminder_minutes"]),
+            "email_rate_per_hour": _org_setting(db, org.id, "approval_email_rate_per_hour", SETTINGS_DEFAULTS["approval_email_rate_per_hour"]),
+            "slack_rate_per_hour": _org_setting(db, org.id, "slack_rate_per_hour", SETTINGS_DEFAULTS["slack_rate_per_hour"]),
+            "teams_rate_per_hour": _org_setting(db, org.id, "teams_rate_per_hour", SETTINGS_DEFAULTS["teams_rate_per_hour"]),
+            "channels": channel_matrix(db, org.id),
+            "teams_connected": bool(db.execute(select(Integration.id).where(Integration.org_id == org.id, Integration.kind == "teams",
+                                                                            Integration.status != "revoked")).first()),
+            "slack_connected": bool(db.execute(select(Integration.id).where(Integration.org_id == org.id, Integration.kind == "slack",
+                                                                            Integration.status != "revoked")).first())}
 
 
 @router.get("/admin/approval-notifications")
-def get_approval_notifications(ctx: Ctx = Depends(perm("settings.manage"))):
-    return _approval_notification_view(ctx.db, _org(ctx))
+def get_approval_notify(ctx: Ctx = Depends(perm("settings.manage"))):
+    org = ctx.db.get(Organization, ctx.org_id)
+    if org is None:
+        raise NotFound("Organization not found")
+    return _approval_notify_view(ctx.db, org)
 
 
 @router.put("/admin/approval-notifications")
-def put_approval_notifications(
-    body: ApprovalNotificationsIn,
-    ctx: Ctx = Depends(perm("settings.manage")),
-):
+def put_approval_notify(body: ApprovalNotifyIn, ctx: Ctx = Depends(perm("settings.manage"))):
     from ..services.approval_notify import KIND_CATEGORY
 
-    if set(body.channels) != set(KIND_CATEGORY):
-        raise AppError(
-            f"channels must list exactly: {', '.join(KIND_CATEGORY)}",
-            code="validation_error",
-        )
-    requested = body.channels["approval_requested"]
-    if not (requested.in_app or requested.email):
-        raise AppError(
-            "Approval requests must reach approvers in-app or by email",
-            code="validation_error",
-        )
-    org = _org(ctx)
-    before = _approval_notification_view(ctx.db, org)
-    org.settings = {
-        **(org.settings or {}),
-        "approval_reminder_minutes": body.reminder_minutes,
-        "approval_email_rate_per_hour": body.email_rate_per_hour,
-        "slack_rate_per_hour": body.slack_rate_per_hour,
-        "teams_rate_per_hour": body.teams_rate_per_hour or before["teams_rate_per_hour"],
-        "approval_channels": {
-            kind: channels.model_dump()
-            for kind, channels in body.channels.items()
-        },
-    }
+    unknown = set(body.channels) - set(KIND_CATEGORY)
+    if unknown or set(body.channels) != set(KIND_CATEGORY):
+        raise AppError(f"channels must list exactly: {', '.join(KIND_CATEGORY)}", code="validation_error")
+    req = body.channels["approval_requested"]
+    if not (req.in_app or req.email):
+        raise AppError("Approval requests must reach approvers in-app or by email (Slack/Teams alone have no per-person delivery)",
+                       code="validation_error")
+    if body.reminder_minutes >= 24 * 60:
+        raise AppError("reminder_minutes too large", code="validation_error")
+    org = ctx.db.get(Organization, ctx.org_id)
+    if org is None:
+        raise NotFound("Organization not found")
+    before = _approval_notify_view(ctx.db, org)
+    org.settings = {**(org.settings or {}), "approval_reminder_minutes": body.reminder_minutes,
+                    "approval_email_rate_per_hour": body.email_rate_per_hour, "slack_rate_per_hour": body.slack_rate_per_hour,
+                    "teams_rate_per_hour": body.teams_rate_per_hour or before["teams_rate_per_hour"],
+                    "approval_channels": {k: v.model_dump() for k, v in body.channels.items()}}
     ctx.db.flush()
-    after = _approval_notification_view(ctx.db, org)
-    tracked = ("reminder_minutes", "email_rate_per_hour", "slack_rate_per_hour", "teams_rate_per_hour", "channels")
-    changes = {key: {"from": before[key], "to": after[key]} for key in tracked if before[key] != after[key]}
-    audit.record(
-        ctx.db,
-        org_id=org.id,
-        actor_kind="user",
-        actor_id=ctx.p.user_id,
-        action="settings.approval_notifications_updated",
-        resource_type="organization",
-        resource_id=org.id,
-        data={"changes": changes},
-    )
+    after = _approval_notify_view(ctx.db, org)
+    changes = {k: {"from": before[k], "to": after[k]} for k in ("reminder_minutes", "email_rate_per_hour", "slack_rate_per_hour", "teams_rate_per_hour", "channels")
+               if before[k] != after[k]}
+    audit.record(ctx.db, org_id=org.id, actor_kind="user", actor_id=ctx.p.user_id, action="settings.approval_notifications_updated",
+                 resource_type="organization", resource_id=org.id, data={"changes": changes})
     return after
 
 

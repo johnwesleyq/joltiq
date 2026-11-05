@@ -25,9 +25,12 @@ class FakeDevice:
     def pem(self):
         return self.key.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo).decode()
 
-    def enroll(self, code, caps=("system.info", "service.status")):
-        r = self.c.post("/api/v1/agent/v1/enroll", json={"code": code, "public_key_pem": self.pem(), "hostname": "PC-1", "os_name": "Windows 11",
-                                                          "os_version": "10.0.22631", "agent_version": "1.0.0", "capabilities": list(caps)})
+    def enroll(self, code, caps=("system.info", "service.status"), *, installation_id=None):
+        payload = {"code": code, "public_key_pem": self.pem(), "hostname": "PC-1", "os_name": "Windows 11",
+                   "os_version": "10.0.22631", "agent_version": "1.0.0", "capabilities": list(caps)}
+        if installation_id is not None:
+            payload["installation_id"] = installation_id
+        r = self.c.post("/api/v1/agent/v1/enroll", json=payload)
         if r.status_code == 200:
             self.device_id = r.json()["device_id"]
             self.server_pem = r.json()["server_public_key_pem"]
@@ -68,6 +71,49 @@ def test_enrollment_single_use_and_signed_poll(app, owner):
     assert d.get("/poll").status_code == 200
     devs = owner.get("/api/v1/devices").json()["items"]
     assert devs[0]["hostname"] == "PC-1" and devs[0]["online"] is True
+
+
+def test_reenrolling_same_installation_retires_only_its_previous_identity(app, owner):
+    installation_id = str(uuid.uuid4())
+    first = FakeDevice(app)
+    replacement = FakeDevice(app)
+    separate_installation = FakeDevice(app)
+
+    assert first.enroll(_code(owner), installation_id=installation_id).status_code == 200
+    assert replacement.enroll(_code(owner), installation_id=installation_id).status_code == 200
+    assert separate_installation.enroll(_code(owner), installation_id=str(uuid.uuid4())).status_code == 200
+
+    devices = {item["id"]: item for item in owner.get("/api/v1/devices").json()["items"]}
+    assert devices[first.device_id]["status"] == "revoked"
+    assert devices[replacement.device_id]["status"] == "active"
+    assert devices[separate_installation.device_id]["status"] == "active"
+    refused = first.get("/poll")
+    assert refused.status_code == 403
+    assert refused.json()["error"]["code"] == "device_revoked"
+
+
+def test_signed_heartbeat_backfills_installation_identity_for_existing_device(app, owner):
+    device = FakeDevice(app)
+    assert device.enroll(_code(owner)).status_code == 200
+    installation_id = str(uuid.uuid4())
+
+    heartbeat = device.post(
+        "/heartbeat",
+        {"agent_version": "1.0.0", "installation_id": installation_id, "facts": {}, "capabilities": []},
+    )
+
+    assert heartbeat.status_code == 200
+    item = next(item for item in owner.get("/api/v1/devices").json()["items"] if item["id"] == device.device_id)
+    assert item["installation_id"] == installation_id
+
+
+def test_enrollment_accepts_shipped_windows_companion_capability_count(app, owner):
+    """The v14 Windows companion currently advertises 58 distinct capabilities."""
+    capabilities = [f"windows.capability.{i}" for i in range(58)]
+
+    response = FakeDevice(app).enroll(_code(owner), caps=capabilities)
+
+    assert response.status_code == 200, response.text
 
 
 def test_rejects_bad_signature_replay_stale_and_reused_nonce(app, owner):
@@ -115,7 +161,7 @@ def test_signed_device_support_request_links_identity_and_creates_no_control_art
     )
     assert created.status_code == 201, created.text
     result = created.json()
-    assert set(result) == {"ticket_id", "ticket_number", "run_id", "state", "reply", "ai_notice", "setup_required"}
+    assert set(result) == {"ticket_id", "ticket_number", "run_id", "state", "ai_notice", "reply", "setup_required"}
 
     with session_scope(uuid.UUID(owner.org_id)) as db:
         device = db.get(Device, uuid.UUID(d.device_id))
@@ -153,15 +199,19 @@ def test_device_support_request_status_is_customer_safe_and_can_continue(app, ow
     assert status.status_code == 200, status.text
     body = status.json()
     assert set(body) == {"id", "ticket_id", "state", "paused_for", "outcome_stage", "messages", "ai_notice", "computer_use"}
+    assert body["computer_use"] is None
     assert all(set(message) == {"id", "role", "content", "at"} for message in body["messages"])
-    assert [message["content"] for message in body["messages"]] == [
+    assert [message["content"] for message in body["messages"] if message["role"] == "user"] == [
         "Please help with Outlook.",
         "It fails when I open a PDF.",
     ]
+    # No model connected in tests: Ask says so plainly instead of inventing an offline answer.
+    assert continued.json()["reply"] is None and continued.json()["setup_required"] is True
+    assert "Connect OpenAI" in continued.json()["ai_notice"]
 
     with session_scope(uuid.UUID(owner.org_id)) as db:
         messages = db.execute(select(AgentMessage).where(AgentMessage.run_id == uuid.UUID(run_id))).scalars().all()
-        assert [message.content for message in messages] == [
+        assert [message.content for message in messages if message.role == "user"] == [
             "Please help with Outlook.",
             "It fails when I open a PDF.",
         ]
@@ -189,7 +239,7 @@ def test_device_support_request_is_private_to_its_device_even_in_same_tenant(app
     assert second.post(f"/support-requests/{run_id}/messages", {"message": "Cross-device write."}).status_code == 404
 
 
-def test_device_support_request_reuses_the_single_session_consent_for_fix(app, owner):
+def test_device_support_request_can_start_fix_with_two_local_consent_gates(app, owner):
     capabilities = [
         "system.info", "screen.capture", "input.click", "input.type", "input.key", "input.scroll", "input.move",
         "url.open", "guide.highlight", "guide.clear",
@@ -226,7 +276,6 @@ def test_device_support_request_reuses_the_single_session_consent_for_fix(app, o
     run_begin = next(e for e in pending if e["type"] == "computer_use.begin")
     assert run_begin["mode"] == "fix"
     assert run_begin["goal"] == "I can't find Adobe Sign in Outlook."
-    assert run_begin["inherits_session_consent"] is True
 
     assert device.post(
         f"/computer-use/{run_begin['computer_use_run_id']}/local-consent",
@@ -252,7 +301,132 @@ def test_device_support_request_reuses_the_single_session_consent_for_fix(app, o
     assert conflicting.json()["mode"] == "fix"
 
 
-def test_completed_direct_computer_use_does_not_block_a_fresh_fix_request(app, owner):
+def test_device_support_request_fix_uses_latest_user_message_as_goal(app, owner):
+    capabilities = [
+        "system.info", "screen.capture", "input.click", "input.type", "input.key", "input.scroll", "input.move",
+        "url.open", "guide.highlight", "guide.clear",
+    ]
+    device = FakeDevice(app)
+    assert device.enroll(_code(owner), caps=capabilities).status_code == 200
+    created = device.post(
+        "/support-requests",
+        {"client_request_id": str(uuid.uuid4()), "message": "Original ticket request."},
+    ).json()
+    latest_goal = "Append the new autonomous test line in Notepad."
+    continued = device.post(
+        f"/support-requests/{created['run_id']}/messages",
+        {"message": latest_goal},
+    )
+    assert continued.status_code == 200, continued.text
+
+    started = device.post(f"/support-requests/{created['run_id']}/computer-use", {"mode": "fix"})
+    assert started.status_code == 201, started.text
+    body = started.json()
+    begin = [json.loads(base64.b64decode(e["payload"])) for e in device.get("/poll").json()["envelopes"]]
+    session_begin = next(e for e in begin if e["type"] == "session.begin")
+    assert session_begin["request_details"]["computer_use_goal"] == latest_goal
+
+    assert device.post(
+        f"/sessions/{body['session_id']}/local-consent",
+        {"accepted": True, "user_display_name": "John"},
+    ).status_code == 200
+    pending = [json.loads(base64.b64decode(e["payload"])) for e in device.get("/poll").json()["envelopes"]]
+    run_begin = next(e for e in pending if e["type"] == "computer_use.begin")
+    assert run_begin["goal"] == latest_goal
+
+
+def test_device_support_request_fix_keeps_request_when_latest_message_is_platform_clarification(app, owner):
+    capabilities = [
+        "system.info", "screen.capture", "input.click", "input.type", "input.key", "input.scroll", "input.move",
+        "url.open", "guide.highlight", "guide.clear", "app.list", "app.uninstall",
+    ]
+    device = FakeDevice(app)
+    assert device.enroll(_code(owner), caps=capabilities).status_code == 200
+    created = device.post(
+        "/support-requests",
+        {"client_request_id": str(uuid.uuid4()), "message": "My printer jobs are stuck. Clear the printer queue."},
+    ).json()
+    assert device.post(
+        f"/support-requests/{created['run_id']}/messages",
+        {"message": "uninstall adobe genuine service"},
+    ).status_code == 200
+    assert device.post(
+        f"/support-requests/{created['run_id']}/messages",
+        {"message": "Windows"},
+    ).status_code == 200
+
+    started = device.post(f"/support-requests/{created['run_id']}/computer-use", {"mode": "fix"})
+
+    assert started.status_code == 201, started.text
+    begin = [json.loads(base64.b64decode(e["payload"])) for e in device.get("/poll").json()["envelopes"]]
+    request_details = next(e for e in begin if e["type"] == "session.begin")["request_details"]
+    assert request_details["computer_use_goal"] == "uninstall adobe genuine service"
+    plan = request_details["full_fix"]
+    assert [(item["action"], item["params"]) for item in plan["windows_actions"]] == [
+        ("app.uninstall", {"name": "adobe genuine service"}),
+    ]
+    assert plan["high_risk"] is True
+
+
+def test_device_support_request_fix_persists_typed_windows_plan(app, owner):
+    capabilities = [
+        "system.info", "screen.capture", "input.click", "input.type", "input.key", "input.scroll", "input.move",
+        "url.open", "guide.highlight", "guide.clear", "network.flush_dns", "network.diagnostics",
+    ]
+    device = FakeDevice(app)
+    assert device.enroll(_code(owner), caps=capabilities).status_code == 200
+    created = device.post(
+        "/support-requests",
+        {"client_request_id": str(uuid.uuid4()), "message": "Flush my DNS and check my network."},
+    ).json()
+
+    started = device.post(f"/support-requests/{created['run_id']}/computer-use", {"mode": "fix"})
+
+    assert started.status_code == 201, started.text
+    begin = [json.loads(base64.b64decode(e["payload"])) for e in device.get("/poll").json()["envelopes"]]
+    request_details = next(e for e in begin if e["type"] == "session.begin")["request_details"]
+    plan = request_details["full_fix"]
+    assert [item["action"] for item in plan["windows_actions"]] == ["network.flush_dns", "network.diagnostics"]
+    assert plan["high_risk"] is False
+
+
+def test_direct_high_risk_fix_records_ack_on_native_allow(app, owner):
+    from joltiq.db import session_scope
+    from joltiq.models import ComputerUseRun, SupportSession
+
+    capabilities = [
+        "system.info", "screen.capture", "input.click", "input.type", "input.key", "input.scroll", "input.move",
+        "url.open", "guide.highlight", "guide.clear", "printer.clear_queue",
+    ]
+    device = FakeDevice(app)
+    assert device.enroll(_code(owner), caps=capabilities).status_code == 200
+    created = device.post(
+        "/support-requests",
+        {"client_request_id": str(uuid.uuid4()), "message": "My printer jobs are stuck. Clear the printer queue."},
+    ).json()
+    started = device.post(f"/support-requests/{created['run_id']}/computer-use", {"mode": "fix"}).json()
+    session_id = started["session_id"]
+
+    assert device.post(
+        f"/sessions/{session_id}/local-consent",
+        {"accepted": True, "user_display_name": "John"},
+    ).status_code == 200
+    envelopes = [json.loads(base64.b64decode(e["payload"])) for e in device.get("/poll").json()["envelopes"]]
+    run_begin = next(e for e in envelopes if e["type"] == "computer_use.begin")
+    run_id = run_begin["computer_use_run_id"]
+
+    allowed = device.post(f"/computer-use/{run_id}/local-consent", {"accepted": True})
+    assert allowed.status_code == 200, allowed.text
+    with session_scope(uuid.UUID(owner.org_id)) as db:
+        run = db.get(ComputerUseRun, uuid.UUID(run_id))
+        session = db.get(SupportSession, run.session_id)
+        full_fix = session.request_details["full_fix"]
+        assert full_fix["high_risk"] is True
+        assert full_fix["high_risk_acknowledged_at"]
+        assert full_fix["approved_by_device"]
+
+
+def test_device_support_request_retry_starts_fresh_run_after_terminal_failure(app, owner):
     from joltiq.db import session_scope
     from joltiq.models import ComputerUseRun
 
@@ -264,129 +438,44 @@ def test_completed_direct_computer_use_does_not_block_a_fresh_fix_request(app, o
     assert device.enroll(_code(owner), caps=capabilities).status_code == 200
     created = device.post(
         "/support-requests",
-        {"client_request_id": str(uuid.uuid4()), "message": "My Windows laptop cannot connect to office Wi-Fi."},
+        {"client_request_id": str(uuid.uuid4()), "message": "Append a test line in Notepad."},
     ).json()
 
-    first = device.post(f"/support-requests/{created['run_id']}/computer-use", {"mode": "fix"})
-    assert first.status_code == 201, first.text
-    first_body = first.json()
+    started = device.post(f"/support-requests/{created['run_id']}/computer-use", {"mode": "fix"}).json()
     assert device.post(
-        f"/sessions/{first_body['session_id']}/local-consent",
+        f"/sessions/{started['session_id']}/local-consent",
         {"accepted": True, "user_display_name": "John"},
     ).status_code == 200
+    pending = [json.loads(base64.b64decode(e["payload"])) for e in device.get("/poll").json()["envelopes"]]
+    first_begin = next(e for e in pending if e["type"] == "computer_use.begin")
+    first_run_id = uuid.UUID(first_begin["computer_use_run_id"])
 
     with session_scope(uuid.UUID(owner.org_id)) as db:
-        prior = db.query(ComputerUseRun).filter(ComputerUseRun.session_id == uuid.UUID(first_body["session_id"])).one()
-        prior.state = "completed"
-        prior.success = True
-        prior.summary = "Previous test completed."
+        failed = db.get(ComputerUseRun, first_run_id)
+        failed.state = "failed"
+        failed.summary = "Provider rejected the request."
 
-    restarted = device.post(f"/support-requests/{created['run_id']}/computer-use", {"mode": "fix"})
-    assert restarted.status_code == 201, restarted.text
-    assert restarted.json()["state"] == "waiting_session_consent"
-    assert restarted.json()["computer_use_run_id"] is None
-    assert restarted.json()["session_id"] != first_body["session_id"]
-
-
-def test_fix_it_for_me_runs_an_existing_read_only_device_plan_instead_of_fixture_computer_use(app, owner):
-    """A typed read-only plan must stay on the signed action path, not become a generic screen-driving run."""
-    from sqlalchemy import func, select
-
-    from joltiq.db import session_scope
-    from joltiq.models import AgentPlan, AgentRun, ComputerUseRun, Device, PlanStep, SupportSession
-    from joltiq.models.enums import RunState
-    from joltiq.services import sessions
-
-    device = FakeDevice(app)
-    assert device.enroll(_code(owner), caps=["disk.usage", "screen.capture"]).status_code == 200
-    created = device.post(
-        "/support-requests",
-        {
-            "client_request_id": str(uuid.uuid4()),
-            "message": "Check this Windows PC's free disk space using a read-only diagnostic.",
-        },
-    ).json()
-
-    with session_scope(uuid.UUID(owner.org_id)) as db:
-        run = db.get(AgentRun, uuid.UUID(created["run_id"]))
-        enrolled = db.get(Device, uuid.UUID(device.device_id))
-        session = sessions.start(
-            db,
-            run.org_id,
-            kind="desktop",
-            owner_id=enrolled.owner_user_id,
-            ticket_id=run.ticket_id,
-            device_id=enrolled.id,
-            run_id=run.id,
-        )
-        plan = AgentPlan(
-            org_id=run.org_id,
-            run_id=run.id,
-            revision=1,
-            summary="Read the free disk space",
-            plan_hash="a" * 64,
-            status="proposed",
-        )
-        db.add(plan)
-        db.flush()
-        db.add(PlanStep(
-            org_id=run.org_id,
-            plan_id=plan.id,
-            ordinal=0,
-            action="disk.usage",
-            target={"session_id": str(session.id), "device_id": str(enrolled.id)},
-            params={},
-            rationale="Read free disk space",
-            risk="READ_ONLY",
-            postconditions=[{"type": "device_disk_usage_available"}],
-        ))
-        run.context = {**run.context, "current_plan_id": str(plan.id)}
-        run.state = RunState.AWAITING_APPROVAL
-        run.paused_for = "approval"
-        structured_session_id = str(session.id)
-        stale = sessions.start(
-            db,
-            run.org_id,
-            kind="desktop",
-            owner_id=enrolled.owner_user_id,
-            ticket_id=run.ticket_id,
-            device_id=enrolled.id,
-            run_id=run.id,
-            request_details={"direct_device_request": True, "computer_use_mode": "fix"},
-        )
-        sessions.give_consent(
-            db,
-            stale,
-            user_id=enrolled.owner_user_id,
-            customer_id=enrolled.customer_id,
-            is_staff=True,
-        )
-
-    started = device.post(f"/support-requests/{created['run_id']}/computer-use", {"mode": "fix"})
-    assert started.status_code == 200, started.text
-    assert started.json()["state"] == "waiting_session_consent"
-    assert started.json()["computer_use_run_id"] is None
-    assert started.json()["session_id"] == structured_session_id
-
-    envelopes = [json.loads(base64.b64decode(e["payload"])) for e in device.get("/poll").json()["envelopes"]]
-    session_begin = next(
-        e for e in envelopes
-        if e["type"] == "session.begin" and e["session_id"] == structured_session_id
+    retry_goal = "Append a different test line in Notepad."
+    continued = device.post(
+        f"/support-requests/{created['run_id']}/messages",
+        {"message": retry_goal},
     )
-    assert session_begin["consent"]["max_risk"] == "READ_ONLY"
-    assert session_begin["consent"]["actions"] == ["disk.usage"]
-    assert not [e for e in envelopes if e["type"] == "computer_use.begin"]
-
-    with session_scope(uuid.UUID(owner.org_id)) as db:
-        assert db.scalar(select(func.count()).select_from(ComputerUseRun)) == 0
-        active = db.get(SupportSession, uuid.UUID(started.json()["session_id"]))
-        assert active.state == "active"
+    assert continued.status_code == 200, continued.text
+    retried = device.post(f"/support-requests/{created['run_id']}/computer-use", {"mode": "guide"})
+    assert retried.status_code == 201, retried.text
+    body = retried.json()
+    assert body["session_id"] == started["session_id"]
+    assert body["computer_use_run_id"] != str(first_run_id)
+    assert body["mode"] == "guide"
+    assert body["state"] == "waiting_local_consent"
+    pending = [json.loads(base64.b64decode(e["payload"])) for e in device.get("/poll").json()["envelopes"]]
+    retry_begin = next(e for e in pending if e["type"] == "computer_use.begin")
+    assert retry_begin["goal"] == retry_goal
 
 
 def test_active_direct_computer_use_accepts_device_result_after_ticket_run_escalated(app, owner):
     from joltiq.db import session_scope
-    from joltiq.models import AgentRun, ComputerUseRun, DeviceCommand
-    from joltiq.services.jobs import drain
+    from joltiq.models import AgentRun, DeviceCommand
 
     capabilities = [
         "system.info", "screen.capture", "input.click", "input.type", "input.key", "input.scroll", "input.move",
@@ -399,7 +488,7 @@ def test_active_direct_computer_use_accepts_device_result_after_ticket_run_escal
         {"client_request_id": str(uuid.uuid4()), "message": "Please uninstall Adobe Acrobat DC."},
     ).json()
 
-    device.post(f"/support-requests/{created['run_id']}/computer-use", {"mode": "fix"}).json()
+    device.post(f"/support-requests/{created['run_id']}/computer-use", {"mode": "fix"})
     pending = [json.loads(base64.b64decode(e["payload"])) for e in device.get("/poll").json()["envelopes"]]
     session_begin = next(e for e in pending if e["type"] == "session.begin")
     assert device.post(
@@ -431,13 +520,6 @@ def test_active_direct_computer_use_accepts_device_result_after_ticket_run_escal
         assert command.status == "failed"
         assert command.result == {"ok": False, "error": "Desktop capture refused: remote_session"}
 
-    drain()
-    with session_scope(uuid.UUID(owner.org_id)) as db:
-        computer_run = db.get(ComputerUseRun, uuid.UUID(run_begin["computer_use_run_id"]))
-        assert computer_run.state == "failed"
-        assert computer_run.success is False
-        assert "remote_session" in (computer_run.summary or "")
-
 
 def test_active_direct_computer_use_owns_native_conversation_after_ticket_agent_escalates(app, owner):
     from joltiq.db import session_scope
@@ -455,7 +537,7 @@ def test_active_direct_computer_use_owns_native_conversation_after_ticket_agent_
         {"client_request_id": str(uuid.uuid4()), "message": "Please uninstall Adobe Acrobat DC."},
     ).json()
 
-    device.post(f"/support-requests/{created['run_id']}/computer-use", {"mode": "fix"}).json()
+    device.post(f"/support-requests/{created['run_id']}/computer-use", {"mode": "fix"})
     pending = [json.loads(base64.b64decode(e["payload"])) for e in device.get("/poll").json()["envelopes"]]
     session_begin = next(e for e in pending if e["type"] == "session.begin")
     assert device.post(

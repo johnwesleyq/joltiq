@@ -21,7 +21,7 @@ from typing import Any
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -98,7 +98,7 @@ def create_enrollment(db: Session, org_id: uuid.UUID, *, created_by, customer_id
 
 
 def enroll(db: Session, *, code: str, public_key_pem: str, hostname: str, os_name: str, os_version: str, agent_version: str,
-           capabilities: list[str]) -> Device:
+           capabilities: list[str], installation_id: uuid.UUID | None = None) -> Device:
     set_tenant(db, None, platform=True)  # lookup by unguessable code hash only
     e = db.execute(select(DeviceEnrollment).where(DeviceEnrollment.code_hash == sha256_hex(code.replace("-", "").strip().upper()))
                    .with_for_update()).scalar_one_or_none()
@@ -114,7 +114,17 @@ def enroll(db: Session, *, code: str, public_key_pem: str, hostname: str, os_nam
         raise AppError(f"Agent version {agent_version} is too old; minimum {MIN_AGENT_VERSION}", code="agent_outdated")
     set_tenant(db, e.org_id)
     caps = [c for c in capabilities if c in accepted_desktop_actions()]
-    d = Device(org_id=e.org_id, customer_id=e.customer_id, owner_user_id=e.created_by, hostname=hostname[:255], os_name=os_name[:120],
+    previous = None
+    if installation_id is not None:
+        lock_key = f"device-installation:{e.org_id}:{installation_id}"
+        db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"), {"key": lock_key})
+        previous = db.execute(
+            select(Device).where(Device.installation_id == installation_id, Device.status == "active").with_for_update()
+        ).scalar_one_or_none()
+        if previous is not None:
+            revoke(db, previous, e.created_by)
+    d = Device(org_id=e.org_id, customer_id=e.customer_id, owner_user_id=e.created_by, installation_id=installation_id,
+               hostname=hostname[:255], os_name=os_name[:120],
                os_version=os_version[:120], agent_version=agent_version[:40], status="active", public_key_pem=public_key_pem,
                last_seen_at=utcnow(), capabilities=caps, last_counter=0)
     db.add(d)
@@ -122,6 +132,9 @@ def enroll(db: Session, *, code: str, public_key_pem: str, hostname: str, os_nam
     e.used_at, e.device_id = utcnow(), d.id
     audit.record(db, org_id=e.org_id, actor_kind="device", actor_id=d.id, action="device.enrolled", resource_type="device", resource_id=d.id,
                  data={"hostname": hostname, "os": f"{os_name} {os_version}", "agent_version": agent_version, "capabilities": caps})
+    if previous is not None:
+        audit.record(db, org_id=e.org_id, actor_kind="system", actor_id=None, action="device.superseded",
+                     resource_type="device", resource_id=previous.id, data={"replacement_device_id": str(d.id)})
     from .notifications import notify
 
     notify(db, e.org_id, [e.created_by], "device", f"Device {hostname} enrolled", f"{os_name} {os_version}, agent {agent_version}", f"/admin/devices/{d.id}", email=False)
@@ -183,16 +196,22 @@ def authenticate_device(db: Session, *, device_id: str, ts: str, nonce: str, cou
 
 # ---------------- commands ----------------
 def queue_command(db: Session, device: Device, *, action: str, params: dict, session: SupportSession | None, execution_id=None,
-                  procedure_hash: str | None = None) -> DeviceCommand:
+                  procedure_hash: str | None = None, authorization: dict | None = None) -> DeviceCommand:
     if ACTIONS.get(action) is None:
         raise AppError("Unknown desktop action", code="unsupported_action")
     clean = validate_params(action, params)
+    if authorization is not None:
+        expected_hash = sha256_hex(canonical_json({"action": action, "params": clean}))
+        if authorization.get("action_hash") != expected_hash or authorization.get("action") != action:
+            raise Conflict("Action does not match the approved authorization", code="action_authorization_mismatch")
+        if int(authorization.get("authorization_expires_at") or 0) <= int(utcnow().timestamp()):
+            raise Conflict("Action authorization expired", code="action_authorization_expired")
     if action not in (device.capabilities or []):
         raise AppError(f"Device agent does not support {action}", code="unsupported_action")
     if session is not None and not (session.consent or {}).get("device_local_consent"):
         raise Conflict("Waiting for the user to accept the session on their computer", code="device_consent_pending")
     computer_use_run = None
-    if ACTIONS[action].computer_use:
+    if ACTIONS[action].computer_use or ACTIONS[action].run_bound:
         from ..models import ComputerUseRun
 
         computer_use_run = db.get(ComputerUseRun, execution_id) if execution_id else None
@@ -217,6 +236,9 @@ def queue_command(db: Session, device: Device, *, action: str, params: dict, ses
     if computer_use_run:
         payload["computer_use_run_id"] = str(computer_use_run.id)
         payload["computer_use_mode"] = computer_use_run.mode
+    if authorization is not None:
+        for key in ("authorization_id", "action_hash", "plan_hash", "authorization_expires_at"):
+            payload[key] = authorization[key]
     cmd.envelope = sign_envelope(payload)
     return cmd
 
@@ -231,6 +253,37 @@ def session_begin_envelope(device: Device, s: SupportSession) -> dict:
     return sign_envelope(body)
 
 
+LOCAL_CONSENT_TIMEOUT = timedelta(minutes=10)
+
+
+def expire_stale_device_grants(db: Session, device: Device, now) -> None:
+    """Stop the poll from re-sending dead grants forever.
+
+    Before this, a session whose consent window had ended stayed "active" in the database. Every poll (3 s) re-sent its
+    already-expired session.begin ("envelope expired") and the run's computer_use.begin, which the companion refused
+    because it had no live local session. The UI said "Waiting for approval on this PC" indefinitely. Now: expired
+    sessions end (the companion gets session.end and drops its banner) and a Guide/Fix run nobody allowed on the PC
+    within 10 minutes stops with a plain-English reason, so the user can press Fix it for me again."""
+    from . import sessions as session_svc
+    from .computer_use import _end
+
+    for s in db.execute(select(SupportSession).where(SupportSession.device_id == device.id, SupportSession.state == "active",
+                                                     SupportSession.expires_at.is_not(None), SupportSession.expires_at < now)).scalars():
+        session_svc.terminate(db, s, by_kind="system", reason="consent window ended")
+    from ..models import ComputerUseRun
+
+    session_ids = select(SupportSession.id).where(SupportSession.device_id == device.id)
+    for run in db.execute(select(ComputerUseRun).where(
+        ComputerUseRun.session_id.in_(session_ids), ComputerUseRun.state == "waiting_local_consent",
+        ComputerUseRun.updated_at < now - LOCAL_CONSENT_TIMEOUT,
+    )).scalars():
+        _end(db, run, "stopped", "Nobody allowed Fix it for me on this PC within 10 minutes", False)
+    for s in db.execute(select(SupportSession).where(SupportSession.device_id == device.id, SupportSession.state == "active",
+                                                     SupportSession.consented_at < now - LOCAL_CONSENT_TIMEOUT)).scalars():
+        if not (s.consent or {}).get("device_local_consent"):
+            session_svc.terminate(db, s, by_kind="system", reason="nobody allowed it on this PC within 10 minutes")
+
+
 def pending_for(db: Session, device: Device) -> list[dict]:
     out = []
     now = utcnow()
@@ -238,6 +291,7 @@ def pending_for(db: Session, device: Device) -> list[dict]:
     # only in memory and treats an already-known session.begin as idempotent. If
     # the tray restarts, this makes it ask locally again before accepting any
     # computer-use grant instead of silently losing the session forever.
+    expire_stale_device_grants(db, device, now)
     for s in db.execute(select(SupportSession).where(SupportSession.device_id == device.id, SupportSession.state == "active")).scalars():
         out.append(session_begin_envelope(device, s))
     for s in db.execute(select(SupportSession).where(SupportSession.device_id == device.id, SupportSession.state == "terminated",
@@ -254,17 +308,12 @@ def pending_for(db: Session, device: Device) -> list[dict]:
         ComputerUseRun.state.in_(("waiting_local_consent", "running", "waiting_device", "waiting_customer")),
         ComputerUseRun.local_consent_state.in_(("pending", "approved")),
     )).scalars():
-        run_session = db.get(SupportSession, run.session_id)
-        details = (run_session.request_details or {}) if run_session else {}
-        inherits_session_consent = bool(
-            details.get("direct_device_request")
-            and details.get("computer_use_mode") == run.mode
-            and details.get("computer_use_goal") == run.goal
-        )
+        destination = ({"openai": "JoltIQ-managed OpenAI cloud", "ollama": "your organization's local AI gateway",
+                        "local_fixture": "the local JoltIQ test engine"}.get(run.provider or "", run.provider or "configured AI provider"))
         out.append(sign_envelope({
             "type": "computer_use.begin", "session_id": str(run.session_id),
             "computer_use_run_id": str(run.id), "device_id": str(device.id),
-            "mode": run.mode, "goal": run.goal, "inherits_session_consent": inherits_session_consent,
+            "mode": run.mode, "goal": run.goal, "ai_data_destination": destination, "ai_model": run.model,
             "issued_at": int(now.timestamp()), "expires_at": int((now + timedelta(seconds=COMMAND_TTL_S)).timestamp()),
             "nonce": new_token(12),
         }))
@@ -274,16 +323,22 @@ def pending_for(db: Session, device: Device) -> list[dict]:
         ComputerUseRun.local_consent_state == "approved",
     )).scalars():
         waiting = run.waiting_for or {}
-        if waiting.get("kind") != "approval":
+        if waiting.get("kind") not in ("approval", "action_authorization"):
             continue
         text = str(waiting.get("text") or "").strip()
         interaction_id = str(waiting.get("step_id") or waiting.get("tool_use_id") or "").strip()
         if not text or not interaction_id:
             continue
+        proposal = {k: waiting[k] for k in (
+            "authorization_id", "action", "params", "action_hash", "plan_hash", "expected_effect",
+            "frame_generation", "layout_hash", "frame_sha256", "captured_at", "focused_target_hash",
+            "authorization_expires_at",
+        ) if k in waiting}
         out.append(sign_envelope({
             "type": "computer_use.approval", "session_id": str(run.session_id),
             "computer_use_run_id": str(run.id), "device_id": str(device.id),
             "text": text, "interaction_id": interaction_id,
+            **proposal,
             "issued_at": int(now.timestamp()), "expires_at": int((now + timedelta(seconds=COMMAND_TTL_S)).timestamp()),
             "nonce": new_token(12),
         }))
@@ -390,6 +445,7 @@ def ser(d: Device) -> dict[str, Any]:
     online = bool(d.last_seen_at and (utcnow() - d.last_seen_at).total_seconds() < 90)
     return {"id": str(d.id), "hostname": d.hostname, "os_name": d.os_name, "os_version": d.os_version, "agent_version": d.agent_version,
             "status": d.status, "online": online, "last_seen_at": d.last_seen_at.isoformat() if d.last_seen_at else None,
+            "installation_id": str(d.installation_id) if d.installation_id else None,
             "capabilities": d.capabilities, "customer_id": str(d.customer_id) if d.customer_id else None,
             "owner_user_id": str(d.owner_user_id) if d.owner_user_id else None, "facts": d.facts or {}}
 

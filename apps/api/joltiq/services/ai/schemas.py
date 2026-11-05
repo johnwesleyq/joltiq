@@ -18,8 +18,7 @@ class Intent(BaseModel):
 
 class Clarification(BaseModel):
     sufficient: bool = Field(description="True if enough information exists to search and diagnose")
-    # Providers sometimes return more questions than requested. The workflow safely displays/stores only the first five.
-    questions: list[str] = Field(default_factory=list)
+    questions: list[str] = Field(default_factory=list, max_length=5)
     known_facts: dict[str, str] = Field(default_factory=dict)
 
 
@@ -63,6 +62,24 @@ class ProposedPlan(BaseModel):
     risks: list[str] = Field(default_factory=list)
     escalate_instead: bool = False
     escalation_reason: str | None = None
+
+
+class WindowsRepairStep(BaseModel):
+    """One model-proposed action; risk and approval metadata are never model-owned."""
+
+    action: str = Field(description="Action id from the supplied Windows catalog only")
+    params: dict[str, Any] = Field(default_factory=dict)
+    rationale: str = Field(max_length=500)
+
+
+class WindowsRepairPlan(BaseModel):
+    """A minimal typed Windows repair proposal, validated again against the server catalog."""
+
+    rationale: str = Field(max_length=1000)
+    confidence: float = Field(ge=0, le=1)
+    steps: list[WindowsRepairStep] = Field(default_factory=list, max_length=12)
+    escalate_instead: bool = False
+    escalation_reason: str | None = Field(default=None, max_length=1000)
 
 
 class VerificationAnalysis(BaseModel):

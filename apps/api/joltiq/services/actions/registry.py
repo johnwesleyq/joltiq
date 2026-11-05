@@ -22,12 +22,16 @@ class ActionSpec:
     reversible: bool = True
     requires_admin: bool = False
     computer_use: bool = False  # low-level screen/input primitive, only issued by a computer-use run (never by the planner)
+    run_bound: bool = False  # v13 Windows Fix: only inside the approved Fix run whose plan listed it (never by the planner)
 
 
 _XY = {"x": {"type": "integer", "min": 0, "max": 10000}, "y": {"type": "integer", "min": 0, "max": 10000}}
 _FRAME_BINDING = {
     "frame_generation": {"type": "integer", "min": 1, "max": 2**63 - 1, "required": True},
     "layout_hash": {"type": "string", "pattern": r"^[a-f0-9]{64}$", "required": True},
+    "frame_sha256": {"type": "string", "pattern": r"^[a-f0-9]{64}$", "required": True},
+    "captured_at": {"type": "integer", "min": 1, "max": 2**63 - 1, "required": True},
+    "focused_target_hash": {"type": "string", "pattern": r"^[a-f0-9]{64}$", "required": True},
 }
 _COMBO = r"^[A-Za-z0-9_+\- ]{1,60}$"
 def _CU_SPECS(rows: list[tuple[str, R, str, dict[str, dict[str, Any]], str]]) -> list[tuple[str, R, str, dict[str, dict[str, Any]], str]]:  # noqa: N802
@@ -45,8 +49,7 @@ ACTIONS: dict[str, ActionSpec] = {a.id: a for a in [
                {"name_filter": {"type": "string", "pattern": PROCESS_NAME}}, "None (read-only)."),
     ActionSpec("app.info", "desktop", R.READ_ONLY, "Installed application name/version/publisher from Uninstall registry keys.",
                {"name_filter": {"type": "string", "max": 80, "required": True}}, "None (read-only)."),
-    ActionSpec("disk.usage", "desktop", R.READ_ONLY, "Free/used space per fixed drive.", {}, "None (read-only).",
-               default_postconditions=({"type": "device_disk_usage_available"},)),
+    ActionSpec("disk.usage", "desktop", R.READ_ONLY, "Free/used space per fixed drive.", {}, "None (read-only)."),
     ActionSpec("network.diagnostics", "desktop", R.READ_ONLY, "Adapters, DNS servers, default gateway reachability, DNS resolution of a host.",
                {"resolve_host": {"type": "string", "pattern": r"^[A-Za-z0-9.-]{1,253}$"}}, "None (read-only)."),
     ActionSpec("eventlog.query", "desktop", R.READ_ONLY, "Recent entries from Application/System logs, filtered by provider/level.",
@@ -103,6 +106,32 @@ ACTIONS: dict[str, ActionSpec] = {a.id: a for a in [
                {"process": {"type": "string", "pattern": PROCESS_NAME, "required": True},
                 "automation_id": {"type": "string", "max": 200, "required": True}, "text": {"type": "string", "max": 500, "required": True}},
                "Types text into a field in the user's application."),
+    # ---------------- v13 Windows Fix (typed, run-bound; each must be listed on the plan card the customer approved) -------
+    ActionSpec("printer.list", "desktop", R.READ_ONLY, "List installed printers and their drivers.", {}, "None (read-only)."),
+    ActionSpec("app.uninstall", "desktop", R.PRIVILEGED,
+               "Uninstall the ONE installed program whose name matches exactly (registered uninstaller; admin via the broker or a UAC prompt).",
+               {"name": {"type": "string", "pattern": r"^[\w .,+()&'\-]{2,120}$", "required": True}},
+               "Removes the program from this PC. Not reversible by JoltIQ (reinstall it to undo).",
+               reversible=False, requires_admin=True, run_bound=True),
+    ActionSpec("system.restart", "desktop", R.PRIVILEGED,
+               "Restart the PC after a visible 1-10 minute warning (cancellable with system.power_cancel / STOP).",
+               {"delay_seconds": {"type": "integer", "min": 60, "max": 600, "required": True}},
+               "Restarts Windows; unsaved work in open apps is lost. The JoltIQ session ends.", reversible=False, run_bound=True),
+    ActionSpec("system.shutdown", "desktop", R.PRIVILEGED,
+               "Shut down the PC after a visible 1-10 minute warning (cancellable with system.power_cancel / STOP).",
+               {"delay_seconds": {"type": "integer", "min": 60, "max": 600, "required": True}},
+               "Turns the PC off; unsaved work is lost; someone must switch it back on.", reversible=False, run_bound=True),
+    ActionSpec("system.power_cancel", "desktop", R.LOW_RISK, "Cancel a pending JoltIQ restart/shutdown (shutdown /a).", {},
+               "Aborts the pending restart or shutdown."),
+    ActionSpec("driver.install", "desktop", R.PRIVILEGED,
+               "Download a printer driver from the vendor's OFFICIAL domain (https), check its vendor signature, install it with admin rights.",
+               {"vendor": {"type": "string", "enum": ["hp", "canon", "epson", "brother"], "required": True},
+                "model": {"type": "string", "max": 80, "required": True},
+                "url": {"type": "string", "max": 1000, "pattern": r"^https://[^\s]+$", "required": True},
+                "sha256": {"type": "string", "pattern": r"^[a-f0-9]{64}$"},
+                "silent_args": {"type": "string", "enum": ["", "/s", "/S", "/quiet", "-s", "/silent"]}},
+               "Installs vendor driver software; may restart the print spooler. Uninstall it from Settings to undo.",
+               reversible=False, requires_admin=True, run_bound=True),
     # ---------------- Computer use (screen-driving; issued only by a consented computer-use run) ----------------
     # Coordinates are in the pixel space of the most recent screenshot the device sent; the device maps them back.
     *[ActionSpec(i, "desktop", r, d, p, e, computer_use=True) for i, r, d, p, e in _CU_SPECS([
@@ -128,8 +157,11 @@ ACTIONS: dict[str, ActionSpec] = {a.id: a for a in [
           "amount": {"type": "integer", "min": 1, "max": 30}}, "Scrolls."),
         ("input.wait", R.READ_ONLY, "Wait, then capture the screen.", {"seconds": {"type": "integer", "min": 1, "max": 30, "required": True}}, "None."),
         ("input.cursor", R.READ_ONLY, "Report the pointer position.", {}, "None."),
-        ("url.open", R.SENSITIVE, "Open an http(s) URL in the user's default browser (where they are already signed in).",
-         {"url": {"type": "string", "max": 2000, "pattern": r"^https?://[^\s]+$", "required": True}}, "Opens a web page on the user's computer."),
+        ("url.open", R.SENSITIVE, "Open an approved public HTTPS URL in the user's default browser (where they are already signed in).",
+         {"url": {"type": "string", "max": 2000, "pattern": r"^https://[^\s]+$", "required": True},
+          "allowed_origins": {"type": "array", "min_items": 1, "max_items": 1, "items": {
+              "type": "string", "max": 300, "pattern": r"^https://[A-Za-z0-9.-]+$"}, "required": True}},
+         "Opens one approved public HTTPS origin on the user's computer."),
         ("guide.highlight", R.READ_ONLY, "Show a click-through highlight and instruction without controlling input.",
          {**_FRAME_BINDING,
           "x": {"type": "integer", "min": 0, "max": 10000, "required": True},
@@ -173,6 +205,13 @@ ACTIONS: dict[str, ActionSpec] = {a.id: a for a in [
 ]}
 
 
+# v14 Windows technician catalog (windows_catalog.py): typed, run-bound desktop actions.
+from . import windows_catalog as _wc  # noqa: E402
+
+for _s in _wc.specs():
+    ACTIONS.setdefault(_s.id, _s)
+
+
 class ActionValidationError(ValueError):
     pass
 
@@ -211,6 +250,19 @@ def validate_params(action_id: str, params: dict[str, Any]) -> dict[str, Any]:
         elif t == "boolean":
             if not isinstance(v, bool):
                 raise ActionValidationError(f"{action_id}.{name} must be a boolean")
+        elif t == "array":
+            if not isinstance(v, list):
+                raise ActionValidationError(f"{action_id}.{name} must be an array")
+            if len(v) < rule.get("min_items", 0) or len(v) > rule.get("max_items", 100):
+                raise ActionValidationError(f"{action_id}.{name} has invalid item count")
+            item_rule = rule.get("items", {})
+            for item in v:
+                if item_rule.get("type", "string") != "string" or not isinstance(item, str):
+                    raise ActionValidationError(f"{action_id}.{name} items must be strings")
+                if len(item) > item_rule.get("max", 2000):
+                    raise ActionValidationError(f"{action_id}.{name} item too long")
+                if "pattern" in item_rule and not re.fullmatch(item_rule["pattern"], item):
+                    raise ActionValidationError(f"{action_id}.{name} item has invalid format")
         clean[name] = v
     return clean
 
@@ -224,12 +276,6 @@ def default_postconditions(action_id: str, params: dict[str, Any]) -> list[dict[
     return out
 
 
-def postconditions_for_step(action_id: str, params: dict[str, Any], proposed: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Use registry-owned checks when an action defines them; model checks cannot replace those bindings."""
-    defaults = default_postconditions(action_id, params)
-    return defaults if defaults else proposed
-
-
 def registry_for_prompt() -> list[dict[str, Any]]:
     return [{"id": a.id, "channel": a.channel, "description": a.description, "params": a.params, "effects": a.effects}
-            for a in ACTIONS.values() if a.risk != R.DESTRUCTIVE and not a.computer_use]
+            for a in ACTIONS.values() if a.risk != R.DESTRUCTIVE and not a.computer_use and not a.run_bound]

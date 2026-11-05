@@ -4,7 +4,6 @@
   python -m joltiq.cli create-platform-owner EMAIL  # grants platform-owner to an existing user (requires DB owner creds)
   python -m joltiq.cli export-openapi PATH          # writes the OpenAPI document
   python -m joltiq.cli verify-audit ORG_ID          # verifies an organization's audit hash chain
-  python -m joltiq.cli sso-recovery issue --org ORG_ID --email EMAIL [--ttl-minutes 15]
   python -m joltiq.cli gen-keys                     # prints fresh secret/encryption/approval/agent signing keys for .env
 """
 from __future__ import annotations
@@ -66,29 +65,6 @@ def main(argv: list[str]) -> int:
         print(f"JOLTIQ_SECRET_KEY={secrets.token_urlsafe(48)}\nJOLTIQ_ENCRYPTION_KEY={Fernet.generate_key().decode()}\n"
               f"JOLTIQ_APPROVAL_SIGNING_KEY={secrets.token_urlsafe(48)}\nJOLTIQ_BROWSER_WORKER_TOKEN={secrets.token_urlsafe(32)}\n"
               f"JOLTIQ_APP_DB_PASSWORD={secrets.token_urlsafe(24)}\nJOLTIQ_AGENT_SIGNING_KEY_PEM=\"{k.strip()}\"")
-    elif cmd == "sso-recovery" and len(argv) >= 2 and argv[1] == "issue":
-        import uuid
-
-        from sqlalchemy.orm import Session
-
-        from .db import set_tenant
-        from .services.auth import issue_sso_recovery_grant
-
-        options = {argv[i]: argv[i + 1] for i in range(2, len(argv) - 1, 2)}
-        if "--org" not in options or "--email" not in options:
-            print("usage: sso-recovery issue --org ORG_ID --email EMAIL [--ttl-minutes 15]")
-            return 2
-        with Session(_owner_engine()) as db:
-            org_id = uuid.UUID(options["--org"])
-            set_tenant(db, org_id, platform=True)
-            raw = issue_sso_recovery_grant(
-                db,
-                org_id,
-                options["--email"],
-                ttl_minutes=int(options.get("--ttl-minutes", "15")),
-            )
-            db.commit()
-        print(raw)
     else:
         print(__doc__)
         return 2

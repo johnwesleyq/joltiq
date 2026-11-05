@@ -37,7 +37,7 @@ class OrgUpdate(BaseModel):
 
 ALLOWED_SETTINGS = {"external_research_enabled", "auto_close_on_verified", "require_verification_to_resolve",
                     "retention_days", "recording_default", "research_allowed_domains", "approval_ttl_minutes",
-                    "max_agent_steps", "default_session_minutes", "email_intake_address"}
+                    "max_agent_steps", "default_session_minutes", "email_intake_address", "fix_sites"}
 
 
 @router.patch("/organizations/current")
@@ -50,6 +50,10 @@ def update_org(body: OrgUpdate, ctx: Ctx = Depends(perm("settings.manage"))):
         unknown = set(body.settings) - ALLOWED_SETTINGS
         if unknown:
             raise AppError(f"Unknown settings: {sorted(unknown)}", code="validation_error")
+        if "fix_sites" in body.settings:
+            from ..services.fix import validate_sites
+
+            body.settings["fix_sites"] = validate_sites(body.settings["fix_sites"])
         org.settings = {**(org.settings or {}), **body.settings}
     audit.record(ctx.db, org_id=org.id, actor_kind="user", actor_id=ctx.p.user_id, action="org.updated", resource_type="organization", resource_id=org.id, data=body.model_dump(exclude_none=True))
     return current_org(ctx)

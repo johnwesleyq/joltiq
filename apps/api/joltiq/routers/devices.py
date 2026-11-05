@@ -10,19 +10,17 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..core.errors import AppError, Forbidden, NotFound
+from ..core.errors import AppError, Conflict, Forbidden, NotFound
 from ..db import get_raw_session
 from ..deps import Ctx, get_ctx, perm
 from ..models import (
-    AgentPlan,
+    AgentMessage,
     AgentRun,
-    Approval,
     ComputerUseRun,
     Device,
     DeviceCommand,
     DeviceSupportRequest,
     Membership,
-    PlanStep,
     RemoteAccessSession,
     SupportSession,
     Ticket,
@@ -162,7 +160,8 @@ class EnrollIn(BaseModel):
     os_name: str = Field(max_length=120)
     os_version: str = Field(max_length=120)
     agent_version: str = Field(max_length=40)
-    capabilities: list[str] = Field(default_factory=list, max_length=50)
+    installation_id: uuid.UUID | None = None
+    capabilities: list[str] = Field(default_factory=list, max_length=100)
 
 
 @agent_router.post("/enroll")
@@ -171,7 +170,8 @@ def enroll(body: EnrollIn, request: Request, db: Session = Depends(get_raw_sessi
 
     hit(db, f"enroll:{request.client.host if request.client else 'x'}", get_settings().rate_limit_device_enroll_per_hour, 3600)
     d = svc.enroll(db, code=body.code, public_key_pem=body.public_key_pem, hostname=body.hostname, os_name=body.os_name,
-                   os_version=body.os_version, agent_version=body.agent_version, capabilities=body.capabilities)
+                   os_version=body.os_version, agent_version=body.agent_version, installation_id=body.installation_id,
+                   capabilities=body.capabilities)
     return {"device_id": str(d.id), "org_id": str(d.org_id), "server_public_key_pem": svc.server_public_pem(), "protocol": svc.PROTOCOL_VERSION,
             "poll_interval_seconds": 3, "capabilities_accepted": d.capabilities}
 
@@ -214,16 +214,22 @@ class DeviceSupportMessageOut(BaseModel):
     setup_required: bool = False
 
 
-def _ask_reply(db: Session, device: Device, run: AgentRun) -> tuple[dict | None, str | None, bool]:
-    """Return an immediate chat reply without starting computer use."""
+def _ask_reply(db: Session, device: Device, run) -> tuple[dict | None, str | None, bool]:
+    """Instant technician chat reply for the PC Ask window (no computer-use / approvals)."""
+    from ..core.errors import AppError
     from ..services import ask_chat
 
     try:
         return ask_chat.reply(db, device.org_id, run), None, False
-    except ask_chat.AskNotConnected as exc:
-        return None, exc.message, True
-    except AppError as exc:
-        return {"id": None, "content": f"Sorry, the AI model did not answer: {exc.message}", "live_model": False}, None, False
+    except ask_chat.AskNotConnected as e:
+        return None, e.message, True
+    except AppError as e:
+        return {"id": None, "content": f"Sorry, the AI model didn't answer: {e.message}", "live_model": False}, None, False
+
+
+def _owner_role(db: Session, device: Device) -> str:
+    m = db.execute(select(Membership).where(Membership.user_id == device.owner_user_id, Membership.org_id == device.org_id)).scalar_one_or_none()
+    return m.role if m else "end_user"
 
 
 def _support_owner(db: Session, device: Device) -> User:
@@ -344,7 +350,7 @@ def create_device_support_request(body: DeviceSupportRequestIn, dd=Depends(devic
         data={"ticket_id": str(ticket.id)},
     )
     response = {"ticket_id": str(ticket.id), "ticket_number": ticket.number, "run_id": str(run.id), "state": run.state,
-                "reply": reply, "ai_notice": notice, "setup_required": setup_required}
+                "ai_notice": notice, "reply": reply, "setup_required": setup_required}
     db.add(
         DeviceSupportRequest(
             org_id=device.org_id,
@@ -364,20 +370,23 @@ def continue_device_support_request(run_id: uuid.UUID, body: DeviceSupportMessag
     db, device = dd
     owner = _support_owner(db, device)
     run, ticket = _device_support_run(db, device, run_id)
-    reply, notice, setup_required = None, None, False
+    reply = None
     direct_run = _active_direct_computer_use(db, device, run)
-    if direct_run and direct_run.state == "waiting_customer" and direct_run.waiting_for:
+    answering_fix = bool(direct_run and direct_run.state == "waiting_customer" and direct_run.waiting_for)
+    if answering_fix:
         from ..services import computer_use
 
+        assert direct_run is not None
         response = _native_computer_use_response(body, direct_run)
         computer_use.respond(db, direct_run, user_id=owner.id, via="device", **response)
         state = "AI_INVESTIGATING"
-    else:
+    notice, setup_required = None, False
+    if not answering_fix:
+        # Ordinary Ask message: plain technician chat, instant reply. Never resumes the troubleshooting state machine.
         from ..services import ask_chat
 
         run = ask_chat.chat_run(db, device.org_id, ticket, owner.id)
         agent_svc.add_message(db, run, "user", body.message, author_id=owner.id)
-        ticket_svc.comment(db, ticket, body.message, author_id=owner.id, author_kind="device")
         state = run.state
         reply, notice, setup_required = _ask_reply(db, device, run)
     audit.record(
@@ -390,8 +399,8 @@ def continue_device_support_request(run_id: uuid.UUID, body: DeviceSupportMessag
         resource_id=run.id,
         data={"ticket_id": str(ticket.id)},
     )
-    return {"ticket_id": ticket.id, "ticket_number": ticket.number, "run_id": run.id, "state": state,
-            "reply": reply, "ai_notice": notice, "setup_required": setup_required}
+    return {"ticket_id": ticket.id, "ticket_number": ticket.number, "run_id": run.id, "state": state, "reply": reply,
+            "ai_notice": notice, "setup_required": setup_required}
 
 
 @agent_router.get("/support-requests/{run_id}")
@@ -420,10 +429,11 @@ def get_device_support_request(run_id: uuid.UUID, dd=Depends(device_auth)):
     from ..services import ask_chat
     from ..services.ai.router import ai_status
 
+    status = ai_status(db, device.org_id)
     chat_mode = (run.context or {}).get("mode") == "chat" and run.paused_for == "chat"
     return {
         "ai_notice": ask_chat.status(db, device.org_id)["notice"],
-        "computer_use": _computer_use_status(db, device, run, ai_status(db, device.org_id)),
+        "computer_use": _computer_use_status(db, device, run, status),
         "id": detail["id"],
         "ticket_id": detail["ticket_id"],
         "state": "AI_INVESTIGATING" if direct_run else ("CHAT" if chat_mode else detail["state"]),
@@ -437,42 +447,46 @@ def get_device_support_request(run_id: uuid.UUID, dd=Depends(device_auth)):
 
 
 CU_STATUS_TEXT = {
-    "waiting_session_consent": ("Waiting for you to allow JoltIQ on this PC", "Click Allow in the JoltIQ permission window."),
-    "waiting_local_consent": ("Waiting for you to allow Fix it for me on this PC", "Click Allow in the JoltIQ Fix window."),
-    "pending_approval": ("Waiting for the goal to be approved", "Approve the goal in JoltIQ or the web portal."),
+    "waiting_session_consent": ("Waiting for you to allow JoltIQ on this PC",
+                                "A 'JoltIQ — permission requested' window should be open on this PC. Click Allow. "
+                                "If you don't see it, click 'Approve on this PC' to ask again."),
+    "waiting_local_consent": ("Waiting for you to allow Fix it for me on this PC",
+                              "Click Allow in the 'JoltIQ Fix it for me' window. If you don't see it, click 'Approve on this PC'."),
+    "pending_approval": ("Waiting for the goal to be approved", "Approve the goal in the JoltIQ window or the web portal."),
     "running": ("JoltIQ is working on this PC", "Watch the red banner; press STOP at any time."),
-    "waiting_device": ("JoltIQ is waiting for this PC", "Keep the JoltIQ companion running."),
+    "waiting_device": ("JoltIQ is waiting for this PC to finish a step", "Keep the JoltIQ companion running."),
     "waiting_customer": ("JoltIQ needs your answer", "Answer the question shown in the conversation."),
 }
 
 
 def _computer_use_status(db: Session, device: Device, run: AgentRun, ai: dict) -> dict | None:
-    session = db.execute(
-        select(SupportSession).where(
-            SupportSession.run_id == run.id,
-            SupportSession.device_id == device.id,
-            SupportSession.request_details["direct_device_request"].as_boolean().is_(True),
-        ).order_by(SupportSession.created_at.desc())
+    """What Guide/Fix is doing for this request, in plain English, so the tray never shows a stale status forever."""
+    sess = db.execute(
+        select(SupportSession).where(SupportSession.run_id == run.id, SupportSession.device_id == device.id,
+                                     SupportSession.request_details["direct_device_request"].as_boolean().is_(True))
+        .order_by(SupportSession.created_at.desc())
     ).scalars().first()
-    if not session:
+    if not sess:
         return None
-    computer_run = db.execute(
-        select(ComputerUseRun).where(ComputerUseRun.session_id == session.id).order_by(ComputerUseRun.created_at.desc())
-    ).scalars().first()
-    if computer_run is not None:
-        key = computer_run.state
-    elif session.state == "active" and not (session.consent or {}).get("device_local_consent"):
+    cu = db.execute(select(ComputerUseRun).where(ComputerUseRun.session_id == sess.id)
+                    .order_by(ComputerUseRun.created_at.desc())).scalars().first()
+    if cu is not None:
+        key = cu.state
+    elif sess.state == "active" and not (sess.consent or {}).get("device_local_consent"):
         key = "waiting_session_consent"
     else:
-        key = session.state
+        key = sess.state
     if key in CU_STATUS_TEXT:
         label, next_step = CU_STATUS_TEXT[key]
         needs_local = key in ("waiting_session_consent", "waiting_local_consent")
+    elif cu is not None and cu.state == "completed" and cu.success is True:
+        reason = cu.summary or "The fix completed successfully."
+        label, next_step, needs_local = f"Completed: {reason}"[:300], "You can start another request whenever you need help.", False
     else:
-        reason = (computer_run.summary if computer_run is not None else session.pause_reason) or key
-        label, next_step, needs_local = f"Stopped: {reason}"[:300], "Start Guide or Fix again to retry.", False
+        reason = (cu.summary if cu is not None else sess.pause_reason) or key
+        label, next_step, needs_local = f"Stopped: {reason}"[:300], "Click 'Fix it for me' or 'Guide me' to try again.", False
     return {"state": key, "label": label, "next_step": next_step, "needs_local_approval": needs_local,
-            "session_id": str(session.id), "computer_use_run_id": str(computer_run.id) if computer_run else None,
+            "session_id": str(sess.id), "computer_use_run_id": str(cu.id) if cu is not None else None,
             "model_notice": ai["computer_use_notice"]}
 
 
@@ -480,6 +494,33 @@ class DirectComputerUseIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mode: str = Field(pattern="^(guide|fix)$")
+
+
+def _direct_computer_use_goal(db: Session, run: AgentRun, ticket: Ticket) -> str:
+    """Use the request the customer most recently asked JoltIQ to perform."""
+    messages = db.execute(
+        select(AgentMessage.role, AgentMessage.content)
+        .where(AgentMessage.run_id == run.id, AgentMessage.role == "user")
+        .order_by(AgentMessage.created_at.desc(), AgentMessage.id.desc())
+        .limit(8)
+    ).all()
+    latest = str(messages[0].content).strip() if messages else ""
+    # A short answer to a platform clarification is context, not a replacement goal.
+    # Without this, "uninstall Adobe Genuine Service" followed by "Windows" created
+    # an empty approved plan whose goal was merely "windows".
+    platform = latest.casefold().strip(" .!?")
+    if platform in {
+        "windows", "windows 10", "windows 11", "win10", "win11", "pc",
+        "mac", "macos", "mac os", "linux",
+    }:
+        previous = next((str(row.content).strip() for row in messages[1:] if str(row.content).strip()), "")
+        if previous:
+            # This endpoint is authenticated by an enrolled Windows companion, so
+            # the platform answer adds no execution detail. Keep the actionable
+            # request verbatim so strict parsers do not mistake the clarification
+            # for part of an application name.
+            return previous[:2000]
+    return str(latest or ticket.description or ticket.subject).strip()[:2000]
 
 
 def _direct_computer_use_response(db: Session, session: SupportSession, mode: str) -> dict:
@@ -496,84 +537,36 @@ def _direct_computer_use_response(db: Session, session: SupportSession, mode: st
     }
 
 
-def _start_structured_read_only_plan(
-    db: Session,
-    device: Device,
-    owner: User,
-    run: AgentRun,
-    ticket: Ticket,
-) -> SupportSession | None:
-    """Use the already-reviewed typed plan when Fix is only a read-only device diagnostic.
+def _direct_computer_use_details(db: Session, device: Device, goal: str, mode: str) -> dict:
+    """Build the same approved typed-action plan used by the web Fix flow.
 
-    A screen-driving model must not replace a concrete ``disk.usage`` (or other read-only)
-    plan with unrelated mouse/keyboard actions.  The normal signed command, local-consent,
-    policy, execution, and verification pipeline remains authoritative.
+    Ask JoltIQ starts computer use from the companion itself, so it does not pass through
+    POST /agents/fix. Persisting the plan here keeps the one local Fix approval authoritative
+    for typed Windows actions as well as screen actions.
     """
-    raw_plan_id = (run.context or {}).get("current_plan_id")
-    try:
-        plan_id = uuid.UUID(str(raw_plan_id))
-    except (TypeError, ValueError):
-        return None
-    plan = db.get(AgentPlan, plan_id)
-    if not plan or plan.run_id != run.id or plan.status not in ("proposed", "approved"):
-        return None
-    steps = db.execute(
-        select(PlanStep).where(PlanStep.plan_id == plan.id).order_by(PlanStep.ordinal)
-    ).scalars().all()
-    if not steps or any(
-        step.action not in ACTIONS
-        or ACTIONS[step.action].channel != "desktop"
-        or ACTIONS[step.action].risk != "READ_ONLY"
-        or step.risk != "READ_ONLY"
-        for step in steps
-    ):
-        return None
-    if db.execute(select(Approval.id).where(Approval.plan_id == plan.id)).first():
-        return None
-    session_ids = {str(step.target.get("session_id") or "") for step in steps}
-    if len(session_ids) != 1 or not next(iter(session_ids)):
-        return None
-    try:
-        session = db.get(SupportSession, uuid.UUID(next(iter(session_ids))))
-    except ValueError:
-        return None
-    if (
-        not session
-        or session.device_id != device.id
-        or session.ticket_id != ticket.id
-        or session.run_id != run.id
-        or session.state not in ("pending_consent", "active")
-    ):
-        return None
-    actions = sorted({step.action for step in steps})
-    session.request_details = {
-        **(session.request_details or {}),
-        "structured_plan": True,
-        "plan_id": str(plan.id),
-        "actions": actions,
+    details = {
+        "direct_device_request": True,
+        "computer_use_mode": mode,
+        "computer_use_goal": goal,
     }
-    if session.state == "pending_consent":
-        session_svc.give_consent(
-            db,
-            session,
-            user_id=owner.id,
-            customer_id=device.customer_id,
-            is_staff=True,
-            max_risk="READ_ONLY",
-            actions=actions,
-            recording=False,
-        )
-    audit.record(
-        db,
-        org_id=device.org_id,
-        actor_kind="device",
-        actor_id=device.id,
-        action="support_request.structured_plan_requested",
-        resource_type="support_session",
-        resource_id=session.id,
-        data={"ticket_id": str(ticket.id), "plan_id": str(plan.id), "actions": actions},
-    )
-    return session
+    if mode != "fix":
+        return details
+    from ..services import windows_autoplan, windows_plan
+
+    planned = windows_autoplan.build(db, device.org_id, goal, set(device.capabilities or []))
+    plan = planned.items
+    details["full_fix"] = {
+        "goal": goal,
+        "device_name": device.hostname,
+        "windows_actions": plan,
+        "high_risk": windows_plan.needs_ack(plan),
+        "planner": planned.planner,
+        "planner_model": planned.model,
+        "planner_live": planned.live,
+        "planner_rationale": planned.rationale,
+        "planner_fallback_reason": planned.fallback_reason,
+    }
+    return details
 
 
 @agent_router.post("/support-requests/{run_id}/computer-use")
@@ -582,15 +575,7 @@ def start_direct_computer_use(run_id: uuid.UUID, body: DirectComputerUseIn, dd=D
     db, device = dd
     owner = _support_owner(db, device)
     run, ticket = _device_support_run(db, device, run_id)
-    # Prefer the exact typed read-only plan even if an older generic computer-use
-    # attempt left a still-active support session behind.
-    if body.mode == "fix":
-        structured_session = _start_structured_read_only_plan(db, device, owner, run, ticket)
-        if structured_session:
-            return JSONResponse(
-                _direct_computer_use_response(db, structured_session, body.mode),
-                status_code=200,
-            )
+    goal = _direct_computer_use_goal(db, run, ticket)
     active = db.execute(
         select(SupportSession).where(
             SupportSession.ticket_id == ticket.id,
@@ -602,31 +587,35 @@ def start_direct_computer_use(run_id: uuid.UUID, body: DirectComputerUseIn, dd=D
     for existing in active:
         details = existing.request_details or {}
         if details.get("direct_device_request"):
-            latest_run = db.execute(
-                select(ComputerUseRun)
-                .where(ComputerUseRun.session_id == existing.id)
-                .order_by(ComputerUseRun.created_at.desc())
-            ).scalars().first()
-            if latest_run is None or latest_run.state in (
-                "pending_approval", "waiting_local_consent", "running", "waiting_device", "waiting_customer"
-            ):
-                return JSONResponse(_direct_computer_use_response(db, existing, body.mode), status_code=200)
-            session_svc.terminate(
-                db,
-                existing,
-                by_kind="system",
-                reason="previous direct computer-use run finished",
-            )
+            response = _direct_computer_use_response(db, existing, body.mode)
+            from ..services import computer_use as computer_use_svc
+
+            if response["computer_use_run_id"] and response["state"] in computer_use_svc.ACTIVE:
+                return JSONResponse(response, status_code=200)
+            if existing.state == "active" and (existing.consent or {}).get("device_local_consent"):
+                existing.request_details = {
+                    **(existing.request_details or {}),
+                    **_direct_computer_use_details(db, device, goal, body.mode),
+                }
+                computer_use_svc.start(
+                    db,
+                    existing,
+                    goal=goal,
+                    user_id=owner.id,
+                    approved_by_customer=True,
+                    mode=body.mode,
+                )
+                return JSONResponse(_direct_computer_use_response(db, existing, body.mode), status_code=201)
+            return JSONResponse(response, status_code=200)
 
     from ..services.ai.computer import SUPPORTED_PROVIDERS
     from ..services.ai.router import available_providers
 
     if not [candidate for candidate in available_providers(db, device.org_id, "computer_use") if candidate[0] in SUPPORTED_PROVIDERS]:
         raise AppError(
-            "Fix it for me needs the company's approved local computer-use model gateway.",
+            "Fix it for me needs an admin-approved computer-use provider that may receive computer screens.",
             code="computer_use_not_configured",
         )
-    goal = (ticket.description or ticket.subject).strip()
     session = session_svc.start(
         db,
         device.org_id,
@@ -635,11 +624,7 @@ def start_direct_computer_use(run_id: uuid.UUID, body: DirectComputerUseIn, dd=D
         ticket_id=ticket.id,
         device_id=device.id,
         run_id=run_id,
-        request_details={
-            "direct_device_request": True,
-            "computer_use_mode": body.mode,
-            "computer_use_goal": goal,
-        },
+        request_details=_direct_computer_use_details(db, device, goal, body.mode),
     )
     session_svc.give_consent(
         db,
@@ -665,6 +650,7 @@ def start_direct_computer_use(run_id: uuid.UUID, body: DirectComputerUseIn, dd=D
 
 class HeartbeatIn(BaseModel):
     agent_version: str = Field(max_length=40)
+    installation_id: uuid.UUID | None = None
     facts: dict = Field(default_factory=dict)
     capabilities: list[str] = Field(default_factory=list)
 
@@ -672,6 +658,22 @@ class HeartbeatIn(BaseModel):
 @agent_router.post("/heartbeat")
 def heartbeat(body: HeartbeatIn, dd=Depends(device_auth)):
     db, d = dd
+    if body.installation_id is not None:
+        conflicting = db.execute(
+            select(Device.id).where(
+                Device.installation_id == body.installation_id,
+                Device.status == "active",
+                Device.id != d.id,
+            )
+        ).scalar_one_or_none()
+        if conflicting is not None or (d.installation_id is not None and d.installation_id != body.installation_id):
+            audit.security_event(db, "device_installation_identity_conflict", org_id=d.org_id, severity="warning",
+                                 data={"device_id": str(d.id)})
+            raise Conflict("Installation identity is already linked to another device", code="installation_identity_conflict")
+        if d.installation_id is None:
+            d.installation_id = body.installation_id
+            audit.record(db, org_id=d.org_id, actor_kind="device", actor_id=d.id,
+                         action="device.installation_identity_linked", resource_type="device", resource_id=d.id)
     d.agent_version = body.agent_version[:40]
     d.facts = {k: str(v)[:200] for k, v in list(body.facts.items())[:30]}
     if body.capabilities:
@@ -773,6 +775,8 @@ async def command_screenshot(cid: uuid.UUID, request: Request, dd=Depends(device
 
 class DeviceRespondIn(BaseModel):
     approved: bool | None = None
+    authorization_id: uuid.UUID | None = None
+    action_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     answer: str | None = Field(default=None, max_length=1000)
     done: bool = False
     switch_to_fix: bool = False
@@ -830,7 +834,9 @@ def device_cu_respond(rid: uuid.UUID, body: DeviceRespondIn, dd=Depends(device_a
         answered = run
     else:
         answered = computer_use.respond(db, run, user_id=None, approved=body.approved, answer=body.answer, done=body.done,
-                                        switch_to_fix=body.switch_to_fix, via="device")
+                                        switch_to_fix=body.switch_to_fix, via="device",
+                                        authorization_id=str(body.authorization_id) if body.authorization_id else None,
+                                        action_hash=body.action_hash)
     return computer_use.ser(answered)
 
 

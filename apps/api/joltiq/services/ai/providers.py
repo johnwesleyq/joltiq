@@ -53,7 +53,13 @@ CAPABILITIES: dict[str, dict[str, bool]] = {
 
 DEFAULT_MODELS: dict[str, dict[str, str]] = {
     # Model ids are tenant-configurable in Admin → Models; these are starting defaults only.
-    "openai": {"default": "gpt-4.1-mini", "planning": "gpt-4.1", "vision": "gpt-4.1", "computer_use": "gpt-6.1-terra"},
+    "openai": {
+        "default": "gpt-6-luna",
+        "planning": "gpt-6-luna",
+        "vision": "gpt-6.1-terra",
+        "computer_use": "gpt-6.1-terra",
+        "escalation": "gpt-6.1-sol",
+    },
     "anthropic": {"default": "claude-sonnet-5-5", "planning": "claude-opus-5-5", "vision": "claude-sonnet-5-5", "computer_use": "claude-sonnet-5-5"},
     "gemini": {"default": "gemini-2.5-flash", "planning": "gemini-2.5-pro", "vision": "gemini-2.5-flash"},
     "ollama": {"default": "gemma3:4b", "vision": "gemma3:4b", "computer_use": "gemma3:4b"},
@@ -214,7 +220,7 @@ def build(provider: str, key: str | None, timeout: int = 60):
         return None
     if provider == "openai":
         return OpenAIProvider(key, base_url=get_settings().openai_base_url.rstrip("/"), timeout=timeout)
-    return {"anthropic": AnthropicProvider, "gemini": GeminiProvider}[provider](key, timeout=timeout)
+    return {"openai": OpenAIProvider, "anthropic": AnthropicProvider, "gemini": GeminiProvider}[provider](key, timeout=timeout)
 
 
 def test_connectivity(provider: str, key: str, model: str) -> tuple[bool, str]:

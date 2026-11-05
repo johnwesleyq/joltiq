@@ -49,35 +49,16 @@ def close(session_id: str) -> None:
         pass
 
 
-def act(
-    session_id: str,
-    action: str,
-    params: dict[str, Any],
-    actor: str = "ai",
-    epoch: int | None = None,
-) -> dict[str, Any]:
-    return _req(
-        "POST",
-        f"/sessions/{session_id}/actions",
-        json={"action": action, "params": params, "actor": actor, "epoch": epoch},
-    )
+def act(session_id: str, action: str, params: dict[str, Any], actor: str = "ai", epoch: int | None = None) -> dict[str, Any]:
+    return _req("POST", f"/sessions/{session_id}/actions", json={"action": action, "params": params, "actor": actor, "epoch": epoch})
 
 
 def set_lease(session_id: str, epoch: int, controller: str) -> dict[str, Any]:
-    return _req(
-        "POST",
-        f"/sessions/{session_id}/lease",
-        json={"epoch": epoch, "controller": controller},
-        timeout=5,
-    )
+    """Push the API's authoritative control lease to the worker; it refuses actions/input carrying an older epoch."""
+    return _req("POST", f"/sessions/{session_id}/lease", json={"epoch": epoch, "controller": controller}, timeout=5)
 
 
-def upload(
-    session_id: str,
-    selector: str,
-    attachment: BrowserUpload,
-    epoch: int | None = None,
-) -> dict[str, Any]:
+def upload(session_id: str, selector: str, attachment: BrowserUpload, epoch: int | None = None) -> dict[str, Any]:
     return _req(
         "POST",
         f"/sessions/{session_id}/upload",

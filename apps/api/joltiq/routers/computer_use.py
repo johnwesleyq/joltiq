@@ -31,6 +31,9 @@ def run_for(ctx: Ctx, rid: uuid.UUID) -> ComputerUseRun:
 def _is_customer_side(ctx: Ctx, run: ComputerUseRun) -> bool:
     # Only the person who consented to this session (the one at / owning the computer) answers for it.
     s = session_svc.get(ctx.db, run.session_id)
+    if s.kind == "browser" and s.consented_by is None:
+        # Browser Fix: the one "Approve & fix" click IS the session consent, so the consent holder may answer.
+        return session_svc.consent_holder_ok(ctx.db, s, ctx.p.user_id, ctx.p.customer_id, ctx.p.is_staff)
     return s.consented_by is not None and s.consented_by == ctx.p.user_id
 
 
@@ -116,6 +119,13 @@ def stop(rid: uuid.UUID, ctx: Ctx = Depends(get_ctx)):
     run = run_for(ctx, rid)
     svc.stop(ctx.db, run, user_id=ctx.p.user_id, reason="Stopped by " + ("the customer" if _is_customer_side(ctx, run) else "a technician"))
     return svc.ser(run)
+
+
+@router.post("/computer-use/{rid}/cancel-power")
+def cancel_power(rid: uuid.UUID, ctx: Ctx = Depends(get_ctx)):
+    """Cancel a restart/shutdown this Fix scheduled (sends shutdown /a to the PC). Works after the run finished."""
+    run = run_for(ctx, rid)
+    return svc.cancel_power(ctx.db, run, user_id=ctx.p.user_id)
 
 
 def _image(ctx: Ctx, key: str | None) -> Response:

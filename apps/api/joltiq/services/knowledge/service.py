@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from collections.abc import Sequence
 from typing import Any
 
 from sqlalchemy import delete, func, literal_column, select
@@ -189,10 +190,15 @@ def search(db: Session, org_id: uuid.UUID, query: str, *, role: str | None, limi
     kw_rank = func.ts_rank_cd(KnowledgeChunk.tsv, tsq)
     kw = db.execute(base.add_columns(kw_rank.label("s")).where(KnowledgeChunk.tsv.op("@@")(tsq)).order_by(literal_column("s").desc()).limit(40)).all()
     emb = embedder_for(db, org_id)
-    qv = emb.embed([query])[0]
-    dist = KnowledgeChunk.embedding.cosine_distance(qv)
-    vec = db.execute(base.add_columns(dist.label("d")).where(KnowledgeChunk.embedder == emb.name)
-                     .order_by(dist).limit(40)).all()
+    try:
+        qv = emb.embed([query])[0]
+    except Exception:  # noqa: BLE001 - v14: embedding provider down/unauthorised -> keyword-only ranking
+        qv = None
+    vec: Sequence[Any] = []
+    if qv is not None:
+        dist = KnowledgeChunk.embedding.cosine_distance(qv)
+        vec = db.execute(base.add_columns(dist.label("d")).where(KnowledgeChunk.embedder == emb.name)
+                         .order_by(dist).limit(40)).all()
     scores: dict[uuid.UUID, float] = {}
     rows: dict[uuid.UUID, tuple] = {}
     detail: dict[uuid.UUID, dict] = {}

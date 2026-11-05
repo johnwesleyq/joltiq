@@ -1,12 +1,12 @@
-"""Allow tenant-level Slack and Teams dispatch rows without a user recipient.
+"""Slack approval alerts: dispatch rows without a user (ADR 0021).
 
-Revision ID: 0013
-Revises: 0012
+Revision ID: 0012
+Revises: 0011
 """
 from alembic import op
 
-revision = "0013"
-down_revision = "0012"
+revision = "0012"
+down_revision = "0011"
 branch_labels = None
 depends_on = None
 

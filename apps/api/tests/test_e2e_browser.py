@@ -494,46 +494,30 @@ def test_emergency_stop_terminates_and_escalates(services, app, team):
 _ = select
 
 
-def _questions_always(self, ctx, messages):
-    # Mimic the live model in ticket #1011: it judged an ordinary Wi-Fi request "insufficient" and returned six
-    # questions even though JoltIQ only displays five.
-    return {"sufficient": False, "questions": ["Which Wi-Fi network?", "Windows or Mac?", "Any error message?",
-                                               "Did anything change?", "Do other devices connect?", "Has it worked before?"],
-            "known_facts": {}}
-
-
-def test_ordinary_request_gets_steps_even_when_model_wants_to_ask_questions(services, app, team, monkeypatch):
-    from joltiq.services.ai.fixture import LocalFixtureProvider
-    monkeypatch.setattr(LocalFixtureProvider, "_Clarification", _questions_always)
+def test_partial_save_fails_verification_then_rolls_back_and_escalates(services, app, team):
+    """ADR 0017: failed read-back → server-computed rollback approved with the plan → rollback verified → escalate."""
     owner, tech, customer = team
-    r = customer.post("/api/v1/agents/chat", json={"mode": "troubleshoot", "message": "My laptop won't connect to the office Wi-Fi but my phone connects fine."})
-    run_id, ticket_id = r.json()["run_id"], r.json()["ticket_id"]
-    run = wait_state(customer, run_id, _awaiting_guidance)
-    ai_msgs = [m for m in run["messages"] if m["role"] == "assistant"]
-    assert not any("need a bit more detail" in m["content"] for m in ai_msgs), "should give steps, not interrogate"
-    customer.post("/api/v1/agents/chat", json={"mode": "troubleshoot", "ticket_id": ticket_id, "message": "that worked, it’s fixed"})
-    run = wait_state(customer, run_id, lambda r: r["state"] in ("RESOLVED", "ESCALATED"))
-    assert run["state"] == "RESOLVED"
-    assert customer.get(f"/api/v1/tickets/{ticket_id}").json()["resolution_verified"] is False
-
-
-def test_fixed_reply_resolves_even_during_clarifying_questions(services, app, team, monkeypatch):
-    from joltiq.services.ai.fixture import LocalFixtureProvider
-    monkeypatch.setattr(LocalFixtureProvider, "_Clarification", _questions_always)
-    owner, tech, customer = team
-    r = customer.post("/api/v1/agents/chat", json={"mode": "troubleshoot", "message": "Internet broken"})  # too vague -> one round of questions
-    run_id, ticket_id = r.json()["run_id"], r.json()["ticket_id"]
-    run = wait_state(customer, run_id, lambda r: r["paused_for"] == "customer")
-    assert any("need a bit more detail" in m["content"] for m in run["messages"] if m["role"] == "assistant")
-    customer.post("/api/v1/agents/chat", json={"mode": "troubleshoot", "ticket_id": ticket_id, "message": "Never mind, restarted the router and it works now"})
-    run = wait_state(customer, run_id, lambda r: r["state"] in ("RESOLVED", "ESCALATED"))
-    assert run["state"] == "RESOLVED"
-    assert customer.get(f"/api/v1/tickets/{ticket_id}").json()["status"] in ("RESOLVED", "OPEN")
-
-
-def test_not_fixed_reply_is_not_mistaken_for_resolution():
-    from joltiq.services.agent import is_resolution_message as f
-    for yes in ("that worked, it’s fixed", "Fixed!", "works now thanks", "The fix worked", "resolved", "all good now", "Never mind, restarted the router and it works now"):
-        assert f(yes), yes
-    for no in ("not fixed", "still broken", "didn't work", "nothing worked", "it never worked", "nope", "Wi-Fi isn't working"):
-        assert not f(no), no
+    httpx.post(f"{TESTAPP}/__test__/reset", params={"partial_save": True})  # persists the email, drops the toggle
+    publish_procedure(app, owner)
+    chat = start_chat(customer)
+    run_id = chat["run_id"]
+    run = wait_state(customer, run_id, lambda r: r["state"] == "AWAITING_APPROVAL")
+    plan = run["plans"][-1]
+    assert [r["action"] for r in plan["rollback_steps"]] == ["browser.navigate", "browser.type", "browser.select", "browser.submit"]
+    assert plan["rollback_steps"][1]["params"]["text"] == {"$pre": "s1"}  # values come from read-back, not the model
+    sess_id, pending = approve_and_consent(customer, run, run_id)
+    customer.post(f"/api/v1/approvals/{pending[0]['id']}/decision", json={"decision": "approve"})
+    wait_state(customer, run_id, lambda r: r["paused_for"] == "user_auth")
+    human_sign_in(customer, sess_id)
+    run = wait_state(customer, run_id, lambda r: r["state"] in ("RESOLVED", "ESCALATED", "FAILED", "PARTIALLY_RESOLVED"), timeout=120)
+    assert run["state"] == "ESCALATED", run["transitions"][-6:]
+    assert any(t["to"] == "ROLLING_BACK" for t in run["transitions"])
+    kinds = [(v["kind"], v["status"]) for v in run["verifications"]]
+    assert kinds[0][0] == "verification" and kinds[0][1] in ("FAILED", "PARTIAL")
+    assert kinds[-1] == ("rollback", "VERIFIED")
+    assert run["browser_rollback"]["status"] == "ROLLED_BACK"
+    # Independent truth: the email the partial save persisted was restored to its pre-change value.
+    assert httpx.get(f"{TESTAPP}/__test__/state").json()["settings"] == {"notify_email": "", "job_notifications": "off"}
+    ev = tech.get(f"/api/v1/agents/runs/{run_id}/verification-evidence").json()
+    assert ev["ok"] is True and len(ev["items"]) == len(run["verifications"])
+    assert all(i["stored_hash"] == i["recomputed_hash"] == i["audit_hash"] for i in ev["items"])

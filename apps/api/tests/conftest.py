@@ -16,9 +16,20 @@ os.environ.setdefault("JOLTIQ_LOCAL_STORAGE_DIR", "/tmp/joltiq-test-storage")
 os.environ.setdefault("JOLTIQ_SMTP_PORT", "2525")
 os.environ.setdefault("JOLTIQ_RATE_LIMIT_REGISTER_PER_HOUR", "100000")
 os.environ.setdefault("JOLTIQ_RATE_LIMIT_DEVICE_ENROLL_PER_HOUR", "100000")
-os.environ.setdefault("JOLTIQ_BROWSER_WORKER_URL", "http://127.0.0.1:8199")
+def _free_port() -> int:
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+# E2E ports: ephemeral per test session (a fixed 8199/8399 collided with stale or foreign listeners → flaky runs).
+os.environ.setdefault("JOLTIQ_TEST_WORKER_PORT", str(_free_port()))
+os.environ.setdefault("JOLTIQ_TEST_APP_PORT", str(_free_port()))
+os.environ.setdefault("JOLTIQ_BROWSER_WORKER_URL", f"http://127.0.0.1:{os.environ['JOLTIQ_TEST_WORKER_PORT']}")
 os.environ.setdefault("JOLTIQ_BROWSER_WORKER_TOKEN", "test-worker-token")
-os.environ.setdefault("JOLTIQ_RESEARCH_FIXTURE_BASE_URL", "http://127.0.0.1:8399/docs")
+os.environ.setdefault("JOLTIQ_RESEARCH_FIXTURE_BASE_URL", f"http://127.0.0.1:{os.environ['JOLTIQ_TEST_APP_PORT']}/docs")
 os.environ.setdefault("JOLTIQ_REDIS_URL", "redis://localhost:6379/15")
 
 import pytest  # noqa: E402

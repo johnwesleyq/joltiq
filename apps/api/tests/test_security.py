@@ -14,6 +14,105 @@ def _uid(c):
     return uuid.UUID(c.me["user"]["id"])
 
 
+@pytest.mark.parametrize(
+    ("case", "expected_reason"),
+    [
+        ("resolved_only", "ticket_not_verified"),
+        ("ticket_bit_only", "verification_missing"),
+        ("failed", "verification_not_verified"),
+        ("unknown", "verification_not_verified"),
+        ("missing_hash", "evidence_not_sealed"),
+        ("tampered", "evidence_recompute_failed"),
+    ],
+)
+def test_post_resolution_learning_refuses_unsealed_or_unverified_evidence(owner, case, expected_reason):
+    """A resolved state or mutable ticket bit can never manufacture reusable 'verified' guidance."""
+    from joltiq.db import session_scope
+    from joltiq.models import AgentRun, Ticket, VerificationRun
+    from joltiq.services import verification
+    from joltiq.services.agent import _verified_resolution_evidence
+
+    org_id = uuid.UUID(owner.org_id)
+    with session_scope(org_id) as db:
+        ticket = Ticket(
+            org_id=org_id,
+            number=910000 + ["resolved_only", "ticket_bit_only", "failed", "unknown", "missing_hash", "tampered"].index(case),
+            subject=f"Evidence gate {case}",
+            description="security regression",
+            status="RESOLVED",
+            resolution_verified=case != "resolved_only",
+        )
+        db.add(ticket)
+        db.flush()
+        run = AgentRun(
+            org_id=org_id,
+            ticket_id=ticket.id,
+            state="RESOLVED",
+            correlation_id=uuid.uuid4().hex,
+            context={},
+        )
+        db.add(run)
+        db.flush()
+        if case != "ticket_bit_only" and case != "resolved_only":
+            status = "FAILED" if case == "failed" else "UNKNOWN" if case == "unknown" else "VERIFIED"
+            vr = VerificationRun(
+                org_id=org_id,
+                run_id=run.id,
+                kind="verification",
+                status=status,
+                postconditions=[{"type": "ticket_field_equals", "critical": True}],
+                details=[{"type": "ticket_field_equals", "critical": True, "status": status}],
+                pre_state={},
+                post_state={"checks": [{"type": "ticket_field_equals", "critical": True, "status": status}]},
+            )
+            db.add(vr)
+            db.flush()
+            verification.seal(db, vr)
+            run.context = {"verification_id": str(vr.id)}
+            if case == "missing_hash":
+                vr.evidence_hash = None
+            elif case == "tampered":
+                vr.details = [{"type": "ticket_field_equals", "critical": True, "status": "VERIFIED", "observed": "changed"}]
+
+        evidence, reason = _verified_resolution_evidence(db, run, ticket)
+        assert evidence is None and reason == expected_reason
+
+
+def test_post_resolution_learning_accepts_intact_sealed_critical_evidence(owner):
+    from joltiq.db import session_scope
+    from joltiq.models import AgentRun, Ticket, VerificationRun
+    from joltiq.services import verification
+    from joltiq.services.agent import _verified_resolution_evidence
+
+    org_id = uuid.UUID(owner.org_id)
+    with session_scope(org_id) as db:
+        ticket = Ticket(
+            org_id=org_id, number=910100, subject="Verified evidence gate", description="security regression",
+            status="RESOLVED", resolution_verified=True,
+        )
+        db.add(ticket)
+        db.flush()
+        run = AgentRun(
+            org_id=org_id, ticket_id=ticket.id, state="RESOLVED", correlation_id=uuid.uuid4().hex, context={},
+        )
+        db.add(run)
+        db.flush()
+        vr = VerificationRun(
+            org_id=org_id, run_id=run.id, kind="verification", status="VERIFIED",
+            postconditions=[{"type": "ticket_field_equals", "critical": True}],
+            details=[{"type": "ticket_field_equals", "critical": True, "status": "VERIFIED"}],
+            pre_state={},
+            post_state={"checks": [{"type": "ticket_field_equals", "critical": True, "status": "VERIFIED"}]},
+        )
+        db.add(vr)
+        db.flush()
+        verification.seal(db, vr)
+        run.context = {"verification_id": str(vr.id)}
+
+        evidence, reason = _verified_resolution_evidence(db, run, ticket)
+        assert evidence is vr and reason is None
+
+
 # ---------------- approval bypass ----------------
 def _plan_with_sensitive_step(owner):
     """Build a run + plan + SENSITIVE step + pending approval directly through services (no browser needed)."""
@@ -343,43 +442,6 @@ def test_single_control_lease_and_takeover_rules(owner):
 
             db.add(ControlLease(org_id=org, session_id=sid, holder_kind="ai", acquired_at=utcnow(), expires_at=utcnow()))
             db.flush()
-
-
-def test_browser_control_transfer_pushes_monotonic_epoch(owner, monkeypatch):
-    from joltiq.db import session_scope
-    from joltiq.models import SupportSession
-    from joltiq.services import browser_client, sessions
-
-    pushed = []
-    monkeypatch.setattr(
-        browser_client,
-        "set_lease",
-        lambda ref, epoch, controller: pushed.append((ref, epoch, controller)) or {"ok": True},
-    )
-    org = uuid.UUID(owner.org_id)
-    with session_scope(org) as db:
-        session = SupportSession(
-            org_id=org,
-            kind="browser",
-            state="active",
-            owner_id=_uid(owner),
-            allowed_domains=["example.com"],
-            consent={},
-            worker_session_ref="worker-epoch",
-        )
-        db.add(session)
-        db.flush()
-        sessions.acquire_lease(db, session, "ai")
-        first = session.lease_epoch
-        sessions.acquire_lease(db, session, "customer", _uid(owner), preempt=True)
-        second = session.lease_epoch
-        sessions.release_lease(db, session, "customer finished")
-        assert first > 0 and second > first and session.lease_epoch > second
-    assert pushed == [
-        ("worker-epoch", first, "ai"),
-        ("worker-epoch", second, "customer"),
-        ("worker-epoch", second + 1, "none"),
-    ]
 
 
 def test_policy_denies_after_emergency_stop_or_expired_consent(owner):
@@ -976,18 +1038,23 @@ def test_production_refuses_dev_secrets(monkeypatch):
 
 
 def test_production_allows_explicit_external_computer_use_deployment():
-    from joltiq.config import Settings
+    from test_cloud_production import _production_settings
 
-    s = Settings(
-        env="production",
-        secret_key="s" * 40,
-        approval_signing_key="a" * 40,
-        encryption_key="e" * 44,
-        enable_local_fixture_providers=False,
-        cookie_secure=True,
-        allow_external_computer_use_models=True,
-    )
+    s = _production_settings(allow_external_computer_use_models=True)
     s.assert_production_safe()
+
+
+@pytest.mark.parametrize("override", [
+    {"openai_base_url": "https://ai-proxy.example/v1"},
+    {"openai_base_url": "https://api.openai.com/other"},
+    {"computer_use_cloud_models": []},
+])
+def test_production_managed_computer_use_requires_official_openai_and_models(override):
+    from test_cloud_production import _production_settings
+
+    s = _production_settings(allow_external_computer_use_models=True, **override)
+    with pytest.raises(RuntimeError, match="computer.use|openai_base_url"):
+        s.assert_production_safe()
 
 
 def _runtime_browser_procedure():

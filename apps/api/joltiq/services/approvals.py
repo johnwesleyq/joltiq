@@ -4,7 +4,6 @@ an APPROVED approval: only `decide()` from an authenticated human principal does
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
 from datetime import UTC, timedelta
 
 from sqlalchemy import select
@@ -61,67 +60,30 @@ def request_each_customer_step(db: Session, *, run, plan, steps: list[PlanStep],
     return created
 
 
-def inherit_for_rollback(
-    db: Session,
-    source_approvals: Sequence[Approval],
-    step: PlanStep,
-    plan_hash: str,
-    *,
-    source_plan_hash: str,
-    ticket_id,
-    session_id,
-) -> Approval:
-    """Create a signed rollback grant only from an approved original plan that bound the inverse."""
-    source = [
-        approval
-        for approval in source_approvals
-        if approval.status == A.APPROVED
-        and approval.plan_hash == source_plan_hash
-        and approval.decided_by
-    ]
-    if not source:
-        raise Conflict("No valid original approval covers this rollback", code="rollback_not_approved")
-    origin = source[0]
-    approval = Approval(
-        org_id=step.org_id,
-        run_id=origin.run_id,
-        plan_id=step.plan_id,
-        step_id=step.id,
-        ticket_id=ticket_id,
-        session_id=session_id,
-        status=A.APPROVED,
-        risk=step.risk,
-        action=step.action,
-        target=step.target,
-        params=step.params,
-        reason=f"Rollback approved with plan {source_plan_hash[:12]}",
-        effects="Restores the pre-change state.",
-        plan_hash=plan_hash,
-        step_hash=step_hash(step.action, step.target, step.params, plan_hash),
-        approver_roles=origin.approver_roles,
-        requested_for_user_id=origin.requested_for_user_id,
-        decided_by=origin.decided_by,
-        decided_at=origin.decided_at,
-        expires_at=origin.expires_at,
-    )
-    approval.grant_signature = hmac_sign(get_settings().approval_signing_key, _grant_message(approval))
-    db.add(approval)
+def inherit_for_rollback(db: Session, source_approvals: list[Approval], step: PlanStep, plan_hash: str, *, source_plan_hash: str,
+                         ticket_id, session_id) -> Approval:
+    """Bind a server-derived rollback step to the human approvals of the ORIGINAL plan (ADR 0019).
+
+    The inverse was folded into `source_plan_hash` before anyone approved, so those decisions already cover it. The caller
+    must have checked `rollback.authorized()` (every approval APPROVED for the current hash). Never model-initiated."""
+    src = [a for a in source_approvals if a.status == A.APPROVED and a.plan_hash == source_plan_hash and a.decided_by]
+    if not src or len(src) != len(source_approvals):
+        raise Conflict("original plan approvals are not valid for its hash", code="rollback_not_authorized")
+    origin = next((a for a in src if a.action == "office.addin.set_load_behavior"), src[0])
+    a = Approval(org_id=origin.org_id, run_id=origin.run_id, plan_id=step.plan_id, step_id=step.id, ticket_id=ticket_id, session_id=session_id,
+                 status=A.APPROVED, risk=step.risk, action=step.action, target=step.target, params=step.params,
+                 reason=f"Rollback approved with plan {source_plan_hash[:12]}", effects="Restores the pre-change state.",
+                 plan_hash=plan_hash, step_hash=step_hash(step.action, step.target, step.params, plan_hash),
+                 approver_roles=list(origin.approver_roles or []), requested_for_user_id=origin.requested_for_user_id,
+                 decided_by=origin.decided_by, decided_at=utcnow(),
+                 decision_comment=f"inherited from approval {origin.id} (rollback folded into plan hash)",
+                 expires_at=utcnow() + timedelta(minutes=30))
+    a.grant_signature = hmac_sign(get_settings().approval_signing_key, _grant_message(a))
+    db.add(a)
     db.flush()
-    audit.record(
-        db,
-        org_id=step.org_id,
-        actor_kind="system",
-        actor_id=None,
-        action="approval.inherited_for_rollback",
-        resource_type="approval",
-        resource_id=approval.id,
-        data={
-            "source_approval_id": str(origin.id),
-            "source_plan_hash": source_plan_hash,
-            "action": step.action,
-        },
-    )
-    return approval
+    audit.record(db, org_id=a.org_id, actor_kind="system", actor_id=None, action="approval.inherited_for_rollback", resource_type="approval",
+                 resource_id=a.id, data={"source_approval_id": str(origin.id), "source_plan_hash": source_plan_hash, "action": step.action})
+    return a
 
 
 def can_decide(db: Session, a: Approval, *, user_id, role: str | None, customer_id) -> tuple[bool, str]:

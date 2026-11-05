@@ -104,6 +104,19 @@ def give_consent(db: Session, s: SupportSession, *, user_id, customer_id, is_sta
     return s
 
 
+def bump_epoch(db: Session, s: SupportSession, controller: str) -> int:
+    """Every controller change gets a new epoch; the worker then rejects anything sent under the previous one,
+    so a takeover revokes an in-flight AI action or a revoked human's input immediately."""
+    s.lease_epoch = (s.lease_epoch or 0) + 1
+    db.flush()
+    if s.kind == "browser" and s.worker_session_ref:
+        try:
+            browser_client.set_lease(s.worker_session_ref, s.lease_epoch, controller)
+        except Exception:  # noqa: BLE001,S110  (worker down: actions fail closed anyway)
+            pass
+    return s.lease_epoch
+
+
 def active_lease(db: Session, s: SupportSession) -> ControlLease | None:
     lease = db.execute(select(ControlLease).where(ControlLease.session_id == s.id, ControlLease.released_at.is_(None))).scalar_one_or_none()
     if lease and lease.expires_at < utcnow():
@@ -111,18 +124,6 @@ def active_lease(db: Session, s: SupportSession) -> ControlLease | None:
         db.flush()
         return None
     return lease
-
-
-def bump_epoch(db: Session, s: SupportSession, controller: str) -> int:
-    """Fence every previous controller before the new controller can act."""
-    s.lease_epoch = (s.lease_epoch or 0) + 1
-    db.flush()
-    if s.kind == "browser" and s.worker_session_ref:
-        try:
-            browser_client.set_lease(s.worker_session_ref, s.lease_epoch, controller)
-        except Exception:  # noqa: BLE001,S110 - later actions fail closed on the worker
-            pass
-    return s.lease_epoch
 
 
 def acquire_lease(db: Session, s: SupportSession, holder_kind: str, user_id=None, *, preempt: bool = False, reason: str = "") -> ControlLease:
@@ -149,14 +150,7 @@ def acquire_lease(db: Session, s: SupportSession, holder_kind: str, user_id=None
     except IntegrityError as e:  # concurrent acquire lost the race
         raise Conflict("Another participant acquired control first", code="lease_held") from e
     epoch = bump_epoch(db, s, holder_kind)
-    event(
-        db,
-        s,
-        "control_acquired",
-        actor_kind=holder_kind,
-        actor_id=user_id,
-        data={"reason": reason, "epoch": epoch},
-    )
+    event(db, s, "control_acquired", actor_kind=holder_kind, actor_id=user_id, data={"reason": reason, "epoch": epoch})
     return lease
 
 
@@ -219,11 +213,7 @@ def terminate(db: Session, s: SupportSession, *, by_kind: str, user_id=None, rea
     if s.consented_at:
         from .billing import meter
 
-        ended_at = utcnow()
-        # A stale session may not be terminated until long after its consent
-        # expired. Bill only the time the customer actually authorized.
-        billable_end = min(ended_at, s.expires_at) if s.expires_at else ended_at
-        minutes = max(1.0, (billable_end - s.consented_at).total_seconds() / 60)
+        minutes = max(1.0, (utcnow() - s.consented_at).total_seconds() / 60)
         m = "browser_minutes" if s.kind == "browser" else ("desktop_minutes" if s.kind == "desktop" else None)
         if m:
             meter(db, s.org_id, m, round(minutes, 2), f"session-minutes:{s.id}")

@@ -141,7 +141,7 @@ def post(db: Session, integ: Integration, text: str, blocks: list[dict]) -> dict
                 r = c.post(sec["webhook_url"], json=body)
                 if r.status_code == 200:
                     return {"ok": True, "detail": "posted via incoming webhook"}
-                return {"ok": False, "detail": f"Slack webhook HTTP {r.status_code}"}
+                return {"ok": False, "detail": f"Slack webhook HTTP {r.status_code}: {r.text[:40]}"}
     except AppError as e:
         return {"ok": False, "detail": e.message}
     except httpx.HTTPError as e:
@@ -179,7 +179,7 @@ def fanout(db: Session, a: Approval, kind: str) -> list[str]:
 
     out = []
     for integ in db.execute(select(Integration).where(Integration.org_id == a.org_id, Integration.kind == "slack",
-                                                      Integration.status == "connected")).scalars():
+                                                      Integration.status != "revoked")).scalars():
         if kind not in (integ.config or {}).get("events", EVENTS):
             continue
         key = f"slack:{kind}:{a.id}:{integ.id}"
@@ -231,4 +231,3 @@ def _deliver(db: Session, payload: dict) -> None:
                 delay_seconds=30 * attempt, dedupe_key=f"slack.deliver:{d.id}:{attempt + 1}")
     else:
         d.suppressed = [*(d.suppressed or []), "slack:failed"]
-

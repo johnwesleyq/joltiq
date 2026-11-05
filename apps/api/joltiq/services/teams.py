@@ -156,7 +156,7 @@ def fanout(db: Session, a: Approval, kind: str) -> list[str]:
 
     out = []
     for integ in db.execute(select(Integration).where(Integration.org_id == a.org_id, Integration.kind == "teams",
-                                                      Integration.status == "connected")).scalars():
+                                                      Integration.status != "revoked")).scalars():
         if kind not in (integ.config or {}).get("events", EVENTS):
             continue
         key = f"teams:{kind}:{a.id}:{integ.id}"
@@ -207,4 +207,3 @@ def _deliver(db: Session, payload: dict) -> None:
                 delay_seconds=30 * attempt, dedupe_key=f"teams.deliver:{d.id}:{attempt + 1}")
     else:
         d.suppressed = [*(d.suppressed or []), "teams:failed"]
-

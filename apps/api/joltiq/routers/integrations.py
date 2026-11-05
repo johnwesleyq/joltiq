@@ -19,11 +19,10 @@ router = APIRouter(prefix="/integrations", tags=["integrations"])
 
 @router.get("/catalog")
 def catalog(ctx: Ctx = Depends(perm("integrations.manage"))):
-    from ..services.slack import _mock_base as slack_mock_base
-    from ..services.teams import _mock_base as teams_mock_base
+    from ..services.slack import _mock_base
+    from ..services.teams import _mock_base as _teams_mock
 
-    return {"implemented": sorted(svc.IMPLEMENTED),
-            "slack_mock_available": bool(slack_mock_base()), "teams_mock_available": bool(teams_mock_base()),
+    return {"implemented": sorted(svc.IMPLEMENTED), "slack_mock_available": bool(_mock_base()), "teams_mock_available": bool(_teams_mock()),
             "extension_points": [{"kind": k, "status": "not_implemented", "note": "Documented extension point; not available yet."}
                                  for k in sorted(svc.EXTENSION_POINTS)]}
 
@@ -96,8 +95,10 @@ class SecretIn(BaseModel):
 @router.post("/{iid}/rotate")
 def rotate(iid: uuid.UUID, body: SecretIn, ctx: Ctx = Depends(perm("integrations.manage"))):
     i = svc.get(ctx.db, iid)
-    if i.kind in {"slack", "teams"}:
-        raise AppError(f"Disconnect and reconnect {i.kind.title()} to change its credential", code="validation_error")
+    if i.kind == "slack":
+        raise AppError("Disconnect and reconnect Slack to change its webhook URL or token", code="validation_error")
+    if i.kind == "teams":
+        raise AppError("Disconnect and reconnect Teams to change its webhook URL", code="validation_error")
     svc.rotate_credential(ctx.db, i, body.secret, ctx.p.user_id)
     i.status = "disconnected"  # must be re-tested
     return svc.ser(i, ctx.db)
@@ -110,16 +111,16 @@ class SlackSettingsIn(BaseModel):
 
 @router.patch("/{iid}/slack")
 def slack_settings(iid: uuid.UUID, body: SlackSettingsIn, ctx: Ctx = Depends(perm("integrations.manage"))):
+    """Change the Slack channel and/or subscribed events (secrets cannot be read or changed here)."""
     from ..services import audit, slack
 
-    integration = svc.get(ctx.db, iid)
-    if integration.kind != "slack" or integration.status == "revoked":
+    i = svc.get(ctx.db, iid)
+    if i.kind != "slack" or i.status == "revoked":
         raise AppError("Not an active Slack integration", code="validation_error")
-    changes = slack.update_config(integration, body.model_dump(exclude_unset=True))
-    audit.record(ctx.db, org_id=integration.org_id, actor_kind="user", actor_id=ctx.p.user_id,
-                 action="integration.slack_settings_updated", resource_type="integration",
-                 resource_id=integration.id, data={"changes": changes})
-    return svc.ser(integration, ctx.db)
+    changes = slack.update_config(i, body.model_dump(exclude_unset=True))
+    audit.record(ctx.db, org_id=i.org_id, actor_kind="user", actor_id=ctx.p.user_id, action="integration.slack_settings_updated",
+                 resource_type="integration", resource_id=i.id, data={"changes": changes})
+    return svc.ser(i, ctx.db)
 
 
 class TeamsSettingsIn(BaseModel):
@@ -128,16 +129,16 @@ class TeamsSettingsIn(BaseModel):
 
 @router.patch("/{iid}/teams")
 def teams_settings(iid: uuid.UUID, body: TeamsSettingsIn, ctx: Ctx = Depends(perm("integrations.manage"))):
+    """Change the subscribed Teams events (the webhook URL cannot be read or changed here)."""
     from ..services import audit, teams
 
-    integration = svc.get(ctx.db, iid)
-    if integration.kind != "teams" or integration.status == "revoked":
+    i = svc.get(ctx.db, iid)
+    if i.kind != "teams" or i.status == "revoked":
         raise AppError("Not an active Teams integration", code="validation_error")
-    changes = teams.update_config(integration, body.model_dump())
-    audit.record(ctx.db, org_id=integration.org_id, actor_kind="user", actor_id=ctx.p.user_id,
-                 action="integration.teams_settings_updated", resource_type="integration",
-                 resource_id=integration.id, data={"changes": changes})
-    return svc.ser(integration, ctx.db)
+    changes = teams.update_config(i, body.model_dump())
+    audit.record(ctx.db, org_id=i.org_id, actor_kind="user", actor_id=ctx.p.user_id, action="integration.teams_settings_updated",
+                 resource_type="integration", resource_id=i.id, data={"changes": changes})
+    return svc.ser(i, ctx.db)
 
 
 @router.post("/{iid}/revoke")

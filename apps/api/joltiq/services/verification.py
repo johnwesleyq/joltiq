@@ -9,8 +9,11 @@ postconditions by observing the target system through a SEPARATE read path:
 Result per check: VERIFIED | FAILED | UNKNOWN. Aggregate: all VERIFIED → VERIFIED; any FAILED & some VERIFIED → PARTIAL;
 any FAILED → FAILED; otherwise UNKNOWN. UNKNOWN is never treated as success.
 
-Every postcondition is critical unless explicitly marked otherwise. A final run is sealed with a canonical evidence
-hash and that hash is written to the tenant audit chain so later database tampering is detectable.
+Hardening (ADR 0017):
+  * every postcondition is CRITICAL unless it says `"critical": false`; only critical checks decide the outcome and
+    VERIFIED needs at least one critical PASS (informational checks can never make a run VERIFIED);
+  * when a run is final its evidence is hashed (`evidence_hash`) and the hash is appended to the tenant's
+    hash-chained audit log (`verification.completed` / `rollback.completed`); `recompute_evidence` re-derives it.
 """
 from __future__ import annotations
 
@@ -41,7 +44,6 @@ from . import browser_client
 from .realtime import publish
 
 DEVICE_CHECKS = {
-    "device_disk_usage_available": ("disk.usage", lambda p: {}),
     "device_service_running": ("service.status", lambda p: {"name": p["name"]}),
     "device_process_responding": ("process.list", lambda p: {"name_filter": p["process"]}),
     "device_config_equals": ("config.read", lambda p: _addin_key(p)),
@@ -70,18 +72,17 @@ def aggregate(statuses: list[str]) -> str:
     return V.PARTIAL if any(s == V.VERIFIED for s in statuses) else V.UNKNOWN
 
 
-def is_critical(postcondition_or_detail: dict) -> bool:
-    return postcondition_or_detail.get("critical", True) is not False
+def is_critical(pc_or_detail: dict) -> bool:
+    return pc_or_detail.get("critical", True) is not False
 
 
 def aggregate_critical(details: list[dict]) -> str:
-    """Only critical observations decide the outcome; no critical pass means UNKNOWN."""
-    critical_statuses: list[str] = []
-    for detail in details:
-        status = detail.get("status")
-        if is_critical(detail) and isinstance(status, str):
-            critical_statuses.append(status)
-    return aggregate(critical_statuses)
+    """Outcome from the critical checks only; VERIFIED requires at least one critical PASS."""
+    crit: list[str] = [str(d["status"]) for d in details if is_critical(d) and d.get("status")]
+    status = aggregate(crit)
+    if status == V.VERIFIED and not any(s == V.VERIFIED for s in crit):
+        return V.UNKNOWN
+    return status
 
 
 def restore_readback_verified(details: list[dict]) -> bool:
@@ -113,14 +114,8 @@ def start(db: Session, ex: ActionExecution, postconditions: list[dict], pre_stat
     details: list[dict] = []
     for i, pc in enumerate(postconditions):
         t, p = pc.get("type"), pc.get("params", {}) or {}
-        d: dict[str, Any] = {
-            "index": i,
-            "type": t,
-            "description": pc.get("description", ""),
-            "status": V.UNKNOWN,
-            "critical": is_critical(pc),
-            "observed_at": utcnow().isoformat(),
-        }
+        d: dict[str, Any] = {"index": i, "type": t, "description": pc.get("description", ""), "status": V.UNKNOWN,
+                             "critical": is_critical(pc), "observed_at": utcnow().isoformat()}
         if t not in SUPPORTED:
             d["reason"] = "unsupported postcondition type — cannot be verified"
         elif t == "browser_readback":
@@ -212,12 +207,6 @@ def _queue_device_check(db, vr, device, session, t, p) -> dict:
 
 def evaluate_device_result(t: str, params: dict, result: dict) -> tuple[str, str]:
     r = result or {}
-    if t == "device_disk_usage_available":
-        drives = r.get("drives") or []
-        valid = [d for d in drives if d.get("name") and isinstance(d.get("free_gb"), (int, float))
-                 and isinstance(d.get("total_gb"), (int, float)) and 0 <= d["free_gb"] <= d["total_gb"]]
-        observed = ", ".join(f"{d['name']} {d['free_gb']} GB free of {d['total_gb']} GB" for d in valid)
-        return (V.VERIFIED if r.get("ok") is True and valid else V.FAILED), observed or "no valid fixed-drive usage returned"
     if t == "device_service_running":
         st = str(r.get("status", "")).lower()
         return (V.VERIFIED if st == "running" else V.FAILED), f"service status {r.get('status')}"
@@ -283,10 +272,8 @@ def _finalize_if_complete(db: Session, vr: VerificationRun) -> None:
     if any(s == "PENDING" for s in sts):
         return
     vr.status = aggregate_critical(vr.details)
-    vr.post_state = {"checks": [
-        {k: v for k, v in detail.items() if k in ("type", "status", "observed", "reason", "critical")}
-        for detail in vr.details
-    ]}
+    vr.post_state = {"checks": [{k: v for k, v in d.items() if k in ("type", "status", "observed", "reason", "critical")}
+                                for d in vr.details]}
     db.flush()
     seal(db, vr)
     publish(db, vr.org_id, "verification.completed", {"verification_id": str(vr.id), "run_id": str(vr.run_id) if vr.run_id else None, "status": vr.status})
@@ -296,94 +283,51 @@ def is_pending(vr: VerificationRun) -> bool:
     return any(d.get("status") == "PENDING" for d in vr.details)
 
 
+# ---------------- tamper-evident evidence ----------------
 EVIDENCE_VERSION = "joltiq-evidence-v1"
 
 
 def _evidence_rows(db: Session, vr: VerificationRun) -> list[dict]:
-    rows = db.execute(
-        select(VerificationEvidence)
-        .where(VerificationEvidence.verification_id == vr.id)
-        .order_by(VerificationEvidence.created_at, VerificationEvidence.id)
-    ).scalars().all()
-    return [
-        {
-            "kind": row.kind,
-            "summary": row.summary,
-            "data_sha256": sha256_hex(canonical_json(row.data or {})),
-        }
-        for row in rows
-    ]
+    rows = db.execute(select(VerificationEvidence).where(VerificationEvidence.verification_id == vr.id)
+                      .order_by(VerificationEvidence.created_at, VerificationEvidence.id)).scalars().all()
+    return [{"kind": e.kind, "summary": e.summary, "data_sha256": sha256_hex(canonical_json(e.data or {}))} for e in rows]
 
 
 def evidence_hash(db: Session, vr: VerificationRun) -> str:
     return sha256_hex(canonical_json({
-        "v": EVIDENCE_VERSION,
-        "verification_id": str(vr.id),
-        "run_id": str(vr.run_id) if vr.run_id else None,
-        "execution_id": str(vr.execution_id) if vr.execution_id else None,
-        "kind": vr.kind,
-        "status": vr.status,
-        "postconditions": vr.postconditions,
-        "details": vr.details,
-        "pre_state": vr.pre_state,
-        "post_state": vr.post_state,
+        "v": EVIDENCE_VERSION, "verification_id": str(vr.id), "run_id": str(vr.run_id) if vr.run_id else None,
+        "execution_id": str(vr.execution_id) if vr.execution_id else None, "kind": vr.kind, "status": vr.status,
+        "postconditions": vr.postconditions, "details": vr.details, "pre_state": vr.pre_state, "post_state": vr.post_state,
         "evidence": sorted(_evidence_rows(db, vr), key=canonical_json),
     }))
 
 
 def seal(db: Session, vr: VerificationRun) -> str:
-    """Seal final evidence and append the seal to the hash-chained audit log."""
+    """Hash the final evidence and append the hash to the tenant audit chain."""
     from . import audit
 
     db.flush()
     vr.evidence_hash = evidence_hash(db, vr)
-    audit.record(
-        db,
-        org_id=vr.org_id,
-        actor_kind="system",
-        actor_id=None,
-        action="rollback.completed" if vr.kind == "rollback" else "verification.completed",
-        resource_type="verification_run",
-        resource_id=vr.id,
-        data={
-            "evidence_hash": vr.evidence_hash,
-            "status": vr.status,
-            "run_id": str(vr.run_id) if vr.run_id else None,
-            "critical_passed": sum(
-                1 for detail in vr.details
-                if is_critical(detail) and detail.get("status") == V.VERIFIED
-            ),
-        },
-    )
+    audit.record(db, org_id=vr.org_id, actor_kind="system", actor_id=None,
+                 action="rollback.completed" if vr.kind == "rollback" else "verification.completed",
+                 resource_type="verification_run", resource_id=vr.id,
+                 data={"evidence_hash": vr.evidence_hash, "status": vr.status, "run_id": str(vr.run_id) if vr.run_id else None,
+                       "critical_passed": sum(1 for d in vr.details if is_critical(d) and d.get("status") == V.VERIFIED)})
     return vr.evidence_hash
 
 
 def recompute_evidence(db: Session, vr: VerificationRun) -> dict[str, Any]:
-    """Compare stored evidence with its audit-chain seal."""
+    """Recompute the evidence hash from stored rows and compare it with the stored and audited hashes."""
     from ..models import AuditEvent
     from . import audit
 
     recomputed = evidence_hash(db, vr) if vr.evidence_hash else None
-    event = db.execute(
-        select(AuditEvent)
-        .where(
-            AuditEvent.resource_type == "verification_run",
-            AuditEvent.resource_id == str(vr.id),
-            AuditEvent.action.in_(["verification.completed", "rollback.completed"]),
-        )
-        .order_by(AuditEvent.id.desc())
-    ).scalars().first()
-    audited = (event.data or {}).get("evidence_hash") if event else None
+    ev = db.execute(select(AuditEvent).where(AuditEvent.resource_type == "verification_run", AuditEvent.resource_id == str(vr.id),
+                                             AuditEvent.action.in_(["verification.completed", "rollback.completed"]))
+                    .order_by(AuditEvent.id.desc())).scalars().first()
+    audited = (ev.data or {}).get("evidence_hash") if ev else None
     chain = audit.verify_chain(db, vr.org_id)
     ok = bool(recomputed) and recomputed == vr.evidence_hash == audited and chain["ok"]
-    return {
-        "verification_id": str(vr.id),
-        "kind": vr.kind,
-        "status": vr.status,
-        "stored_hash": vr.evidence_hash,
-        "recomputed_hash": recomputed,
-        "audit_hash": audited,
-        "audit_event_id": event.id if event else None,
-        "chain_ok": chain["ok"],
-        "ok": ok,
-    }
+    return {"verification_id": str(vr.id), "kind": vr.kind, "status": vr.status, "stored_hash": vr.evidence_hash,
+            "recomputed_hash": recomputed, "audit_hash": audited, "audit_event_id": ev.id if ev else None,
+            "chain_ok": chain["ok"], "ok": ok}

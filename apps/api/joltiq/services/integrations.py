@@ -7,9 +7,9 @@ Implemented adapters
   * generic_rest     — inbound ticket creation via API key (`POST /api/v1/integrations/inbound/{id}/tickets`).
   * email_intake     — inbound email (RFC 5322) → ticket / comment via `POST /api/v1/integrations/email/inbound`.
 Extension points (documented, NOT implemented — never shown as working): zendesk, servicenow, jira_sm, halopsa,
-connectwise, intune, ninjaone, datto, m365, google_workspace. See docs/api/integrations.md.
-  * slack            — approval alerts through an encrypted incoming webhook or bot token.
-  * teams            — approval alerts through an encrypted Teams/Power Automate webhook.
+connectwise, intune, ninjaone, datto, m365, google_workspace, teams.
+  * slack            — approval alerts (incoming webhook and/or bot token + channel), see services/slack.py and ADR 0021. See docs/api/integrations.md.
+  * teams            — approval alerts via a Teams incoming webhook / Power Automate workflow URL, see services/teams.py and ADR 0022.
 """
 from __future__ import annotations
 
@@ -131,17 +131,15 @@ def connect(db: Session, org_id, *, kind: str, name: str, config: dict, secret: 
     if kind == "slack":
         from . import slack
 
-        clean, packed_secret = slack.clean_config(config)
-        if not packed_secret:
+        clean, secret = slack.clean_config(config)
+        if not secret:
             raise AppError("Provide a Slack incoming-webhook URL and/or a bot token", code="validation_error")
-        secret = packed_secret
     elif kind == "teams":
         from . import teams
 
-        clean, packed_secret = teams.clean_config(config)
-        if not packed_secret:
+        clean, secret = teams.clean_config(config)
+        if not secret:
             raise AppError("Provide a Teams incoming-webhook or Power Automate workflow URL", code="validation_error")
-        secret = packed_secret
     else:
         clean = _clean_config(kind, config)
     integ = Integration(org_id=org_id, kind=kind, name=name, config=clean, scopes=scopes, status="disconnected")
@@ -185,16 +183,14 @@ def test(db: Session, integ: Integration) -> dict:
             from . import slack
 
             res = slack.post(db, integ, *slack.test_message())
-            audit.record(db, org_id=integ.org_id, actor_kind="system", actor_id=None, action="slack.test",
-                         resource_type="integration", resource_id=integ.id,
-                         data={"ok": res["ok"], "detail": res["detail"]})
+            audit.record(db, org_id=integ.org_id, actor_kind="system", actor_id=None, action="slack.test", resource_type="integration",
+                         resource_id=integ.id, data={"ok": res["ok"], "detail": res["detail"]})
         elif integ.kind == "teams":
             from . import teams
 
             res = teams.post(db, integ, teams.test_message())
-            audit.record(db, org_id=integ.org_id, actor_kind="system", actor_id=None, action="teams.test",
-                         resource_type="integration", resource_id=integ.id,
-                         data={"ok": res["ok"], "detail": res["detail"]})
+            audit.record(db, org_id=integ.org_id, actor_kind="system", actor_id=None, action="teams.test", resource_type="integration",
+                         resource_id=integ.id, data={"ok": res["ok"], "detail": res["detail"]})
         else:
             res = {"ok": True, "detail": "inbound integration — ready to receive"}
     except (AppError, httpx.HTTPError) as e:

@@ -15,7 +15,7 @@ from ..deps import Ctx, get_ctx, perm
 from ..models import AgentRun, SessionEvent, SupportSession, Ticket
 from ..models.enums import RiskLevel
 from ..services import agent as agent_svc
-from ..services import browser_client
+from ..services import audit, browser_client
 from ..services import sessions as svc
 from .common import page_params, paginate
 from .tickets import ticket_for
@@ -96,6 +96,7 @@ class ConsentIn(BaseModel):
     max_risk: RiskLevel = RiskLevel.SENSITIVE
     recording: bool = False
     accept: bool = True
+    acknowledge_high_risk: bool = False  # v13: required when the Fix plan uninstalls / installs drivers / restarts / shuts down
 
 
 @router.post("/{sid}/consent")
@@ -107,8 +108,20 @@ def consent(sid: uuid.UUID, body: ConsentIn, ctx: Ctx = Depends(get_ctx)):
         svc.terminate(ctx.db, s, by_kind="user", user_id=ctx.p.user_id, reason="consent declined")
         _resume_run(ctx, s, "consent declined")
         return svc.ser(s)
+    ff = (s.request_details or {}).get("full_fix") or {}
+    if ff.get("high_risk") and not body.acknowledge_high_risk:
+        raise Conflict("This Fix includes high-risk Windows steps; tick “I understand” to approve them", code="high_risk_ack_required")
     svc.give_consent(ctx.db, s, user_id=ctx.p.user_id, customer_id=ctx.p.customer_id, is_staff=ctx.p.is_staff, minutes=body.minutes,
                      max_risk=body.max_risk, recording=body.recording)
+    if ff.get("windows_actions"):
+        from ..models import utcnow
+
+        rd = dict(s.request_details or {})
+        rd["full_fix"] = {**ff, "approved_by": str(ctx.p.user_id), **({"high_risk_acknowledged_at": utcnow().isoformat()} if body.acknowledge_high_risk else {})}
+        s.request_details = rd
+        audit.record(ctx.db, org_id=s.org_id, actor_kind="user", actor_id=ctx.p.user_id, action="fix.plan_approved", resource_type="support_session",
+                     resource_id=s.id, data={"windows_actions": [{"action": i["action"], "params": i["params"], "high_risk": i["high_risk"]}
+                                                                  for i in ff["windows_actions"]], "high_risk_acknowledged": body.acknowledge_high_risk})
     _resume_run(ctx, s, "consent granted")
     return svc.ser(s)
 
@@ -187,10 +200,7 @@ def human_input(sid: uuid.UUID, body: HumanInput, ctx: Ctx = Depends(get_ctx)):
         svc.acquire_lease(ctx.db, s, kind, ctx.p.user_id, preempt=True, reason="input")
     if not s.worker_session_ref:
         raise Conflict("Browser session is not running", code="invalid_state")
-    res = browser_client.human_input(
-        s.worker_session_ref,
-        {**body.model_dump(), "epoch": s.lease_epoch},
-    )
+    res = browser_client.human_input(s.worker_session_ref, {**body.model_dump(), "epoch": s.lease_epoch})
     svc.event(ctx.db, s, "human_input", actor_kind=kind, actor_id=ctx.p.user_id,
               data={"kind": body.kind, "protected": body.protected, **({} if body.protected or body.kind != "key" else {"key": body.key})})
     return {"ok": True, "page": {"url": (res.get("page") or {}).get("url"), "auth_required": (res.get("page") or {}).get("auth_required")}}
@@ -210,6 +220,10 @@ def handback(sid: uuid.UUID, ctx: Ctx = Depends(get_ctx)):
         s.state = "active"
         svc.event(ctx.db, s, "auth_completed_by_user", actor_kind=kind, actor_id=ctx.p.user_id)
     _resume_run(ctx, s, "control handed back")
+    if s.kind == "browser":
+        from ..services import browser_fix
+
+        browser_fix.on_handback(ctx.db, s, ctx.p.user_id)
     return svc.ser(s, svc.active_lease(ctx.db, s))
 
 

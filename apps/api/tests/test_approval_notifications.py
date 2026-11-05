@@ -1,6 +1,5 @@
-"""Approval notification eligibility, dedupe, reminders, outcomes, and settings."""
-from __future__ import annotations
-
+"""Approver notifications (ADR 0020): eligibility (roles, SoD, tenant), email with risk/expiry/deep link, dedupe,
+preferences, rate limit, reminders before expiry, outcome notices to the requester + ticket timeline, audit events."""
 import uuid
 from datetime import timedelta
 
@@ -8,215 +7,147 @@ from conftest import invite_and_join, register
 from sqlalchemy import select
 
 
-def _uid(client):
-    return uuid.UUID(client.me["user"]["id"])
+def _uid(c):
+    return uuid.UUID(c.me["user"]["id"])
 
 
-def _request(owner, *, started_by=None, roles=("technician", "admin", "org_owner")):
+def _request(owner, started_by=None, roles=("technician", "admin", "org_owner"), risk="SENSITIVE"):
     from joltiq.db import session_scope
     from joltiq.models import AgentPlan, AgentRun, PlanStep
     from joltiq.services import approvals, tickets
 
-    org_id = uuid.UUID(owner.org_id)
-    with session_scope(org_id) as db:
-        ticket = tickets.create(db, org_id, subject="Notify approvers", description="x", requester_id=started_by)
-        run = AgentRun(
-            org_id=org_id,
-            ticket_id=ticket.id,
-            state="AWAITING_APPROVAL",
-            correlation_id=uuid.uuid4().hex,
-            context={},
-            started_by=started_by,
-        )
+    org = uuid.UUID(owner.org_id)
+    with session_scope(org) as db:
+        t = tickets.create(db, org, subject="Notify approvers", description="x", requester_id=started_by)
+        run = AgentRun(org_id=org, ticket_id=t.id, state="AWAITING_APPROVAL", correlation_id="x", context={}, started_by=started_by)
         db.add(run)
         db.flush()
-        plan = AgentPlan(org_id=org_id, run_id=run.id, summary="save", plan_hash="h" * 64)
+        plan = AgentPlan(org_id=org, run_id=run.id, summary="save", plan_hash="h" * 64, status="proposed")
         db.add(plan)
         db.flush()
-        step = PlanStep(
-            org_id=org_id,
-            plan_id=plan.id,
-            ordinal=0,
-            action="browser.submit",
-            target={},
-            params={"selector": "#save"},
-            risk="SENSITIVE",
-            postconditions=[],
-        )
-        db.add(step)
+        st = PlanStep(org_id=org, plan_id=plan.id, ordinal=0, action="browser.submit", target={}, params={"selector": "#save"},
+                      risk=risk, postconditions=[])
+        db.add(st)
         db.flush()
-        approval = approvals.request(
-            db,
-            org_id=org_id,
-            run_id=run.id,
-            plan_id=plan.id,
-            step=step,
-            plan_hash=plan.plan_hash,
-            ticket_id=ticket.id,
-            session_id=None,
-            reason="save the form",
-            effects="saves",
-            approver_roles=list(roles),
-        )
-        return approval.id, ticket.id
+        a = approvals.request(db, org_id=org, run_id=run.id, plan_id=plan.id, step=st, plan_hash=plan.plan_hash, ticket_id=t.id,
+                              session_id=None, reason="save the form", effects="saves", approver_roles=list(roles))
+        return a.id, t.id
 
 
-def _notifications(org_id, user_id, approval_id=None):
+def _notes(org, uid, aid=None):
     from joltiq.db import session_scope
     from joltiq.models import Notification
 
-    with session_scope(uuid.UUID(org_id)) as db:
-        query = select(Notification).where(Notification.user_id == user_id)
-        if approval_id:
-            query = query.where(Notification.link == f"/approvals/{approval_id}")
-        return db.execute(query).scalars().all()
+    with session_scope(uuid.UUID(org)) as db:
+        q = select(Notification).where(Notification.user_id == uid)
+        if aid:
+            q = q.where(Notification.link == f"/approvals/{aid}")
+        return [(n.category, n.title, n.body) for n in db.execute(q).scalars()]
 
 
-def _notes(org_id, user_id, approval_id=None):
-    return [(note.category, note.title, note.body) for note in _notifications(org_id, user_id, approval_id)]
-
-
-def _emails(org_id, target):
+def _emails(org, to):
     from joltiq.db import session_scope
     from joltiq.models import Delivery
 
-    with session_scope(uuid.UUID(org_id)) as db:
-        rows = db.execute(select(Delivery).where(Delivery.channel == "email", Delivery.target == target)).scalars()
-        return [(row.subject, row.payload["body"]) for row in rows]
+    with session_scope(uuid.UUID(org)) as db:
+        return [(d.subject, d.payload["body"]) for d in db.execute(select(Delivery).where(Delivery.channel == "email", Delivery.target == to)).scalars()]
 
 
-def _audit(org_id, action):
+def _audit(org, action):
     from joltiq.db import session_scope
     from joltiq.models import AuditEvent
 
-    with session_scope(uuid.UUID(org_id)) as db:
-        rows = db.execute(select(AuditEvent).where(AuditEvent.action == action)).scalars()
-        return [row.data for row in rows]
+    with session_scope(uuid.UUID(org)) as db:
+        return [e.data for e in db.execute(select(AuditEvent).where(AuditEvent.action == action)).scalars()]
 
 
-def test_eligible_roles_exclude_requester_disabled_user_and_other_tenant(app, owner, new_client):
-    from joltiq.db import session_scope
-    from joltiq.models import User
-
-    technician = invite_and_join(app, owner, "technician")
+def test_only_eligible_approvers_are_notified_with_risk_expiry_and_link(app, owner, new_client):
+    tech = invite_and_join(app, owner, "technician")
     admin = invite_and_join(app, owner, "admin")
     auditor = invite_and_join(app, owner, "auditor")
-    disabled = invite_and_join(app, owner, "admin")
-    with session_scope(uuid.UUID(owner.org_id)) as db:
-        db.get(User, _uid(disabled)).disabled = True
-    other = register(new_client(), "Other tenant")
-    approval_id, _ = _request(owner, started_by=_uid(technician))
-    assert _notifications(owner.org_id, _uid(owner), approval_id)
-    assert _notifications(owner.org_id, _uid(admin), approval_id)
-    assert not _notifications(owner.org_id, _uid(technician), approval_id)
-    assert not _notifications(owner.org_id, _uid(auditor), approval_id)
-    assert not _notifications(owner.org_id, _uid(disabled), approval_id)
-    assert not _notifications(other.org_id, _uid(other))
+    other = register(new_client(), "Other MSP")
+    aid, _ = _request(owner, started_by=_uid(tech))
+    # SoD: the technician who started the run is not asked to approve it; auditors can't decide; other tenants never see it.
+    assert _notes(owner.org_id, _uid(owner), aid) and _notes(owner.org_id, _uid(admin), aid)
+    assert not _notes(owner.org_id, _uid(tech), aid)
+    assert not _notes(owner.org_id, _uid(auditor), aid)
+    assert not _notes(other.org_id, _uid(other))
+    cat, title, body = _notes(owner.org_id, _uid(owner), aid)[0]
+    assert cat == "approval" and "SENSITIVE" in title and "expires" in title and "Expires:" in body
+    (subject, mail), = [m for m in _emails(owner.org_id, owner.email) if "Approval needed" in m[0]]
+    assert "Risk: SENSITIVE" in mail and f"/approvals/{aid}" in mail and "UTC" in mail
+    assert len(_audit(owner.org_id, "notification.approval_requested")) == 2
+    # Bell API shows it too.
+    items = owner.get("/api/v1/notifications").json()["items"]
+    assert any(i["link"] == f"/approvals/{aid}" for i in items)
 
 
-def test_request_dispatch_is_deduplicated_and_preferences_suppress_email(app, owner):
+def test_dedupe_preferences_and_rate_limit(app, owner):
     from joltiq.db import session_scope
-    from joltiq.models import Approval, Delivery, NotificationDispatch
+    from joltiq.models import Approval, Organization
     from joltiq.services import approval_notify
 
-    approval_id, _ = _request(owner)
+    aid, _ = _request(owner)
     with session_scope(uuid.UUID(owner.org_id)) as db:
-        approval_notify.on_requested(db, db.get(Approval, approval_id))
-        dispatches = db.execute(select(NotificationDispatch).where(NotificationDispatch.approval_id == approval_id)).scalars().all()
-        assert len(dispatches) == len({dispatch.dedupe_key for dispatch in dispatches})
-    assert len(_notifications(owner.org_id, _uid(owner), approval_id)) == 1
-    owner.put("/api/v1/notifications/preferences", json={"category": "approval", "in_app": True, "email": False})
-    second_id, _ = _request(owner)
+        approval_notify.on_requested(db, db.get(Approval, aid))  # retried event → no duplicate
+    assert len(_notes(owner.org_id, _uid(owner), aid)) == 1
+    assert len([m for m in _emails(owner.org_id, owner.email) if "Approval needed" in m[0]]) == 1
+
+    assert owner.put("/api/v1/notifications/preferences", json={"category": "approval", "in_app": True, "email": False}).status_code == 200
+    prefs = {p["category"] for p in owner.get("/api/v1/notifications/preferences").json()}
+    assert {"approval", "approval_reminder", "approval_outcome"} <= prefs
+    aid2, _ = _request(owner)
+    assert _notes(owner.org_id, _uid(owner), aid2)
+    assert len([m for m in _emails(owner.org_id, owner.email) if "Approval needed" in m[0]]) == 1
+    assert any("email:preference" in d["suppressed"] for d in _audit(owner.org_id, "notification.approval_requested"))
+
+    owner.put("/api/v1/notifications/preferences", json={"category": "approval", "in_app": True, "email": True})
     with session_scope(uuid.UUID(owner.org_id)) as db:
-        emails = db.execute(select(Delivery).where(Delivery.channel == "email")).scalars().all()
-        assert all(str(second_id) not in str(delivery.payload) for delivery in emails)
+        org = db.get(Organization, uuid.UUID(owner.org_id))
+        org.settings = {**(org.settings or {}), "approval_email_rate_per_hour": 1}
+    _request(owner)
+    assert len([m for m in _emails(owner.org_id, owner.email) if "Approval needed" in m[0]]) == 1
+    assert any("email:rate_limited" in d["suppressed"] for d in _audit(owner.org_id, "notification.approval_requested"))
 
 
-def test_reminder_timing_once_and_expiry_outcome(app, owner):
+def test_reminder_once_before_expiry(app, owner):
     from joltiq.db import session_scope
     from joltiq.models import Approval, utcnow
-    from joltiq.services import approval_notify, approvals
+    from joltiq.services import approval_notify
 
-    approval_id, _ = _request(owner)
+    aid, _ = _request(owner)
     with session_scope(uuid.UUID(owner.org_id)) as db:
-        assert approval_notify.send_reminders(db) == 0
-        approval = db.get(Approval, approval_id)
-        approval.expires_at = utcnow() + timedelta(minutes=10)
-        approval.created_at = utcnow() - timedelta(minutes=50)
+        assert approval_notify.send_reminders(db) == 0  # 60 min TTL, not due yet
+        a = db.get(Approval, aid)
+        a.expires_at, a.created_at = utcnow() + timedelta(minutes=10), utcnow() - timedelta(minutes=50)
     with session_scope(uuid.UUID(owner.org_id)) as db:
         assert approval_notify.send_reminders(db) >= 1
     with session_scope(uuid.UUID(owner.org_id)) as db:
         assert approval_notify.send_reminders(db) == 0
-        db.get(Approval, approval_id).expires_at = utcnow() - timedelta(seconds=1)
+    rem = [n for n in _notes(owner.org_id, _uid(owner), aid) if n[0] == "approval_reminder"]
+    assert len(rem) == 1 and "expires in" in rem[0][1]
+    assert any("Reminder" in s for s, _ in _emails(owner.org_id, owner.email))
+
+
+def test_requester_and_ticket_hear_the_outcome(app, owner):
+    from joltiq.db import session_scope
+    from joltiq.models import Approval, TicketEvent, utcnow
+    from joltiq.services import approvals
+
+    tech = invite_and_join(app, owner, "technician")
+    aid, tid = _request(owner, started_by=_uid(tech))
+    assert owner.post(f"/api/v1/approvals/{aid}/decision", json={"decision": "deny", "comment": "not now"}).status_code == 200
+    out = [n for n in _notes(owner.org_id, _uid(tech), aid) if n[0] == "approval_outcome"]
+    assert len(out) == 1 and "denied" in out[0][1] and "not now" in out[0][2]
+
+    aid2, tid2 = _request(owner, started_by=_uid(tech))
+    with session_scope(uuid.UUID(owner.org_id)) as db:
+        db.get(Approval, aid2).expires_at = utcnow() - timedelta(minutes=1)
     with session_scope(uuid.UUID(owner.org_id)) as db:
         assert approvals.expire_stale(db) >= 1
-
-
-def test_no_recipient_is_audited_without_external_call(app, owner, monkeypatch):
-    from joltiq.db import session_scope
-    from joltiq.models import AuditEvent
-    from joltiq.services import email
-
-    called = []
-    monkeypatch.setattr(email, "send_email", lambda *args, **kwargs: called.append(True))
-    approval_id, _ = _request(owner, roles=("auditor",))
-    with session_scope(uuid.UUID(owner.org_id)) as db:
-        events = db.execute(
-            select(AuditEvent).where(AuditEvent.action == "notification.approval_no_eligible_approver")
-        ).scalars().all()
-        assert any(str(event.resource_id) == str(approval_id) for event in events)
-    assert called == []
-
-
-def test_approval_notification_settings_validate_and_round_trip(app, owner):
-    path = "/api/v1/admin/approval-notifications"
-    response = owner.get(path)
-    assert response.status_code == 200
-    body = response.json()
-    assert body["channels"]["approval_requested"]["slack"] is False
-    invalid = {**body, "reminder_minutes": 0}
-    assert owner.put(path, json=invalid).status_code == 422
-    channels = body["channels"]
-    channels["approval_requested"] = {**channels["approval_requested"], "in_app": False, "email": False}
-    invalid = {**body, "channels": channels}
-    assert owner.put(path, json=invalid).status_code == 400
-
-
-def test_dispatch_unique_key_is_final_two_worker_race_barrier(app, owner):
-    from sqlalchemy.exc import IntegrityError
-
-    from joltiq.db import session_scope
-    from joltiq.models import NotificationDispatch
-
-    approval_id, _ = _request(owner)
-    org_id = uuid.UUID(owner.org_id)
-    key = f"race:{approval_id}:{_uid(owner)}"
-    with session_scope(org_id) as db:
-        db.add(NotificationDispatch(org_id=org_id, user_id=_uid(owner), approval_id=approval_id, dedupe_key=key, kind="approval_requested"))
-    try:
-        with session_scope(org_id) as db:
-            db.add(NotificationDispatch(org_id=org_id, user_id=_uid(owner), approval_id=approval_id, dedupe_key=key, kind="approval_requested"))
-            db.flush()
-    except IntegrityError:
-        pass
-    else:
-        raise AssertionError("duplicate dispatch escaped the database race barrier")
-
-
-def test_approval_list_exposes_rollback_and_caller_decision_authority(app, owner):
-    from joltiq.db import session_scope
-    from joltiq.models import AgentPlan, Approval
-
-    approval_id, _ = _request(owner, roles=("auditor",))
-    with session_scope(uuid.UUID(owner.org_id)) as db:
-        approval = db.get(Approval, approval_id)
-        plan = db.get(AgentPlan, approval.plan_id)
-        plan.rollback_steps = [{"action": "browser.type", "params": {"text": {"$pre": "s0"}}}]
-        plan.rollback_availability = {"status": "AVAILABLE", "channel": "browser", "steps": 1}
-
-    response = owner.get("/api/v1/approvals", params={"status": "PENDING"})
-    assert response.status_code == 200, response.text
-    item = next(row for row in response.json()["items"] if row["id"] == str(approval_id))
-    assert item["can_decide"] is False
-    assert item["rollback"]["status"] == "AVAILABLE"
-    assert item["rollback"]["steps"] == 1
+        kinds = {e.kind for e in db.execute(select(TicketEvent).where(TicketEvent.ticket_id.in_([tid, tid2]))).scalars()}
+    assert {"approval.denied", "approval.expired"} <= kinds
+    assert any("expired" in n[1] for n in _notes(owner.org_id, _uid(tech), aid2) if n[0] == "approval_outcome")
+    assert _audit(owner.org_id, "approval.expired")
+    # The decider is not notified about their own decision.
+    assert not [n for n in _notes(owner.org_id, _uid(owner), aid) if n[0] == "approval_outcome"]

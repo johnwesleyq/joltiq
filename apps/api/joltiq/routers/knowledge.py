@@ -70,6 +70,26 @@ async def bulk_import(file: UploadFile = File(...), kind: str = Form("tickets"),
     return r.as_dict()
 
 
+@router.get("/packs")
+def list_packs(ctx: Ctx = Depends(perm("knowledge.write"))):
+    from ..services.knowledge import packs
+
+    return {"items": [packs.describe(p) for p in packs.PACKS]}
+
+
+@router.post("/packs/{pack}", status_code=201)
+def load_pack(pack: str, ctx: Ctx = Depends(perm("knowledge.write"))):
+    """v14: load a built-in DEMO/DEFAULT knowledge pack (idempotent)."""
+    from ..services.knowledge import packs
+
+    if pack not in packs.PACKS:
+        raise NotFound("Unknown knowledge pack")
+    r = packs.load(ctx.db, ctx.org_id, pack, user_id=ctx.p.user_id)
+    audit.record(ctx.db, org_id=ctx.org_id, actor_kind="user", actor_id=ctx.p.user_id, action="knowledge.pack_loaded",
+                 resource_type="organization", resource_id=ctx.org_id, data={"pack": pack, "added": len(r["added"])})
+    return r
+
+
 class UrlIn(BaseModel):
     url: HttpUrl
     title: str | None = Field(default=None, max_length=300)
@@ -143,6 +163,7 @@ def search(body: SearchIn, ctx: Ctx = Depends(perm("knowledge.read"))):
 def ser_art(a: KnowledgeArticle) -> dict:
     return {"id": str(a.id), "title": a.title, "status": a.status, "version": a.version, "body": a.body, "citations": a.citations,
             "source_ticket_id": str(a.source_ticket_id) if a.source_ticket_id else None, "verified_resolution": a.verified_resolution,
+            "source_run_id": str(a.source_run_id) if a.source_run_id else None,
             "executable": a.executable, "drafted_by_ai": a.drafted_by_ai, "procedure_hash": a.procedure_hash,
             "created_at": a.created_at.isoformat(),
             "updated_at": a.updated_at.isoformat(), "previous_version_id": str(a.previous_version_id) if a.previous_version_id else None}

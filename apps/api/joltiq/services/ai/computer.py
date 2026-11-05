@@ -11,6 +11,7 @@ The local fixture is a scripted, clearly labelled stand-in for tests/demos (live
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -18,6 +19,7 @@ from typing import Any
 
 import httpx
 
+from ..actions import windows_catalog as _wc
 from .providers import ProviderError
 
 TOOLSET = "computer_toolset_20260801"
@@ -26,14 +28,33 @@ LEGACY_BETA = "computer-use-2025-11-24"
 
 # Control tools JoltIQ adds next to the computer tools. They never touch the device directly.
 CONTROL_TOOLS: list[dict[str, Any]] = [
-    {"name": "open_url", "description": "Open an http(s) URL in the user's default web browser, where they are already signed in. "
+    {"name": "open_url", "description": "Open a public HTTPS URL in the user's default web browser, where they are already signed in. "
                                         "Prefer this over typing into the address bar.",
      "input_schema": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}},
     {"name": "ask_customer", "description": "Ask the person at the computer a question and wait for their answer (e.g. which account, which printer).",
      "input_schema": {"type": "object", "properties": {"question": {"type": "string"}}, "required": ["question"]}},
-    {"name": "request_approval", "description": "REQUIRED before any change that is hard to undo: saving/submitting settings, deleting, "
-                                                "uninstalling or installing software, changing DNS/billing/security settings, sending messages, "
-                                                "purchasing. Describe exactly what you are about to do. Wait for the answer.",
+    {"name": "run_diagnostic", "description": "Run a read-only diagnostic on the PC through the JoltIQ companion and get the "
+                                              "structured result (no clicking needed): network = adapters, Wi-Fi/DNS servers, gateway "
+                                              "reachability and DNS resolution; disk = free space; system = OS/uptime. Use this first for "
+                                              "Wi-Fi/internet/network problems, then fix in the GUI if needed, then run it again to verify.",
+     "input_schema": {"type": "object", "properties": {"check": {"type": "string", "enum": ["network", "disk", "system"]},
+                                                       "host": {"type": "string"}}, "required": ["check"]}},
+    {"name": "windows_action", "description": "Run ONE typed action from the JoltIQ Windows technician catalog. Read-only checks "
+                                             "(network.ping/traceroute/wifi_report/proxy_check, service.list, printer.list, app.list, disk.usage/"
+                                             "health, update.status, account.*, eventlog.recent_errors, system.info, process.list) may be run any "
+                                             "time to diagnose. Any CHANGE must be listed under APPROVED WINDOWS ACTIONS; anything else is refused "
+                                             "and the planned parameters are used. name = program (app.uninstall), service (service.status) or "
+                                             "filter (app.list); host = host name/IP for ping/traceroute; url = the https installer URL on the "
+                                             "vendor's official site for driver.install/app.install; leave unused fields empty. Restart/shutdown/"
+                                             "sleep must be the LAST action.",
+     "input_schema": {"type": "object", "properties": {
+         "action": {"type": "string", "enum": _wc.TOOL_ACTIONS},
+         "name": {"type": "string"}, "url": {"type": "string"}, "host": {"type": "string"}}, "required": ["action", "name", "url", "host"]}},
+    {"name": "request_approval", "description": "The customer already approved the GOAL once; that covers the ordinary in-scope steps "
+                                                "needed for it (opening pages, changing the settings the goal names, clicking Save). Use this "
+                                                "ONLY for something outside the goal or high-risk: purchases/payments/billing, deleting data or "
+                                                "accounts, sending messages to other people, password/MFA/security changes. Describe exactly "
+                                                "what you are about to do and wait.",
      "input_schema": {"type": "object", "properties": {"action_description": {"type": "string"}}, "required": ["action_description"]}},
     {"name": "request_secure_input", "description": "Hand the keyboard to the person so THEY type a password, MFA code, card number or other "
                                                     "secret. You must never type secrets yourself. Say exactly what they should enter and where.",
@@ -52,14 +73,21 @@ OLLAMA_ACTIONS = sorted(COMPUTER_NAMES | CONTROL_NAMES)
 
 
 def _strict_function(name: str, description: str, properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
+    required_names = set(required)
+    strict_properties = {
+        key: schema if key in required_names else {"anyOf": [schema, {"type": "null"}]}
+        for key, schema in properties.items()
+    }
     return {
         "type": "function",
         "name": name,
         "description": description,
         "parameters": {
             "type": "object",
-            "properties": properties,
-            "required": required,
+            "properties": strict_properties,
+            # OpenAI strict functions require every declared property here. Fields that are optional to
+            # JoltIQ remain optional semantically by accepting null in their schema.
+            "required": list(properties),
             "additionalProperties": False,
         },
         "strict": True,
@@ -100,6 +128,30 @@ OPENAI_COMPUTER_TOOLS: list[dict[str, Any]] = [
         for t in CONTROL_TOOLS
     ],
 ]
+
+
+# Browser Fix toolset: the isolated browser is driven by numbered elements from each observation (stable
+# selectors kept server-side), which is far more reliable than raw pixels for web forms.
+_EL = {"type": "integer", "minimum": 0, "maximum": 200}
+BROWSER_OPENAI_TOOLS: list[dict[str, Any]] = [
+    _strict_function("click_element", "Click the numbered element from the latest observation (links, buttons, Save).",
+                     {"element": _EL}, ["element"]),
+    _strict_function("fill", "Replace the text in a numbered input/textarea. Never for passwords or codes.",
+                     {"element": _EL, "text": {"type": "string"}}, ["element", "text"]),
+    _strict_function("select_option", "Choose an option (by its value or visible text) in a numbered dropdown.",
+                     {"element": _EL, "option": {"type": "string"}}, ["element", "option"]),
+    _strict_function("set_checkbox", "Tick or untick a numbered checkbox/toggle.",
+                     {"element": _EL, "checked": {"type": "boolean"}}, ["element", "checked"]),
+    _strict_function("press_key", "Press a key in the page (Enter, Tab, Escape, ArrowDown...).", {"key": {"type": "string"}}, ["key"]),
+    _strict_function("scroll", "Scroll the page.", {"direction": {"type": "string", "enum": ["up", "down"]}}, ["direction"]),
+    _strict_function("open_url", "Open a URL inside the isolated browser (only the approved sites load).",
+                     {"url": {"type": "string"}}, ["url"]),
+    *[
+        _strict_function(t["name"], t["description"], t["input_schema"]["properties"], t["input_schema"]["required"])
+        for t in CONTROL_TOOLS if t["name"] not in ("open_url", "run_diagnostic", "windows_action")
+    ],
+]
+BROWSER_NAMES = {"click_element", "fill", "select_option", "set_checkbox", "press_key", "scroll", "open_url"}
 
 
 @dataclass
@@ -179,7 +231,10 @@ class OpenAIComputer:
     def __init__(self, key: str, base_url: str = "https://api.openai.com/v1", timeout: int = 120):
         self.key, self.base_url, self.timeout = key, base_url.rstrip("/"), timeout
 
-    def turn(self, *, model: str, system: str, messages: list[dict], display: dict[str, int], max_tokens: int = 2048) -> Turn:
+    def turn(self, *, model: str, system: str, messages: list[dict], display: dict[str, int], max_tokens: int = 2048,
+             toolset: str = "desktop") -> Turn:
+        tools = BROWSER_OPENAI_TOOLS if toolset == "browser" else OPENAI_COMPUTER_TOOLS
+        allowed = BROWSER_NAMES | CONTROL_NAMES if toolset == "browser" else COMPUTER_NAMES | CONTROL_NAMES
         body = {
             "model": model,
             "instructions": (
@@ -187,7 +242,7 @@ class OpenAIComputer:
                 "Choose exactly one next action. Use screenshot coordinates. Never claim success without visible verification."
             ),
             "input": _openai_context(messages),
-            "tools": OPENAI_COMPUTER_TOOLS,
+            "tools": tools,
             "tool_choice": "required",
             "parallel_tool_calls": False,
             "max_output_tokens": max_tokens,
@@ -218,7 +273,7 @@ class OpenAIComputer:
             raise ProviderError("openai must return exactly one action", retryable=False)
         call = calls[0]
         name = str(call.get("name") or "")
-        if name not in COMPUTER_NAMES | CONTROL_NAMES:
+        if name not in allowed:
             raise ProviderError(f"openai returned unsupported action: {name}", retryable=False)
         try:
             arguments = call.get("arguments") or "{}"
@@ -233,16 +288,16 @@ class OpenAIComputer:
             for part in item.get("content") or [] if part.get("type") == "output_text"
         ).strip()
         tool_id = str(call.get("call_id") or call.get("id") or f"call_openai_{uuid.uuid4().hex}")
-        computer = name in COMPUTER_NAMES
+        computer = name in (BROWSER_NAMES if toolset == "browser" else COMPUTER_NAMES)
         block = {"type": "tool_use", "id": tool_id, "name": name, "input": params}
         if computer:
             block["toolset_name"] = "computer"
         usage = raw.get("usage") or {}
-        content: list[dict[str, Any]] = ([{"type": "text", "text": narration}, block] if narration else [block])
+        assistant_content: list[dict[str, Any]] = ([{"type": "text", "text": narration}, block] if narration else [block])
         return Turn(
             narration,
             [ToolUse(tool_id, name, params, computer)],
-            content,
+            assistant_content,
             int(usage.get("input_tokens") or 0),
             int(usage.get("output_tokens") or 0),
             str(raw.get("model") or model),
@@ -328,10 +383,34 @@ class FixtureComputer:
         last = messages[-1]["content"] if messages else []
         denied = any(b.get("type") == "tool_result" and "denied" in str(b.get("content", "")).lower() for b in (last if isinstance(last, list) else []))
         cx, cy = display["width"] // 2, display["height"] // 2
+        first = messages[0].get("content") if messages else ""
+        opening_text = first if isinstance(first, str) else "\n".join(
+            str(block.get("text") or "") for block in (first or []) if isinstance(block, dict) and block.get("type") == "text"
+        )
+        goal_match = re.search(r"(?:^|\n)GOAL:\s*(.*?)(?:\n\n|$)", opening_text, re.S)
+        goal_text = goal_match.group(1) if goal_match else opening_text
+        if "APPROVED WINDOWS ACTIONS" in opening_text:
+            return _fixture_windows_turn(n, first, last)
+        if re.search(r"wi-?fi|internet|network|dns", goal_text, re.I):
+            return _fixture_network_turn(self, n, last)
+        failed = any(
+            block.get("type") == "tool_result" and block.get("is_error") is True
+            for block in (last if isinstance(last, list) else [])
+        )
+        if failed:
+            tid = f"toolu_fixture_{n}"
+            inp = {"success": False, "summary": "A computer action was blocked or failed; no changes were verified (fixture script)."}
+            blk = {"type": "tool_use", "id": tid, "name": "finish", "input": inp}
+            return Turn("The computer action did not succeed, so I am stopping.", [ToolUse(tid, "finish", inp, False)],
+                        [{"type": "text", "text": "The computer action did not succeed, so I am stopping."}, blk],
+                        0, 0, "local-computer-script-v1", self.name, False, 1)
+        # Approval-once: saving is covered by the goal approval; a goal that also deletes something is high-risk and
+        # makes the script ask, which exercises the pause/approve/deny paths.
+        ask = "Delete the old draft, then save the file with ctrl+s" if re.search(r"delet", goal_text, re.I) else "Save the file with ctrl+s"
         script: list[tuple[str, str, dict, bool]] = [
             ("I can see the screen. Clicking into the window first.", "left_click", {"coordinate": [cx, cy]}, True),
             ("Typing the note.", "type", {"text": "JoltIQ test note"}, True),
-            ("Saving is a change, so I'll ask first.", "request_approval", {"action_description": "Save the file with ctrl+s"}, False),
+            ("Checking whether this needs another OK.", "request_approval", {"action_description": ask}, False),
             ("Saving.", "key", {"text": "ctrl+s"}, True),
             ("Done.", "finish", {"success": True, "summary": "Typed the note and saved it (fixture script)."}, False),
         ]
@@ -342,6 +421,116 @@ class FixtureComputer:
         blk = {"type": "tool_use", "id": tid, "name": name, "input": inp, **({"toolset_name": "computer"} if comp else {})}
         return Turn(say, [ToolUse(tid, name, inp, comp)], [{"type": "text", "text": say}, blk], 0, 0, "local-computer-script-v1",
                     self.name, False, 1)
+
+
+def _fixture_windows_turn(n: int, first: Any, last) -> Turn:
+    """v13 scripted Windows Fix: run each approved Windows action in order (power last), then finish on the results."""
+    tid = f"toolu_fixture_{n}"
+    text = first if isinstance(first, str) else " ".join(str(b.get("text", "")) for b in (first or []) if isinstance(b, dict))
+    items = []
+    for m in re.finditer(r"^- ([a-z_.]+) (\{.*?\}):", text, re.M):
+        try:
+            items.append((m.group(1), json.loads(m.group(2))))
+        except ValueError:
+            continue
+    results = " ".join(str(c.get("text", "")) for b in (last if isinstance(last, list) else []) if b.get("type") == "tool_result"
+                       for c in (b.get("content") if isinstance(b.get("content"), list) else []) if isinstance(c, dict))
+    if n > 0 and ('"ok": false' in results or "Error:" in results or "refused" in results.lower()):
+        say, name, inp = "That step did not succeed; stopping.", "finish", {"success": False, "summary": f"A Windows step failed: {results[:300]} (fixture script)."}
+    elif n < len(items):
+        action, p = items[n]
+        if action in ("driver.install", "app.install") and not p.get("url"):
+            say, name, inp = ("I need the installer link from the vendor's official site.", "finish",
+                              {"success": False, "summary": "The fixture script cannot search the vendor site; a live model (or a pasted "
+                                                            "support.hp.com / ftp.hp.com URL in the request) is needed (fixture script)."})
+        else:
+            say, name = f"Running the approved step: {action}.", "windows_action"
+            inp = {"action": action, "name": str(p.get("name", "")), "url": str(p.get("url", "")), "host": str(p.get("host", ""))}
+    else:
+        say, name, inp = "All approved Windows steps finished.", "finish", {"success": True, "summary": "Ran the approved Windows steps; each one reported success (fixture script)."}
+    blk = {"type": "tool_use", "id": tid, "name": name, "input": inp}
+    return Turn(say, [ToolUse(tid, name, inp, False)], [{"type": "text", "text": say}, blk], 0, 0, "local-computer-script-v1",
+                "local_fixture", False, 1)
+
+
+def _fixture_network_turn(self, n: int, last) -> Turn:
+    """Hybrid Wi-Fi/network script: structured diagnostics through the companion, then finish on what they show."""
+    tid = f"toolu_fixture_{n}"
+    if n == 0:
+        say, name = "Running the network diagnostics on your PC first.", "run_diagnostic"
+        inp: dict[str, Any] = {"check": "network", "host": "example.com"}
+    else:
+        text = " ".join(str(c.get("text", "")) for b in (last if isinstance(last, list) else []) if b.get("type") == "tool_result"
+                        for c in (b.get("content") if isinstance(b.get("content"), list) else []) if isinstance(c, dict))
+        healthy = '"gateway_reachable": true' in text and '"dns_ok": true' in text
+        say, name = ("Diagnostics look healthy.", "finish")
+        inp = ({"success": True, "summary": "Network diagnostics: the gateway is reachable and DNS resolves (fixture script)."} if healthy
+               else {"success": False, "summary": "Network diagnostics found a problem (gateway or DNS); a technician should look (fixture script)."})
+    blk = {"type": "tool_use", "id": tid, "name": name, "input": inp}
+    return Turn(say, [ToolUse(tid, name, inp, False)], [{"type": "text", "text": say}, blk], 0, 0, "local-computer-script-v1",
+                "local_fixture", False, 1)
+
+
+_EL_LINE = re.compile(r'^\[(\d+)\] (\w+)(?:\((\w*)\))? "([^"]*)"(.*)$')
+
+
+class BrowserFixtureComputer:
+    """Scripted stand-in for a Browser Fix (LOCAL FIXTURE, live=False). Reads the numbered element list of the latest
+    observation and fills a settings form toward the goal: the notification email from the goal, "on"/"enable" for a
+    named dropdown or checkbox, then Save and finish. Exercises the browser engine end to end without a model."""
+
+    name = "local_fixture"
+    live = False
+
+    def turn(self, *, model: str, system: str, messages: list[dict], display: dict[str, int], max_tokens: int = 2048,
+             toolset: str = "browser") -> Turn:
+        texts: list[str] = []
+
+        def walk(blocks):
+            for b in blocks if isinstance(blocks, list) else []:
+                if b.get("type") == "text":
+                    texts.append(str(b.get("text") or ""))
+                elif b.get("type") == "tool_result":
+                    walk(b.get("content"))
+        for m in messages:
+            if m.get("role") != "assistant":
+                walk(m.get("content"))
+        goal = next((t for t in texts if t.startswith("GOAL:")), "GOAL:")
+        latest = next((t for t in reversed(texts) if t.startswith("PAGE")), "")
+        done_names = [b.get("name") for m in messages if m.get("role") == "assistant"
+                      for b in (m.get("content") or []) if isinstance(b, dict) and b.get("type") == "tool_use"]
+        n = len(done_names)
+        els: list[dict[str, Any]] = []
+        for line in latest.splitlines():
+            mm = _EL_LINE.match(line.strip())
+            if mm:
+                els.append({"id": int(mm.group(1)), "tag": mm.group(2), "type": mm.group(3) or "", "label": mm.group(4), "rest": mm.group(5)})
+        email = re.search(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", goal)
+        want_on = bool(re.search(r"\b(turn on|enable|switch on|on)\b", goal, re.I))
+
+        def val(e):
+            v = re.search(r'value="([^"]*)"', e["rest"])
+            return v.group(1) if v else ""
+        say, name, inp = "I can't see a form I recognise; handing this to a technician.", "finish", {
+            "success": False, "summary": "The fixture script did not find the expected settings form."}
+        saved_text = "saved" in latest.lower() and "settings saved" in latest.lower()
+        if "settings saved" in latest.lower() or (done_names and done_names[-1] == "click_element" and saved_text):
+            say, name, inp = "The page confirms the settings were saved.", "finish", {
+                "success": True, "summary": "Updated the notification settings and saved them (fixture script)."}
+        else:
+            email_el = next((e for e in els if e["tag"] in ("input", "textarea") and "email" in e["label"].lower()), None)
+            sel_el = next((e for e in els if e["tag"] == "select" and "notification" in e["label"].lower()), None)
+            save_el = next((e for e in els if e["tag"] == "button" and re.search(r"save|apply|update", e["label"], re.I)), None)
+            if email and email_el and val(email_el) != email.group(0):
+                say, name, inp = f"Setting the notification email to {email.group(0)}.", "fill", {"element": email_el["id"], "text": email.group(0)}
+            elif want_on and sel_el and val(sel_el) != "on":
+                say, name, inp = "Turning job notifications on.", "select_option", {"element": sel_el["id"], "option": "on"}
+            elif save_el and (email_el or sel_el):
+                say, name, inp = "Saving the settings.", "click_element", {"element": save_el["id"]}
+        tid = f"call_bfixture_{n}"
+        blk = {"type": "tool_use", "id": tid, "name": name, "input": inp, **({"toolset_name": "computer"} if name in BROWSER_NAMES else {})}
+        return Turn(say, [ToolUse(tid, name, inp, name in BROWSER_NAMES)], [{"type": "text", "text": say}, blk], 0, 0,
+                    "local-browser-script-v1", self.name, False, 1)
 
 
 def _ollama_message(message: dict) -> dict:
@@ -365,7 +554,8 @@ def _ollama_message(message: dict) -> dict:
             nested = _ollama_message({"role": "user", "content": block.get("content") or []})
             text.append(f"Result of {block.get('tool_use_id')}: {nested.get('content', '')}")
             images.extend(nested.get("images") or [])
-    out: dict[str, Any] = {"role": "assistant" if message.get("role") == "assistant" else "user", "content": "\n".join(x for x in text if x)}
+    out: dict[str, Any] = {"role": "assistant" if message.get("role") == "assistant" else "user",
+                           "content": "\n".join(x for x in text if x)}
     if images:
         out["images"] = images
     return out
@@ -441,7 +631,14 @@ class OllamaComputer:
         )
 
 
-def build(provider: str, key: str | None, timeout: int = 120):
+def build(provider: str, key: str | None, timeout: int = 120, toolset: str = "desktop"):
+    if toolset == "browser":
+        # Browser Fix runs need the element toolset: OpenAI (live) or the local fixture script.
+        if provider == "local_fixture":
+            return BrowserFixtureComputer()
+        if provider == "openai" and key:
+            return OpenAIComputer(key, timeout=timeout)
+        return None
     if provider == "local_fixture":
         return FixtureComputer()
     if provider == "anthropic" and key:

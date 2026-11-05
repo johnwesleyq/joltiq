@@ -27,6 +27,8 @@ from .services import (  # noqa: F401 - register handlers
     knowledge,
     notifications,
     retention,
+    slack,
+    teams,
 )
 from .services.jobs import Worker, enqueue, handler
 
@@ -35,8 +37,8 @@ log = logging.getLogger("joltiq.worker")
 
 @handler("approvals.expire")
 def _expire(db, payload):
-    approvals.expire_stale(db)
     approval_notify.send_reminders(db)
+    approvals.expire_stale(db)
 
 
 def schedule_tick() -> None:

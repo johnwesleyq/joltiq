@@ -3,8 +3,11 @@ answers commands with generated screenshots; no real screen or input) and the sc
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import socket
 import struct
+import time
 import uuid
 import zlib
 from types import SimpleNamespace
@@ -25,6 +28,53 @@ def png(w=64, h=40) -> bytes:
     def chunk(t, d):
         return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
     return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+
+
+FRAME_SHA256 = hashlib.sha256(png()).hexdigest()
+
+
+def public_dns(host: str, port: int, **_kwargs):
+    return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", port))]
+
+
+def mixed_public_private_dns(host: str, port: int, **_kwargs):
+    return [
+        (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", port)),
+        (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("10.0.0.8", port)),
+    ]
+
+
+def test_prepare_native_url_canonicalizes_public_https_and_derives_one_origin():
+    from joltiq.services.computer_use import prepare_native_url
+
+    assert prepare_native_url(
+        "HTTPS://Example.COM.:443/help?q=1#top",
+        resolver=public_dns,
+    ) == {
+        "url": "https://example.com/help?q=1#top",
+        "allowed_origins": ["https://example.com"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("url", "resolver"),
+    [
+        ("http://example.com/help", public_dns),
+        ("https://user:pass@example.com/help", public_dns),
+        ("https://example.com:8443/help", public_dns),
+        ("https://localhost/help", public_dns),
+        ("https://metadata.google.internal/latest", public_dns),
+        ("https://169.254.169.254/latest", public_dns),
+        ("https://example.com/help", mixed_public_private_dns),
+    ],
+)
+def test_prepare_native_url_refuses_unsafe_targets(url, resolver):
+    from joltiq.core.errors import AppError
+    from joltiq.services.computer_use import prepare_native_url
+
+    with pytest.raises(AppError) as exc:
+        prepare_native_url(url, resolver=resolver)
+    assert exc.value.code == "unsafe_url"
 
 
 def drain():
@@ -57,12 +107,23 @@ class CUDevice(FakeDevice):
         for b in self.envelopes():
             if b["type"] == "session.begin":
                 assert self.post(f"/sessions/{b['session_id']}/local-consent", {"accepted": True, "user_display_name": "Pat"}).status_code == 200
+            elif b["type"] == "computer_use.approval" and b.get("authorization_id"):
+                # This is an explicit fake native UI decision for automated tests only. Production companions
+                # always show the signed exact-action prompt to the person at the PC.
+                approved = self.post(f"/computer-use/{b['computer_use_run_id']}/respond", {
+                    "approved": True,
+                    "authorization_id": b["authorization_id"],
+                    "action_hash": b["action_hash"],
+                })
+                assert approved.status_code == 200, approved.text
             elif b["type"] == "action":
                 log.append((b["action"], b["params"]))
                 assert self.post(f"/commands/{b['command_id']}/screenshot", raw=png(), ctype="image/png").status_code == 200
                 r = self.post(f"/commands/{b['command_id']}/result", {"status": "done", "result": {
                     "ok": True, "width": 1280, "height": 800,
                     "frame_generation": 17, "layout_hash": "a" * 64,
+                    "frame_sha256": FRAME_SHA256, "captured_at": int(time.time()),
+                    "focused_target_hash": "c" * 64,
                 }})
                 assert r.status_code == 200, r.text
                 n += 1
@@ -87,6 +148,12 @@ def _pump(d, owner, rid, log, until=("waiting_customer", "completed", "failed", 
         d.answer_all(log)
         drain()
         run = owner.get(f"/api/v1/computer-use/{rid}").json()
+        # Exact-action authorization is a native companion prompt.  The fake
+        # device answers it on the next polling round, so it is not a terminal
+        # customer pause for this automated pump.  Legacy model-requested
+        # questions/approvals still return to their tests as before.
+        if run["state"] == "waiting_customer" and (run.get("waiting_for") or {}).get("kind") == "action_authorization":
+            continue
         if run["state"] in until:
             return run
     return run
@@ -130,6 +197,7 @@ def _adobe_verification_run(app, owner, monkeypatch):
     assert d.post(f"/commands/{capture['command_id']}/screenshot", raw=png(), ctype="image/png").status_code == 200
     assert d.post(f"/commands/{capture['command_id']}/result", {"status": "done", "result": {
         "ok": True, "width": 1280, "height": 800, "frame_generation": 17, "layout_hash": "a" * 64,
+        "frame_sha256": FRAME_SHA256, "captured_at": int(time.time()), "focused_target_hash": "c" * 64,
     }}).status_code == 200
     drain()
     return d, ticket, run
@@ -161,6 +229,291 @@ def test_frame_binding_is_required_and_copied_from_latest_device_screenshot(app,
     mutating_inputs = [params for action, params in log if action.startswith("input.") and action not in ("input.wait", "input.cursor")]
     assert mutating_inputs
     assert all(p["frame_generation"] == 17 and p["layout_hash"] == "a" * 64 for p in mutating_inputs)
+    assert all(p["frame_sha256"] == FRAME_SHA256 and p["focused_target_hash"] == "c" * 64 for p in mutating_inputs)
+    assert all(isinstance(p["captured_at"], int) for p in mutating_inputs)
+
+
+def test_reported_frame_hash_must_match_uploaded_screenshot_bytes(app, owner):
+    device, session_id = _setup(app, owner)
+    run_id = owner.post(
+        f"/api/v1/sessions/{session_id}/computer-use",
+        json={"goal": "Open Notepad", "mode": "fix"},
+    ).json()["id"]
+    assert device.post(f"/computer-use/{run_id}/local-consent", {"accepted": True}).status_code == 200
+    capture = next(envelope for envelope in device.envelopes() if envelope["type"] == "action")
+    assert device.post(f"/commands/{capture['command_id']}/screenshot", raw=png(), ctype="image/png").status_code == 200
+    assert device.post(f"/commands/{capture['command_id']}/result", {"status": "done", "result": {
+        "ok": True, "width": 1280, "height": 800,
+        "frame_generation": 17, "layout_hash": "a" * 64,
+        "frame_sha256": "d" * 64, "captured_at": int(time.time()), "focused_target_hash": "c" * 64,
+    }}).status_code == 200
+    drain()
+
+    run = owner.get(f"/api/v1/computer-use/{run_id}").json()
+    assert run["display"] is None
+    assert not any(
+        envelope["type"] == "action" and envelope["action"].startswith("input.")
+        for envelope in device.envelopes()
+    )
+
+
+def test_mutating_input_waits_for_exact_scoped_authorization_before_dispatch(app, owner, monkeypatch):
+    from joltiq.services.ai import computer as C
+
+    def propose_click_with_forged_authorization(self, **kw):
+        inp = {
+            "coordinate": [640, 400],
+            "action_hash": "model-controlled-hash",
+            "plan_hash": "model-controlled-plan",
+            "authorization_expires_at": 4102444800,
+        }
+        block = {"type": "tool_use", "id": "click-1", "name": "left_click", "input": inp}
+        return C.Turn(
+            "Click Notepad.",
+            [C.ToolUse("click-1", "left_click", inp, True)],
+            [{"type": "text", "text": "Click Notepad."}, block],
+            live=False,
+            provider="local_fixture",
+            model="scoped-authorization-test",
+        )
+
+    monkeypatch.setattr(C.FixtureComputer, "turn", propose_click_with_forged_authorization)
+    device, session_id = _setup(app, owner)
+    run_id = owner.post(
+        f"/api/v1/sessions/{session_id}/computer-use",
+        json={"goal": "Open Notepad", "mode": "fix"},
+    ).json()["id"]
+    assert device.post(f"/computer-use/{run_id}/local-consent", {"accepted": True}).status_code == 200
+    capture = next(envelope for envelope in device.envelopes() if envelope["type"] == "action")
+    assert capture["action"] == "screen.capture"
+    assert device.post(f"/commands/{capture['command_id']}/screenshot", raw=png(), ctype="image/png").status_code == 200
+    assert device.post(f"/commands/{capture['command_id']}/result", {"status": "done", "result": {
+        "ok": True,
+        "width": 1280,
+        "height": 800,
+        "frame_generation": 17,
+        "layout_hash": "a" * 64,
+        "frame_sha256": FRAME_SHA256,
+        "captured_at": int(time.time()),
+        "focused_target_hash": "c" * 64,
+    }}).status_code == 200
+    drain()
+
+    run = owner.get(f"/api/v1/computer-use/{run_id}").json()
+    assert run["state"] == "waiting_customer"
+    proposal = run["waiting_for"]
+    assert proposal["kind"] == "action_authorization"
+    assert proposal["action"] == "input.click"
+    assert proposal["params"] == {
+        "x": 640,
+        "y": 400,
+        "button": "left",
+        "count": 1,
+        "frame_generation": 17,
+        "layout_hash": "a" * 64,
+        "frame_sha256": FRAME_SHA256,
+        "captured_at": proposal["captured_at"],
+        "focused_target_hash": "c" * 64,
+    }
+    assert len(proposal["authorization_id"]) == 36
+    assert len(proposal["action_hash"]) == 64 and proposal["action_hash"] != "model-controlled-hash"
+    assert len(proposal["plan_hash"]) == 64 and proposal["plan_hash"] != "model-controlled-plan"
+    assert proposal["authorization_expires_at"] < 4102444800
+    envelopes = device.envelopes()
+    approval = next(envelope for envelope in envelopes if envelope["type"] == "computer_use.approval")
+    for field in (
+        "authorization_id", "action", "params", "action_hash", "plan_hash", "expected_effect",
+        "frame_generation", "layout_hash", "frame_sha256", "captured_at", "focused_target_hash",
+        "authorization_expires_at",
+    ):
+        assert approval[field] == proposal[field]
+    assert approval["authorization_expires_at"] <= approval["expires_at"]
+    assert not any(
+        envelope["type"] == "action" and envelope["action"].startswith("input.")
+        for envelope in envelopes
+    )
+
+    approved = device.post(f"/computer-use/{run_id}/respond", {
+        "approved": True,
+        "authorization_id": proposal["authorization_id"],
+        "action_hash": proposal["action_hash"],
+    })
+    assert approved.status_code == 200, approved.text
+    action = next(envelope for envelope in device.envelopes() if envelope["type"] == "action")
+    assert action["action"] == proposal["action"]
+    assert action["params"] == proposal["params"]
+    assert action["authorization_id"] == proposal["authorization_id"]
+    assert action["action_hash"] == proposal["action_hash"]
+    assert action["plan_hash"] == proposal["plan_hash"]
+    assert action["authorization_expires_at"] == proposal["authorization_expires_at"]
+
+    repeated = device.post(f"/computer-use/{run_id}/respond", {
+        "approved": True,
+        "authorization_id": proposal["authorization_id"],
+        "action_hash": proposal["action_hash"],
+    })
+    assert repeated.status_code == 409
+
+
+def test_native_open_url_replaces_forged_origin_and_requires_fresh_exact_authorization(app, owner, monkeypatch):
+    from joltiq.services import computer_use as cu
+    from joltiq.services.ai import computer as C
+
+    proposed = {
+        "url": "HTTPS://Example.COM.:443/support?q=printer",
+        "allowed_origins": ["https://attacker.example", "http://127.0.0.1"],
+    }
+
+    def propose_url(self, **kw):
+        block = {"type": "tool_use", "id": "url-1", "name": "open_url", "input": proposed}
+        return C.Turn(
+            "Open the public support page.",
+            [C.ToolUse("url-1", "open_url", proposed, False)],
+            [{"type": "text", "text": "Open the public support page."}, block],
+            live=False,
+            provider="local_fixture",
+            model="native-url-policy-test",
+        )
+
+    original_prepare = cu.prepare_native_url
+    monkeypatch.setattr(C.FixtureComputer, "turn", propose_url)
+    monkeypatch.setattr(cu, "prepare_native_url", lambda url: original_prepare(url, resolver=public_dns))
+    device, session_id = _setup(app, owner)
+    run_id = owner.post(
+        f"/api/v1/sessions/{session_id}/computer-use",
+        json={"goal": "Open the printer vendor support page", "mode": "fix"},
+    ).json()["id"]
+    assert device.post(f"/computer-use/{run_id}/local-consent", {"accepted": True}).status_code == 200
+    capture = next(envelope for envelope in device.envelopes() if envelope["type"] == "action")
+    assert device.post(f"/commands/{capture['command_id']}/screenshot", raw=png(), ctype="image/png").status_code == 200
+    assert device.post(f"/commands/{capture['command_id']}/result", {"status": "done", "result": {
+        "ok": True, "width": 1280, "height": 800,
+        "frame_generation": 17, "layout_hash": "a" * 64,
+        "frame_sha256": FRAME_SHA256, "captured_at": int(time.time()),
+        "focused_target_hash": "c" * 64,
+    }}).status_code == 200
+    drain()
+
+    proposal = owner.get(f"/api/v1/computer-use/{run_id}").json()["waiting_for"]
+    assert proposal["kind"] == "action_authorization"
+    assert proposal["action"] == "url.open"
+    assert proposal["params"] == {
+        "url": "https://example.com/support?q=printer",
+        "allowed_origins": ["https://example.com"],
+    }
+    approval = next(e for e in device.envelopes() if e["type"] == "computer_use.approval")
+    assert approval["params"] == proposal["params"]
+    assert not any(e.get("type") == "action" and e.get("action") == "url.open" for e in device.envelopes())
+
+    approved = device.post(f"/computer-use/{run_id}/respond", {
+        "approved": True,
+        "authorization_id": proposal["authorization_id"],
+        "action_hash": proposal["action_hash"],
+    })
+    assert approved.status_code == 200, approved.text
+    action = next(e for e in device.envelopes() if e.get("action") == "url.open")
+    assert action["params"] == proposal["params"]
+    assert action["authorization_id"] == proposal["authorization_id"]
+
+    repeated = device.post(f"/computer-use/{run_id}/respond", {
+        "approved": True,
+        "authorization_id": proposal["authorization_id"],
+        "action_hash": proposal["action_hash"],
+    })
+    assert repeated.status_code == 409
+
+
+def test_denied_native_open_url_never_dispatches(app, owner, monkeypatch):
+    from joltiq.services import computer_use as cu
+    from joltiq.services.ai import computer as C
+
+    def propose_url(self, **kw):
+        inp = {"url": "https://example.com/support"}
+        return C.Turn(
+            "Open support.",
+            [C.ToolUse("url-denied", "open_url", inp, False)],
+            [{"type": "tool_use", "id": "url-denied", "name": "open_url", "input": inp}],
+            live=False,
+            provider="local_fixture",
+            model="native-url-denial-test",
+        )
+
+    original_prepare = cu.prepare_native_url
+    monkeypatch.setattr(C.FixtureComputer, "turn", propose_url)
+    monkeypatch.setattr(cu, "prepare_native_url", lambda url: original_prepare(url, resolver=public_dns))
+    device, session_id = _setup(app, owner)
+    run_id = owner.post(
+        f"/api/v1/sessions/{session_id}/computer-use",
+        json={"goal": "Open support", "mode": "fix"},
+    ).json()["id"]
+    assert device.post(f"/computer-use/{run_id}/local-consent", {"accepted": True}).status_code == 200
+    capture = next(envelope for envelope in device.envelopes() if envelope["type"] == "action")
+    assert device.post(f"/commands/{capture['command_id']}/screenshot", raw=png(), ctype="image/png").status_code == 200
+    assert device.post(f"/commands/{capture['command_id']}/result", {"status": "done", "result": {
+        "ok": True, "width": 1280, "height": 800,
+        "frame_generation": 17, "layout_hash": "a" * 64,
+        "frame_sha256": FRAME_SHA256, "captured_at": int(time.time()),
+        "focused_target_hash": "c" * 64,
+    }}).status_code == 200
+    drain()
+    proposal = owner.get(f"/api/v1/computer-use/{run_id}").json()["waiting_for"]
+
+    denied = device.post(f"/computer-use/{run_id}/respond", {
+        "approved": False,
+        "authorization_id": proposal["authorization_id"],
+        "action_hash": proposal["action_hash"],
+    })
+    assert denied.status_code == 200, denied.text
+    assert not any(e.get("type") == "action" and e.get("action") == "url.open" for e in device.envelopes())
+
+
+def test_denied_exact_action_never_dispatches_and_cannot_be_reused(app, owner, monkeypatch):
+    from joltiq.services.ai import computer as C
+
+    def propose_click(self, **kw):
+        inp = {"coordinate": [640, 400]}
+        block = {"type": "tool_use", "id": "click-denied", "name": "left_click", "input": inp}
+        return C.Turn(
+            "Click Notepad.",
+            [C.ToolUse("click-denied", "left_click", inp, True)],
+            [{"type": "text", "text": "Click Notepad."}, block],
+            live=False,
+            provider="local_fixture",
+            model="scoped-authorization-denial-test",
+        )
+
+    monkeypatch.setattr(C.FixtureComputer, "turn", propose_click)
+    device, session_id = _setup(app, owner)
+    run_id = owner.post(
+        f"/api/v1/sessions/{session_id}/computer-use",
+        json={"goal": "Open Notepad", "mode": "fix"},
+    ).json()["id"]
+    assert device.post(f"/computer-use/{run_id}/local-consent", {"accepted": True}).status_code == 200
+    capture = next(envelope for envelope in device.envelopes() if envelope["type"] == "action")
+    assert device.post(f"/commands/{capture['command_id']}/screenshot", raw=png(), ctype="image/png").status_code == 200
+    assert device.post(f"/commands/{capture['command_id']}/result", {"status": "done", "result": {
+        "ok": True, "width": 1280, "height": 800, "frame_generation": 17, "layout_hash": "a" * 64,
+        "frame_sha256": FRAME_SHA256, "captured_at": int(time.time()), "focused_target_hash": "c" * 64,
+    }}).status_code == 200
+    drain()
+    proposal = owner.get(f"/api/v1/computer-use/{run_id}").json()["waiting_for"]
+
+    denied = device.post(f"/computer-use/{run_id}/respond", {
+        "approved": False,
+        "authorization_id": proposal["authorization_id"],
+        "action_hash": proposal["action_hash"],
+    })
+    assert denied.status_code == 200, denied.text
+    assert not any(
+        envelope["type"] == "action" and envelope.get("authorization_id") == proposal["authorization_id"]
+        for envelope in device.envelopes()
+    )
+    repeated = device.post(f"/computer-use/{run_id}/respond", {
+        "approved": True,
+        "authorization_id": proposal["authorization_id"],
+        "action_hash": proposal["action_hash"],
+    })
+    assert repeated.status_code == 409
 
 
 def test_customer_selects_guide_or_fix_mode(app, owner):
@@ -225,6 +578,9 @@ def test_guide_begin_and_actions_are_bound_to_exact_signed_run(app, owner):
     clean = validate_params("guide.highlight", {
         "frame_generation": 17,
         "layout_hash": "a" * 64,
+        "frame_sha256": FRAME_SHA256,
+        "captured_at": int(time.time()),
+        "focused_target_hash": "c" * 64,
         "x": 320,
         "y": 240,
         "width": 180,
@@ -253,6 +609,8 @@ def test_guide_begin_and_actions_are_bound_to_exact_signed_run(app, owner):
     assert begin["session_id"] == sid
     assert begin["mode"] == "guide"
     assert begin["goal"] == "Show me how to open Windows Settings"
+    assert begin["ai_data_destination"] == "the local JoltIQ test engine"
+    assert begin["ai_model"] == "local-rules-v1"
     assert not [e for e in envelopes if e["type"] == "action"]
 
     accepted = d.post(f"/computer-use/{rid}/local-consent", {"accepted": True})
@@ -260,6 +618,45 @@ def test_guide_begin_and_actions_are_bound_to_exact_signed_run(app, owner):
     action = next(e for e in d.envelopes() if e["type"] == "action")
     assert action["computer_use_run_id"] == rid
     assert action["computer_use_mode"] == "guide"
+
+
+def test_retention_deletes_computer_use_screenshot_objects(app, owner):
+    from datetime import timedelta
+
+    from joltiq.db import session_scope
+    from joltiq.models import ComputerUseRun, ComputerUseStep, Organization, utcnow
+    from joltiq.services import retention, storage
+
+    d, sid = _setup(app, owner)
+    created = owner.post(
+        f"/api/v1/sessions/{sid}/computer-use",
+        json={"goal": "Show me how to open Windows Settings", "mode": "guide"},
+    )
+    rid = uuid.UUID(created.json()["id"])
+    assert d.post(f"/computer-use/{rid}/local-consent", {"accepted": True}).status_code == 200
+    assert d.answer_all([]) >= 1
+    drain()
+
+    org_id = uuid.UUID(owner.org_id)
+    with session_scope(org_id) as db:
+        run = db.get(ComputerUseRun, rid)
+        step = db.query(ComputerUseStep).filter(ComputerUseStep.run_id == rid, ComputerUseStep.screenshot_key.is_not(None)).first()
+        assert run is not None and step is not None and step.screenshot_key
+        key = step.screenshot_key
+        assert storage.get(org_id, key).startswith(b"\x89PNG")
+        step.created_at = utcnow() - timedelta(days=2)
+        org = db.get(Organization, org_id)
+        org.settings = {**(org.settings or {}), "retention_days": {"screenshots": 1}}
+
+    with session_scope(org_id) as db:
+        out = retention.apply_retention(db, org_id)
+        assert out["computer_use_screenshots"] >= 1
+        step = db.query(ComputerUseStep).filter(ComputerUseStep.run_id == rid).order_by(ComputerUseStep.idx).first()
+        assert step is not None and step.screenshot_key is None
+        run = db.get(ComputerUseRun, rid)
+        assert run is not None and run.last_screenshot_key is None
+    with pytest.raises(FileNotFoundError):
+        storage.get(org_id, key)
 
 
 def test_device_guide_response_requires_exactly_one_declared_choice(app, owner):
@@ -348,6 +745,7 @@ def test_stale_guide_highlight_is_recorded_as_blocked_and_never_becomes_input(ap
     assert d.post(f"/commands/{capture['command_id']}/screenshot", raw=png(), ctype="image/png").status_code == 200
     assert d.post(f"/commands/{capture['command_id']}/result", {"status": "done", "result": {
         "ok": True, "width": 1280, "height": 800, "frame_generation": 17, "layout_hash": "a" * 64,
+        "frame_sha256": FRAME_SHA256, "captured_at": int(time.time()), "focused_target_hash": "c" * 64,
     }}).status_code == 200
     drain()
 
@@ -366,25 +764,49 @@ def test_stale_guide_highlight_is_recorded_as_blocked_and_never_becomes_input(ap
     assert not any(e["type"] == "action" and e["action"].startswith("input.") for e in d.envelopes())
 
 
+def test_in_scope_save_is_covered_by_one_time_goal_approval(app, owner):
+    """Approval-once: the customer approved the goal; an in-scope save does not re-ask."""
+    d, sid = _setup(app, owner)
+    rid = owner.post(f"/api/v1/sessions/{sid}/computer-use", json={"goal": "Open notepad, type a note and save it"}).json()["id"]
+    log: list = []
+    run = _pump(d, owner, rid, log, until=("completed", "failed", "stopped"))
+    assert run["state"] == "completed" and run["success"] is True, run
+    assert [a for a, _ in log] == ["screen.capture", "input.click", "input.type", "input.key"]
+    appr = next(s for s in run["steps"] if s["kind"] == "request_approval")
+    assert appr["status"] == "done" and appr["params"]["covered_by_goal"] is True
+    from sqlalchemy import select
+
+    from joltiq.db import session_scope
+    from joltiq.models.platform import AuditEvent
+
+    with session_scope(uuid.UUID(owner.org_id)) as db:
+        acts = [a for (a,) in db.execute(select(AuditEvent.action).where(AuditEvent.resource_id == rid))]
+    assert "computer_use.approval_covered_by_goal" in acts
+
+
 def test_full_run_with_approval_pause_and_screens(app, owner):
     d, sid = _setup(app, owner)
-    r = owner.post(f"/api/v1/sessions/{sid}/computer-use", json={"goal": "Open notepad, type a note and save it"})
+    r = owner.post(f"/api/v1/sessions/{sid}/computer-use", json={"goal": "Open notepad, delete the old draft, type a note and save it"})
     assert r.status_code == 201, r.text
     rid = r.json()["id"]
     assert r.json()["state"] == "waiting_local_consent"
     log: list = []
     run = _pump(d, owner, rid, log)
     assert run["state"] == "waiting_customer" and run["waiting_for"]["kind"] == "approval"
-    assert "Save the file" in run["waiting_for"]["text"] and run["live_model"] is False
+    assert "Delete the old draft" in run["waiting_for"]["text"] and "needs your OK" in run["waiting_for"]["text"]
+    assert run["live_model"] is False
     assert [a for a, _ in log] == ["screen.capture", "input.click", "input.type"]
-    assert log[1][1] == {
+    assert {k: log[1][1][k] for k in ("x", "y", "button", "count", "frame_generation", "layout_hash", "frame_sha256", "focused_target_hash")} == {
         "x": 640,
         "y": 400,
         "button": "left",
         "count": 1,
         "frame_generation": 17,
         "layout_hash": "a" * 64,
+        "frame_sha256": FRAME_SHA256,
+        "focused_target_hash": "c" * 64,
     }
+    assert isinstance(log[1][1]["captured_at"], int)
     # The device sees the pause too, and can answer it.
     act = d.get("/computer-use/active").json()["runs"]
     assert act[0]["waiting_for"]["kind"] == "approval"
@@ -422,6 +844,10 @@ def test_adobe_finish_requires_inventory_and_resolves_verified_ticket(app, owner
     assert [s["kind"] for s in completed["steps"]][-3:] == ["finish", "verify.app_absent", "verify.app_present"]
     resolved = owner.get(f"/api/v1/tickets/{ticket['id']}").json()
     assert resolved["status"] == "RESOLVED" and resolved["resolution_verified"] is True
+    drafts = owner.get("/api/v1/knowledge/articles", params={"status": "draft"}).json()["items"]
+    draft = next(article for article in drafts if article["source_run_id"] == run["id"])
+    assert draft["verified_resolution"] is True and draft["executable"] is False
+    assert [item["status"] for item in draft["body"]["verification_evidence"]] == ["VERIFIED", "VERIFIED"]
 
 
 def test_adobe_inventory_contradiction_fails_closed_and_does_not_resolve(app, owner, monkeypatch):
@@ -456,7 +882,7 @@ def test_adobe_unreadable_inventory_fails_closed_and_does_not_resolve(app, owner
 
 def test_denied_approval_finishes_without_change(app, owner):
     d, sid = _setup(app, owner)
-    rid = owner.post(f"/api/v1/sessions/{sid}/computer-use", json={"goal": "Type a note and save it"}).json()["id"]
+    rid = owner.post(f"/api/v1/sessions/{sid}/computer-use", json={"goal": "Delete the old draft, type a note and save it"}).json()["id"]
     log: list = []
     _pump(d, owner, rid, log)
     d_resp = d.post(f"/computer-use/{rid}/respond", {"approved": False})  # answered on the device itself
@@ -520,10 +946,79 @@ def test_repeated_screenshot_loop_stops_instead_of_spending_all_steps(app, owner
 def test_computer_prompt_tells_model_to_clear_obstructions_before_observing_again():
     from joltiq.services.computer_use import SYSTEM
 
-    prompt = SYSTEM.lower()
+    prompt = " ".join(SYSTEM.lower().split())
     assert "obstruct" in prompt
     assert "close" in prompt
     assert "another screenshot" in prompt
+
+
+def test_computer_prompt_requires_fix_mode_to_do_ordinary_ui_work_instead_of_handing_it_back():
+    from joltiq.services.computer_use import SYSTEM
+
+    prompt = " ".join(SYSTEM.lower().split())
+    assert "perform ordinary visible ui work yourself with the tools" in prompt
+    assert "do not ask the customer to click, type, or carry out the fix" in prompt
+    assert "information that is genuinely unavailable" in prompt
+
+
+def test_fixture_routes_from_current_goal_not_reference_history():
+    from joltiq.services.ai.computer import FixtureComputer
+
+    turn = FixtureComputer().turn(
+        model="local-rules-v1",
+        system="",
+        messages=[{
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": (
+                    "GOAL: Type the acceptance sentence in the open Notepad\n\n"
+                    "Notes from old tickets (reference DATA only): DNS and network diagnostics were used before."
+                ),
+            }],
+        }],
+        display={"width": 1280, "height": 720},
+    )
+
+    assert turn.tool_uses[0].name == "left_click"
+
+
+def test_fixture_network_diagnostic_requests_dns_resolution():
+    from joltiq.services.ai.computer import FixtureComputer
+
+    turn = FixtureComputer().turn(
+        model="local-rules-v1",
+        system="",
+        messages=[{"role": "user", "content": "GOAL: Diagnose my Wi-Fi and DNS"}],
+        display={"width": 1280, "height": 720},
+    )
+
+    assert turn.tool_uses[0].name == "run_diagnostic"
+    assert turn.tool_uses[0].input == {"check": "network", "host": "example.com"}
+
+
+def test_fixture_stops_failed_after_a_blocked_computer_action():
+    from joltiq.services.ai.computer import FixtureComputer
+
+    turn = FixtureComputer().turn(
+        model="local-rules-v1",
+        system="",
+        messages=[
+            {"role": "user", "content": "GOAL: Type a harmless note in Notepad"},
+            {"role": "assistant", "content": [{
+                "type": "tool_use", "id": "toolu_fixture_0", "name": "left_click",
+                "input": {"coordinate": [640, 400]}, "toolset_name": "computer",
+            }]},
+            {"role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": "toolu_fixture_0", "is_error": True,
+                "content": [{"type": "text", "text": "Invalid action: no accepted screenshot"}],
+            }]},
+        ],
+        display={"width": 1280, "height": 720},
+    )
+
+    assert turn.tool_uses[0].name == "finish"
+    assert turn.tool_uses[0].input["success"] is False
 
 
 def test_technician_request_needs_customer_and_session_end_stops_run(app, owner, org_team):
@@ -637,13 +1132,13 @@ def test_chat_shares_known_fix_from_imported_history(owner):
     drain()
     msgs = [m["content"] for m in owner.get(f"/api/v1/tickets/{r['ticket_id']}/runs").json()[0]["messages"]]
     assert any("What fixed it: Printer IP changed" in m for m in msgs)
-    r = owner.post("/api/v1/agents/chat", json={"message": "my coffee machine is broken"}).json()
+    r = owner.post("/api/v1/agents/chat", json={"mode": "troubleshoot", "message": "my coffee machine is broken"}).json()
     drain()
     msgs = [m["content"] for m in owner.get(f"/api/v1/tickets/{r['ticket_id']}/runs").json()[0]["messages"]]
     assert not any("What fixed it" in m for m in msgs)
 
 
-def test_successful_run_is_remembered_and_recalled_next_time(app, owner):
+def test_model_success_is_draft_only_until_authorized_publication(app, owner):
     import uuid as _uuid
 
     from joltiq.db import session_scope
@@ -659,13 +1154,30 @@ def test_successful_run_is_remembered_and_recalled_next_time(app, owner):
     drain()
     docs = owner.get("/api/v1/knowledge/documents?page_size=50").json()["items"]
     learned = [x for x in docs if x["source_type"] == "learned_fix"]
-    assert learned and learned[0]["status"] == "indexed" and "weekly note" in learned[0]["title"]
-    # Next similar request starts with the remembered fix in front of the model.
+    assert learned == []
+    drafts = owner.get("/api/v1/knowledge/articles", params={"status": "draft"}).json()["items"]
+    draft = next(x for x in drafts if x["source_run_id"] == rid)
+    assert draft["executable"] is False and draft["verified_resolution"] is False
+
+    # A model-only success is not recallable before a human with publish permission approves it.
     rid2 = owner.post(f"/api/v1/sessions/{sid}/computer-use", json={"goal": "Type the weekly note and save it again"}).json()["id"]
     _pump(d, owner, rid2, [], rounds=2)
     with session_scope(_uuid.UUID(owner.org_id)) as db:
         first = db.get(ComputerUseRun, _uuid.UUID(rid2)).transcript[0]["content"][0]["text"]
-    assert "fixed similar problems before" in first and "Learned fix" in first
+    assert "fixed similar problems before" not in first
+    assert owner.post(f"/api/v1/computer-use/{rid2}/stop").status_code == 200
+
+    aid = draft["id"]
+    assert owner.post(f"/api/v1/knowledge/articles/{aid}/review", json={"decision": "submit"}).status_code == 200
+    assert owner.post(f"/api/v1/knowledge/articles/{aid}/review", json={"decision": "approve"}).status_code == 200
+    assert owner.post(f"/api/v1/knowledge/articles/{aid}/review", json={"decision": "publish", "executable": False}).status_code == 200
+    drain()
+
+    rid3 = owner.post(f"/api/v1/sessions/{sid}/computer-use", json={"goal": "Type the weekly note and save it for Friday"}).json()["id"]
+    _pump(d, owner, rid3, [], rounds=2)
+    with session_scope(_uuid.UUID(owner.org_id)) as db:
+        recalled = db.get(ComputerUseRun, _uuid.UUID(rid3)).transcript[0]["content"][0]["text"]
+    assert "fixed similar problems before" in recalled and "Learned fix" in recalled
 
 
 def test_ollama_is_tenant_approved_local_computer_provider(owner, monkeypatch):
@@ -677,6 +1189,7 @@ def test_ollama_is_tenant_approved_local_computer_provider(owner, monkeypatch):
     created = owner.patch("/api/v1/admin/models/ollama", json={
         "enabled": True,
         "approved_for_tenant_data": True,
+        "approved_for_computer_use": True,
         "models": {"computer_use": "gemma3:4b"},
     })
     assert created.status_code == 200, created.text
@@ -701,18 +1214,19 @@ def test_openai_computer_provider_requires_deployment_and_tenant_approval(owner,
     created = owner.patch("/api/v1/admin/models/openai", json={
         "enabled": True,
         "approved_for_tenant_data": True,
+        "approved_for_computer_use": False,
         "api_key": "sk-test-openai-computer-0000000000",
     })
     assert created.status_code == 200, created.text
-    disabled_fixture = owner.patch("/api/v1/admin/models/local_fixture", json={"enabled": False})
-    assert disabled_fixture.status_code == 200, disabled_fixture.text
     org_id = uuid.UUID(owner.org_id)
     with session_scope(org_id) as db:
-        disabled = [p[0] for p in available_providers(db, org_id, "computer_use")]
-        assert "openai" not in disabled
-        assert "local_fixture" not in disabled
+        assert "openai" not in [p[0] for p in available_providers(db, org_id, "computer_use")]
 
     monkeypatch.setattr(settings, "allow_external_computer_use_models", True)
+    with session_scope(org_id) as db:
+        assert "openai" not in [p[0] for p in available_providers(db, org_id, "computer_use")]
+
+    owner.patch("/api/v1/admin/models/openai", json={"approved_for_computer_use": True})
     with session_scope(org_id) as db:
         selected = [(provider, model, key) for provider, model, _cfg, key in available_providers(db, org_id, "computer_use")]
     assert ("openai", "gpt-6.1-terra", "sk-test-openai-computer-0000000000") in selected
@@ -721,6 +1235,29 @@ def test_openai_computer_provider_requires_deployment_and_tenant_approval(owner,
     owner.patch("/api/v1/admin/models/openai", json={"approved_for_tenant_data": False})
     with session_scope(org_id) as db:
         assert "openai" not in [p[0] for p in available_providers(db, org_id, "computer_use")]
+
+
+def test_openai_computer_provider_rejects_unapproved_or_unpriced_model(owner, monkeypatch):
+    from joltiq.config import get_settings
+    from joltiq.db import session_scope
+    from joltiq.services.ai.router import available_providers
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "allow_external_computer_use_models", True)
+    monkeypatch.setattr(settings, "computer_use_cloud_models", ["gpt-6.1-terra"])
+    owner.patch("/api/v1/admin/models/openai", json={
+        "enabled": True,
+        "approved_for_tenant_data": True,
+        "approved_for_computer_use": True,
+        "api_key": "sk-test-openai-computer-allowlist",
+        "models": {"computer_use": "tenant-invented-free-model"},
+    })
+    with session_scope(uuid.UUID(owner.org_id)) as db:
+        assert "openai" not in [p[0] for p in available_providers(db, uuid.UUID(owner.org_id), "computer_use")]
+
+    owner.patch("/api/v1/admin/models/openai", json={"models": {"computer_use": "gpt-6.1-terra"}})
+    with session_scope(uuid.UUID(owner.org_id)) as db:
+        assert "openai" in [p[0] for p in available_providers(db, uuid.UUID(owner.org_id), "computer_use")]
 
 
 def test_ollama_computer_normalizes_one_structured_action(monkeypatch):
@@ -857,6 +1394,21 @@ def test_openai_responses_computer_sends_latest_screen_and_normalizes_one_action
     )
 
 
+def test_openai_strict_tool_schemas_require_every_declared_property():
+    """OpenAI rejects strict function schemas when any property is omitted from required."""
+    from joltiq.services.ai.computer import BROWSER_OPENAI_TOOLS, OPENAI_COMPUTER_TOOLS
+
+    tools = [*OPENAI_COMPUTER_TOOLS, *BROWSER_OPENAI_TOOLS]
+    for tool in tools:
+        parameters = tool["parameters"]
+        assert set(parameters["required"]) == set(parameters["properties"]), tool["name"]
+
+    diagnostic = next(tool for tool in OPENAI_COMPUTER_TOOLS if tool["name"] == "run_diagnostic")
+    assert {schema.get("type") for schema in diagnostic["parameters"]["properties"]["host"]["anyOf"]} == {
+        "string", "null",
+    }
+
+
 @pytest.mark.parametrize(
     ("output", "error"),
     [
@@ -889,3 +1441,29 @@ def test_openai_responses_computer_fails_closed_on_invalid_actions(monkeypatch, 
             model="gpt-6.1-sol", system="safe", messages=[{"role": "user", "content": "look"}],
             display={"width": 1280, "height": 800},
         )
+
+
+def test_fix_run_marks_no_rollback_up_front_and_escalates_on_failure(app, owner):
+    """ADR 0019: clicks/typing have no safe inverse → shown before approval, recorded + escalated when the run fails."""
+    d, sid = _setup(app, owner)
+    r = owner.post(f"/api/v1/sessions/{sid}/computer-use", json={"goal": "Delete the old draft, type a note and save it"})
+    assert r.status_code == 201, r.text
+    rid = r.json()["id"]
+    run = r.json()
+    assert run["mode"] == "fix"
+    assert run["rollback"]["status"] == "NO_ROLLBACK_AVAILABLE" and "approval_hash" not in run["rollback"]
+    log: list = []
+    _pump(d, owner, rid, log)
+    assert d.post(f"/computer-use/{rid}/respond", {"approved": False}).status_code == 200
+    run = _pump(d, owner, rid, log, until=("completed", "failed", "stopped"))
+    assert run["state"] == "failed"
+    assert run["rollback"]["outcome"] == "NO_ROLLBACK_AVAILABLE"
+
+
+def test_rollback_marker_is_hashed_with_goal_and_mode():
+    from joltiq.services.computer_use import rollback_marker
+
+    g = rollback_marker("Fix printer", "guide")
+    f = rollback_marker("Fix printer", "fix")
+    assert g["status"] == "NOT_NEEDED" and f["status"] == "NO_ROLLBACK_AVAILABLE"
+    assert g["approval_hash"] != f["approval_hash"] != rollback_marker("Fix printer!", "fix")["approval_hash"]

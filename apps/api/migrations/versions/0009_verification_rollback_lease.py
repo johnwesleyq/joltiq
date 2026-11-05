@@ -1,14 +1,14 @@
-"""Add verification evidence seals, rollback plans, and browser lease epochs.
+"""Tamper-evident verification evidence, server-computed rollback steps, browser lease epoch.
 
-Revision ID: 0010
-Revises: 0009
+Revision ID: 0009
+Revises: 0008
 """
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
-revision = "0010"
-down_revision = "0009"
+revision = "0009"
+down_revision = "0008"
 branch_labels = None
 depends_on = None
 
@@ -16,7 +16,7 @@ depends_on = None
 def upgrade() -> None:
     op.add_column("verification_runs", sa.Column("kind", sa.String(20), nullable=False, server_default="verification"))
     op.add_column("verification_runs", sa.Column("evidence_hash", sa.String(64), nullable=True))
-    op.add_column("agent_plans", sa.Column("rollback_steps", JSONB, nullable=False, server_default=sa.text("'[]'::jsonb")))
+    op.add_column("agent_plans", sa.Column("rollback_steps", JSONB, nullable=False, server_default="[]"))
     op.add_column("support_sessions", sa.Column("lease_epoch", sa.Integer, nullable=False, server_default="0"))
 
 

@@ -70,13 +70,29 @@ def sniff(filename: str, data: bytes, max_mb: int | None = None) -> str:
 
 def _s3():
     s = get_settings()
-    if not s.s3_endpoint:
+    if s.storage_backend == "local":
         return None
     try:
         import boto3  # optional dependency, installed in the production image
-    except ImportError:  # pragma: no cover
-        return None
-    return boto3.client("s3", endpoint_url=s.s3_endpoint, aws_access_key_id=s.s3_access_key, aws_secret_access_key=s.s3_secret_key)
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("S3 storage is configured but boto3 is not installed") from exc
+    kwargs = {}
+    if s.s3_region:
+        kwargs["region_name"] = s.s3_region
+    if s.s3_endpoint:
+        kwargs["endpoint_url"] = s.s3_endpoint
+    # With no static pair, boto3 uses workload identity / instance roles / the normal AWS credential chain.
+    if s.s3_access_key and s.s3_secret_key:
+        kwargs["aws_access_key_id"] = s.s3_access_key
+        kwargs["aws_secret_access_key"] = s.s3_secret_key
+    return boto3.client("s3", **kwargs)
+
+
+def _encryption_args() -> dict[str, str]:
+    s = get_settings()
+    if s.s3_kms_key_id:
+        return {"ServerSideEncryption": "aws:kms", "SSEKMSKeyId": s.s3_kms_key_id}
+    return {"ServerSideEncryption": "AES256"}
 
 
 def put(org_id: uuid.UUID, category: str, filename: str, data: bytes) -> tuple[str, str]:
@@ -85,7 +101,7 @@ def put(org_id: uuid.UUID, category: str, filename: str, data: bytes) -> tuple[s
     key = f"{org_id}/{category}/{uuid.uuid4().hex}-{safe}"
     client = _s3()
     if client:
-        client.put_object(Bucket=get_settings().s3_bucket, Key=key, Body=data, ServerSideEncryption="AES256")
+        client.put_object(Bucket=get_settings().s3_bucket, Key=key, Body=data, **_encryption_args())
     else:
         p = Path(get_settings().local_storage_dir) / key
         p.parent.mkdir(parents=True, exist_ok=True)

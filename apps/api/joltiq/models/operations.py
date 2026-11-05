@@ -29,6 +29,7 @@ class Device(IdMixin, TimestampMixin, TenantMixin, Base):
     __tablename__ = "devices"
     customer_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("customers.id", ondelete="SET NULL"), nullable=True)
     owner_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    installation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     hostname: Mapped[str] = mapped_column(String(255))
     os_name: Mapped[str] = mapped_column(String(120), default="")
     os_version: Mapped[str] = mapped_column(String(120), default="")
@@ -141,10 +142,10 @@ class SupportSession(IdMixin, TimestampMixin, TenantMixin, Base):
     worker_session_ref: Mapped[str | None] = mapped_column(String(100), nullable=True)
     recording_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     emergency_stopped: Mapped[bool] = mapped_column(Boolean, default=False)
+    lease_epoch: Mapped[int] = mapped_column(Integer, default=0)  # bumped on every controller change; pushed to the worker
     terminated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     pause_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
     request_details: Mapped[dict] = mapped_column(JSONB, default=dict)
-    lease_epoch: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class SessionParticipant(IdMixin, TimestampMixin, TenantMixin, Base):
@@ -190,6 +191,7 @@ class ModelProviderConfig(IdMixin, TimestampMixin, TenantMixin, Base):
     provider: Mapped[str] = mapped_column(String(30))  # openai|anthropic|gemini|local_fixture
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     approved_for_tenant_data: Mapped[bool] = mapped_column(Boolean, default=False)
+    approved_for_computer_use: Mapped[bool] = mapped_column(Boolean, default=False)
     credential_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     models: Mapped[dict] = mapped_column(JSONB, default=dict)  # task -> model id
     input_cost_per_mtok: Mapped[float] = mapped_column(Float, default=0.0)
@@ -251,6 +253,18 @@ class AgentMessage(IdMixin, TimestampMixin, TenantMixin, Base):
     data: Mapped[dict] = mapped_column(JSONB, default=dict)  # citations etc
 
 
+class KnowledgeAnswerFeedback(IdMixin, TimestampMixin, TenantMixin, Base):
+    """A user's rating of one persisted assistant answer; never an execution signal."""
+
+    __tablename__ = "knowledge_answer_feedback"
+    __table_args__ = (UniqueConstraint("org_id", "message_id", "user_id"),)
+    run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("agent_runs.id", ondelete="CASCADE"), index=True)
+    message_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("agent_messages.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    helpful: Mapped[bool] = mapped_column(Boolean)
+    comment: Mapped[str] = mapped_column(Text, default="")
+
+
 class ModelCall(IdMixin, TimestampMixin, TenantMixin, Base):
     __tablename__ = "model_calls"
     run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=True, index=True)
@@ -281,7 +295,9 @@ class AgentPlan(IdMixin, TimestampMixin, TenantMixin, Base):
     )
     procedure_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     procedure_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Server-derived inverse steps (never model-proposed); covered by plan_hash, so approving the plan approves them.
     rollback_steps: Mapped[list] = mapped_column(JSONB, default=list)
+    # Up-front rollback marker (AVAILABLE | NOT_NEEDED | NO_ROLLBACK_AVAILABLE), folded into plan_hash (ADR 0019).
     rollback_availability: Mapped[dict] = mapped_column(JSONB, default=dict)
 
 
@@ -378,8 +394,8 @@ class VerificationRun(IdMixin, TimestampMixin, TenantMixin, Base):
     details: Mapped[list] = mapped_column(JSONB, default=list)  # per-postcondition result
     unintended_effects: Mapped[list] = mapped_column(JSONB, default=list)
     persistence_checked: Mapped[bool] = mapped_column(Boolean, default=False)
-    kind: Mapped[str] = mapped_column(String(20), default="verification")
-    evidence_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    kind: Mapped[str] = mapped_column(String(20), default="verification")  # verification|rollback
+    evidence_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)  # also written to the audit chain
 
 
 class VerificationEvidence(IdMixin, TimestampMixin, TenantMixin, Base):
@@ -448,9 +464,10 @@ class ComputerUseRun(IdMixin, TimestampMixin, TenantMixin, Base):
     display: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # {width, height} of screenshots the model sees
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     success: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Rollback marker fixed at request time (bound into the goal approval hash) + final outcome code (ADR 0019).
+    rollback: Mapped[dict] = mapped_column(JSONB, default=dict)
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    rollback: Mapped[dict] = mapped_column(JSONB, default=dict)
 
 
 class ComputerUseStep(IdMixin, TimestampMixin, TenantMixin, Base):

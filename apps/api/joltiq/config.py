@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -32,12 +34,9 @@ class Settings(BaseSettings):
     cookie_secure: bool = False
     cookie_domain: str | None = None
     web_origin: str = "http://localhost:3000"
-    # Explicit development-only endpoints for permanently labelled connector mocks.
-    slack_mock_base_url: str = ""
-    teams_mock_base_url: str = ""
+    slack_mock_base_url: str = ""  # DEV/MOCK Slack (ADR 0021); ignored in production
+    teams_mock_base_url: str = ""  # DEV/MOCK Teams (ADR 0022); ignored in production
     api_public_url: str = "http://localhost:8000"
-    oidc_allowed_issuer_hosts: list[str] = Field(default_factory=lambda: ["login.microsoftonline.com"])
-    oidc_http_timeout_seconds: float = 10.0
 
     # Workers
     browser_worker_url: str = "http://localhost:8100"
@@ -57,8 +56,10 @@ class Settings(BaseSettings):
 
     # AI providers (keys may also be configured per tenant in admin UI, encrypted)
     openai_api_key: str | None = None
+    # OpenAI-compatible endpoint (default: OpenAI). Deployment-owned, never tenant input. Tests/demos point it at a local mock.
     openai_base_url: str = "https://api.openai.com/v1"
-    # Development convenience only; production always ignores environment bootstrap.
+    # DEV ONLY: if JOLTIQ_OPENAI_API_KEY is set, auto-enable + approve OpenAI for the first organization so Ask works
+    # without visiting Admin → Models. Ignored in production.
     dev_bootstrap_openai_from_env: bool = True
     anthropic_api_key: str | None = None
     gemini_api_key: str | None = None
@@ -70,6 +71,8 @@ class Settings(BaseSettings):
     # Deployment-level opt-in for sending computer screenshots/task context to a tenant-approved external model.
     # Tenant provider enablement + approved_for_tenant_data are independently required.
     allow_external_computer_use_models: bool = False
+    # Production cloud computer-use models are deployment-owned and priced. A tenant may select only from this list.
+    computer_use_cloud_models: list[str] = Field(default_factory=lambda: ["gpt-6.1-terra", "gpt-6.1-sol"])
 
     # Research providers
     brave_search_api_key: str | None = None
@@ -80,11 +83,14 @@ class Settings(BaseSettings):
     stripe_webhook_secret: str | None = None
     stripe_live_mode_authorized: bool = False
 
-    # Storage (S3-compatible). Local filesystem fallback for dev.
+    # Storage. Production must use S3; local is an explicit development/test backend.
+    storage_backend: Literal["local", "s3"] = "local"
     s3_endpoint: str | None = None
     s3_bucket: str = "joltiq"
+    s3_region: str | None = None
     s3_access_key: str | None = None
     s3_secret_key: str | None = None
+    s3_kms_key_id: str | None = None
     local_storage_dir: str = "./.storage"
     max_upload_mb: int = 25
 
@@ -111,17 +117,61 @@ class Settings(BaseSettings):
     )
 
     def assert_production_safe(self) -> None:
-        if self.env == "production":
-            bad = [
-                n for n in ("secret_key", "approval_signing_key")
-                if getattr(self, n).startswith("dev-only")
-            ]
-            if bad or not self.encryption_key:
-                raise RuntimeError(f"Refusing to start in production with dev secrets: {bad or ['encryption_key']}")
-            if self.enable_local_fixture_providers:
-                raise RuntimeError("Local fixture providers must be disabled in production")
-            if not self.cookie_secure:
-                raise RuntimeError("cookie_secure must be true in production")
+        if self.env != "production":
+            return
+
+        problems: list[str] = []
+        for name in ("secret_key", "approval_signing_key"):
+            value = getattr(self, name)
+            if value.startswith("dev-only") or len(value) < 32:
+                problems.append(f"{name} must be a non-development secret of at least 32 characters")
+        if len(self.encryption_key) < 32:
+            problems.append("encryption_key must be configured")
+        if self.enable_local_fixture_providers:
+            problems.append("enable_local_fixture_providers must be false")
+        if not self.cookie_secure:
+            problems.append("cookie_secure must be true")
+
+        for name in ("web_origin", "api_public_url"):
+            parsed = urlsplit(getattr(self, name))
+            if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+                problems.append(f"{name} must be an HTTPS origin without embedded credentials")
+
+        local_hosts = {"localhost", "127.0.0.1", "::1", "host.docker.internal", "postgres", "redis"}
+        for name in ("database_url", "migration_database_url"):
+            parsed = urlsplit(getattr(self, name))
+            if not parsed.hostname or parsed.hostname.lower() in local_hosts:
+                problems.append(f"{name} must point to a non-local managed PostgreSQL service")
+        redis = urlsplit(self.redis_url)
+        if redis.scheme != "rediss" or not redis.hostname or redis.hostname.lower() in local_hosts:
+            problems.append("redis_url must use TLS (rediss://) and a non-local managed Redis service")
+
+        if len(self.browser_worker_token) < 32 or self.browser_worker_token.startswith("dev-"):
+            problems.append("browser_worker_token must be a random secret of at least 32 characters")
+        if not self.openai_api_key:
+            problems.append("openai_api_key is required for centrally managed JoltIQ AI")
+        openai_url = urlsplit(self.openai_base_url)
+        if openai_url.scheme != "https" or not openai_url.hostname:
+            problems.append("openai_base_url must use HTTPS")
+        if self.allow_external_computer_use_models:
+            if openai_url.hostname.lower() != "api.openai.com" or openai_url.port not in (None, 443) or openai_url.path.rstrip("/") != "/v1":
+                problems.append("openai_base_url must be the official https://api.openai.com/v1 origin for production computer use")
+            if not self.computer_use_cloud_models:
+                problems.append("computer_use_cloud_models must contain at least one priced production model")
+
+        if self.storage_backend != "s3":
+            problems.append("storage_backend must be s3")
+        if not self.s3_bucket.strip():
+            problems.append("s3_bucket must be configured")
+        if bool(self.s3_access_key) != bool(self.s3_secret_key):
+            problems.append("s3_access_key and s3_secret_key must be configured together")
+        if self.s3_endpoint:
+            endpoint = urlsplit(self.s3_endpoint)
+            if endpoint.scheme != "https" or not endpoint.hostname:
+                problems.append("s3_endpoint must use HTTPS in production")
+
+        if problems:
+            raise RuntimeError("Unsafe production configuration: " + "; ".join(problems))
 
 
 @lru_cache
