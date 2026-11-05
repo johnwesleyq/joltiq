@@ -261,10 +261,10 @@ def _customer_text(db, run) -> str:
     return "\n".join(dict.fromkeys([f"{t.subject}\n{t.description}", *msgs]))
 
 
-def _model(db, run, task, output, payload: dict, extra: str = "", images=None):
+def _model(db, run, task, output, payload: dict, extra: str = "", images=None, max_tokens: int = 2000):
     content = f"{extra}\n<untrusted>\n{MARK} {json.dumps(payload, default=str)}\n</untrusted>"
     obj, _ = ai.call(db, run.org_id, task, system=SYSTEM_BASE, messages=[{"role": "user", "content": content}], output=output,
-                     run_id=run.id, images=images)
+                     run_id=run.id, images=images, max_tokens=max_tokens)
     return obj
 
 
@@ -791,8 +791,43 @@ def h_plan(db, run):
              "checker can observe (browser_readback, device_service_running, device_process_responding, device_config_equals, http_ok). "
              "Never derive steps from external/forum evidence without vendor confirmation; never include commands or scripts. "
              "If no safe plan exists, set escalate_instead.")
-    plan = _model(db, run, "planning", S.ProposedPlan, payload, extra)
-    if plan.escalate_instead or not plan.steps:
+    plan = None
+    steps: list[dict] = []
+    validation_error = ""
+    # Give the model one correction pass with the validator's feedback before refusing the plan.
+    # Weaker/local models often omit a required param on the first attempt but fix it when told why.
+    for _attempt in range(2):
+        feedback = (f"\nYour previous plan was REJECTED by the validator: {validation_error}. "
+                    "Re-read the action_registry entry for every action you use and supply every required parameter "
+                    "with the exact names and types shown. Propose the corrected plan.") if validation_error else ""
+        plan = _model(db, run, "planning", S.ProposedPlan, payload, extra + feedback, max_tokens=8192)
+        if plan.escalate_instead or not plan.steps:
+            break
+        validation_error = ""
+        steps = []
+        for st in plan.steps:
+            try:
+                # The model cannot set risk or skip postconditions.
+                if st.action in ACTIONS and ACTIONS[st.action].computer_use:
+                    raise ActionValidationError(f"{st.action} is a computer-use primitive and cannot be planned")
+                params = validate_params(st.action, st.params)
+            except ActionValidationError as e:
+                validation_error = str(e)
+                break
+            proposed_pcs = [pc.model_dump() for pc in st.postconditions if pc.type in verification.SUPPORTED]
+            pcs = postconditions_for_step(st.action, params, proposed_pcs)
+            steps.append({"action": st.action, "params": params, "rationale": st.rationale, "postconditions": pcs})
+        if validation_error:
+            continue
+        if not any(s["postconditions"] for s in steps):
+            validation_error = ""
+            _escalate(db, run, "Plan has no independently verifiable outcome; refusing to run unverifiable changes")
+            return
+        break
+    if validation_error:
+        _escalate(db, run, f"Model proposed an invalid action ({validation_error}); refusing plan")
+        return
+    if plan is not None and (plan.escalate_instead or not plan.steps):
         if ctx.get("failures"):
             _escalate(
                 db,
@@ -807,22 +842,6 @@ def h_plan(db, run):
         else:
             _say(db, run, f"I couldn't find a safe, verified fix to apply automatically. {plan.escalation_reason or ''}".strip())
         _escalate(db, run, plan.escalation_reason or "No safe plan")
-        return
-    # Validate every step against the registry. The model cannot set risk or skip postconditions.
-    steps: list[dict] = []
-    for st in plan.steps:
-        try:
-            if st.action in ACTIONS and ACTIONS[st.action].computer_use:
-                raise ActionValidationError(f"{st.action} is a computer-use primitive and cannot be planned")
-            params = validate_params(st.action, st.params)
-        except ActionValidationError as e:
-            _escalate(db, run, f"Model proposed an invalid action ({e}); refusing plan")
-            return
-        proposed_pcs = [pc.model_dump() for pc in st.postconditions if pc.type in verification.SUPPORTED]
-        pcs = postconditions_for_step(st.action, params, proposed_pcs)
-        steps.append({"action": st.action, "params": params, "rationale": st.rationale, "postconditions": pcs})
-    if not any(s["postconditions"] for s in steps):
-        _escalate(db, run, "Plan has no independently verifiable outcome; refusing to run unverifiable changes")
         return
     base_hash = sha256_hex(canonical_json([{"a": s["action"], "p": s["params"]} for s in steps]))
     # Ensure the needed live session exists and is consented.

@@ -205,11 +205,89 @@ class GeminiProvider:
                            int((time.perf_counter() - t0) * 1000))
 
 
+class OllamaProvider:
+    """Local Ollama gateway (native /api/chat). No API key; reached over the configured base URL.
+
+    Structured output uses Ollama's `format` parameter, which accepts a JSON schema and constrains
+    the model's response to it. Token counts come from prompt_eval_count / eval_count.
+    """
+    name = "ollama"
+    live = True
+
+    def __init__(self, base_url: str, timeout: int = 60):
+        self.base_url, self.timeout = base_url.rstrip("/"), timeout
+
+    def complete(self, *, model: str, system: str, messages: list[dict], schema: dict | None = None,
+                 schema_name: str = "result", max_tokens: int = 2000, images: list[str] | None = None) -> ModelResult:
+        msgs: list[dict[str, Any]] = [{"role": "system", "content": system}]
+        for m in messages:
+            role = m["role"] if m["role"] in ("user", "assistant") else "user"
+            msgs.append({"role": role, "content": m["content"]})
+        if images:
+            encoded = []
+            for u in images:
+                if u.startswith("data:"):
+                    encoded.append(u.split(";base64,", 1)[1])
+                else:
+                    encoded.append(u)
+            msgs[-1]["images"] = encoded
+        body: dict[str, Any] = {"model": model, "messages": msgs, "stream": False,
+                                "options": {"num_predict": max_tokens, "temperature": 0}}
+        if schema:
+            # Use Ollama's JSON mode rather than full JSON-Schema grammars: cloud-hosted models
+            # (e.g. *-cloud) ignore schema constraints but honor JSON mode, and local models produce
+            # the same shapes either way. The schema is injected into the system prompt instead;
+            # downstream Pydantic validation still enforces it strictly.
+            body["format"] = "json"
+            msgs[0] = {"role": "system", "content": system +
+                       "\n\nYou must respond with a single valid JSON object conforming to this JSON Schema. "
+                       "No prose, markdown, or code fences — JSON only.\n" + json.dumps(schema)}
+        t0 = time.perf_counter()
+        try:
+            r = httpx.post(f"{self.base_url}/api/chat", json=body, timeout=self.timeout)
+        except httpx.HTTPError as e:
+            raise ProviderError(f"ollama transport error: {type(e).__name__}") from e
+        if r.status_code >= 400:
+            raise ProviderError(f"ollama HTTP {r.status_code}: {r.text[:300]}", retryable=r.status_code in (408, 429, 500, 502, 503, 504))
+        j = r.json()
+        text = (j.get("message") or {}).get("content") or ""
+        data = None
+        if schema and text:
+            candidate = text.strip()
+            # Strip markdown code fences on either end — models frequently wrap JSON despite instructions.
+            if candidate.startswith("```"):
+                candidate = candidate.split("\n", 1)[1] if "\n" in candidate else candidate
+            if candidate.rstrip().endswith("```"):
+                candidate = candidate.rstrip()[:-3]
+            candidate = candidate.strip()
+            try:
+                data = json.loads(candidate)
+            except json.JSONDecodeError:
+                # Fall back to extracting the outermost JSON object when prose surrounds it.
+                start, end = candidate.find("{"), candidate.rfind("}")
+                if start != -1 and end > start:
+                    try:
+                        data = json.loads(candidate[start:end + 1])
+                    except json.JSONDecodeError:
+                        data = None
+                if data is None:
+                    raise ProviderError(
+                        f"ollama returned non-JSON content: head={text[:150]!r} tail={text[-150:]!r}",
+                        retryable=False) from None
+        return ModelResult(text, data, j.get("prompt_eval_count", 0), j.get("eval_count", 0), j.get("model", model),
+                           self.name, True, int((time.perf_counter() - t0) * 1000))
+
+
 def build(provider: str, key: str | None, timeout: int = 60):
     if provider == "local_fixture":
         from .fixture import LocalFixtureProvider
 
         return LocalFixtureProvider()
+    if provider == "ollama":
+        base = get_settings().ollama_base_url
+        if not base:
+            return None
+        return OllamaProvider(base, timeout=timeout)
     if not key:
         return None
     return {"openai": OpenAIProvider, "anthropic": AnthropicProvider, "gemini": GeminiProvider}[provider](key, timeout=timeout)
