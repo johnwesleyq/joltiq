@@ -2086,7 +2086,10 @@ def _post_resolution(db: Session, payload: dict) -> None:
         return
     t = _ticket(db, run)
     kb.index_ticket(db, t)
-    plan = db.get(AgentPlan, uuid.UUID(run.context["current_plan_id"]))
+    plan_id = (run.context or {}).get("current_plan_id")
+    if not plan_id:
+        return  # resolved without an executed plan (e.g. guidance-only); nothing to draft from
+    plan = db.get(AgentPlan, uuid.UUID(plan_id))
     if plan is None:
         return
     steps = db.execute(select(PlanStep).where(PlanStep.plan_id == plan.id).order_by(PlanStep.ordinal)).scalars().all()
